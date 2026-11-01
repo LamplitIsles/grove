@@ -2,12 +2,11 @@ import sharp from "sharp";
 import { expect, test } from "@playwright/test";
 const origin = "http://127.0.0.1:14320";
 const design = "http://127.0.0.1:14319";
-const shots = "../.scratch/flickgrove-time";
 test.use({ timezoneId: "Asia/Shanghai", serviceWorkers: "block" });
 for (const width of [1440, 390]) {
   test(`${width} times survive history reload, report expansion and pending confirmation`, async ({
     page,
-  }) => {
+  }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -46,6 +45,8 @@ for (const width of [1440, 390]) {
       })
     ).json();
     await page.goto(origin);
+    if (width === 390)
+      await page.getByRole("button", { name: "Toggle Sidebar" }).click();
     await page
       .getByRole("button", { name: "Open Message time Orc", exact: true })
       .click();
@@ -64,7 +65,9 @@ for (const width of [1440, 390]) {
     await expect(row("today-answer").locator("time")).toHaveText(
       /^\d{2}:\d{2}$/,
     );
-    await page.screenshot({ path: `${shots}/${width}-history.png` });
+    await page.screenshot({
+      path: testInfo.outputPath(`${width}-history.png`),
+    });
     await page.reload();
     await expect(row("old-user").locator("time")).toHaveText(oldLabel!);
     await expect(row("old-answer").locator("time")).toHaveCount(0);
@@ -98,7 +101,9 @@ for (const width of [1440, 390]) {
           .evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight),
       )
       .toBeLessThanOrEqual(1);
-    await page.screenshot({ path: `${shots}/${width}-report-folded.png` });
+    await page.screenshot({
+      path: testInfo.outputPath(`${width}-report-folded.png`),
+    });
     await report.locator("summary").click();
     await expect(report.locator(".report-content")).toBeVisible();
     await expect(report.locator("time")).toHaveAttribute(
@@ -112,7 +117,9 @@ for (const width of [1440, 390]) {
           .evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight),
       )
       .toBeLessThanOrEqual(1);
-    await page.screenshot({ path: `${shots}/${width}-report-expanded.png` });
+    await page.screenshot({
+      path: testInfo.outputPath(`${width}-report-expanded.png`),
+    });
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
@@ -164,7 +171,9 @@ for (const width of [1440, 390]) {
       el.closest("[data-message-id]")!.getAttribute("data-message-id"),
     );
     const pendingTime = await pending.locator("time").getAttribute("datetime");
-    await page.screenshot({ path: `${shots}/${width}-pending.png` });
+    await page.screenshot({
+      path: testInfo.outputPath(`${width}-pending.png`),
+    });
     await page.request.post(design + "/fixture/change", {
       data: { sendMode: "accepted" },
     });
@@ -192,7 +201,53 @@ for (const width of [1440, 390]) {
       "datetime",
       confirmedTime!,
     );
-    await page.screenshot({ path: `${shots}/${width}-confirmed.png` });
+    await page.screenshot({
+      path: testInfo.outputPath(`${width}-confirmed.png`),
+    });
     expect(errors).toEqual([]);
   });
 }
+
+test("image messages keep time and copy below the attachment", async ({
+  page,
+}) => {
+  await page.request.post(design + "/fixture/reset", {
+    data: { mode: "long" },
+  });
+  await page.goto(design);
+  await page.request.post(design + "/fixture/change", {
+    data: { sendMode: "held" },
+  });
+  await page.getByLabel("Choose message images").setInputFiles({
+    name: "footer-image.png",
+    mimeType: "image/png",
+    buffer: await sharp({
+      create: { width: 300, height: 120, channels: 3, background: "#406f91" },
+    })
+      .png()
+      .toBuffer(),
+  });
+  await expect(page.locator(".image-draft")).toHaveCount(1);
+  const input = page.getByRole("textbox", { name: "Message Orc", exact: true });
+  await input.fill("Image and text");
+  await input.press("Enter");
+  const message = page
+    .locator(".user-message")
+    .filter({ hasText: "Image and text" });
+  const attachment = message.locator(".message-image");
+  const footer = message.locator(".message-actions");
+  await expect(attachment).toBeVisible();
+  await expect(footer.locator("time")).toHaveCount(1);
+  await expect(
+    footer.getByRole("button", { name: "Copy message" }),
+  ).toHaveCount(1);
+  const layout = await message.evaluate((element) => ({
+    imageBottom: element
+      .querySelector(".message-image")!
+      .getBoundingClientRect().bottom,
+    footerTop: element
+      .querySelector(".message-actions")!
+      .getBoundingClientRect().top,
+  }));
+  expect(layout.footerTop).toBeGreaterThanOrEqual(layout.imageBottom);
+});

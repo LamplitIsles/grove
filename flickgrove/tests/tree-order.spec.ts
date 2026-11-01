@@ -20,8 +20,10 @@ const order = (page: Page) =>
 test("desktop drags whole trees, preserves selection/draft, restores order and applies it to keyboard/mobile/new/close", async ({
   page,
   request,
-}) => {
-  await request.post(origin + "/fixture/reset", { data: { mode: "dense" } });
+}, testInfo) => {
+  await request.post(origin + "/fixture/reset", {
+    data: { mode: "dense-idle" },
+  });
   await page.goto(origin);
   await expect(page.locator(".agent-detail h1")).toHaveText(
     "Streaming voice input",
@@ -88,7 +90,7 @@ test("desktop drags whole trees, preserves selection/draft, restores order and a
     "Reader performance",
   );
   await page.screenshot({
-    path: "../.scratch/flickgrove-host-shortcuts/desktop-tree-order.png",
+    path: testInfo.outputPath("desktop-tree-order.png"),
   });
   // Same-position drop and a cancelled drag never rewrite the order.
   const before = await order(page);
@@ -134,7 +136,7 @@ test("desktop drags whole trees, preserves selection/draft, restores order and a
     row.getByRole("button", { name: "Close this tree", exact: true }),
   ).toBeVisible();
   await page.screenshot({
-    path: "../.scratch/flickgrove-host-shortcuts/mobile-tree-swipe.png",
+    path: testInfo.outputPath("mobile-tree-swipe.png"),
   });
   await row
     .getByRole("button", { name: "Close this tree", exact: true })

@@ -3,6 +3,7 @@
 ## Product interface
 
 - Prioritize mouse and touch flows. Keyboard additions solely for accessibility have the lowest priority: keep primitive defaults minimal and expand only when explicitly requested, without adding visible controls, custom navigation or dedicated test matrices.
+- Reserve Tab and Shift+Tab for application actions, not focus traversal. Keep existing explicit Tab actions and browser/system shortcuts; do not add Tab navigation.
 
 - Show information that helps the user make a decision or complete a task. Keep low-value implementation and background-maintenance details out of ordinary product flows unless the user explicitly requests them.
 - Weekly quota displays the latest successfully retrieved value. Refresh requests a new value; if it fails, retain the previous value. Show unknown only when no value has been obtained. Do not add cached/stale badges, freshness timestamps, or background-refresh status copy.

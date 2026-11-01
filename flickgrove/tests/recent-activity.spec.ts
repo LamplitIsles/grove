@@ -41,7 +41,7 @@ for (const width of [1440, 390])
     ]);
     await choose(page, "1w");
     await expect(recent(page)).toHaveCount(4);
-    await expect(tree(page)).toHaveCount(5);
+    await expect(tree(page)).toHaveCount(1);
     await expect(
       page.getByRole("option", { name: "1w", exact: true }),
     ).toHaveCount(0);
@@ -86,11 +86,11 @@ test("time expiry preserves detail and keyboard navigation, with shortcut close"
   await page.keyboard.press("Escape");
   await page.keyboard.press("Alt+KeyJ");
   await expect(page.locator(".agent-detail h1")).toBeVisible();
-  await tree(page).filter({ hasText: "Earlier this week" }).click();
+  await recent(page).filter({ hasText: "Earlier this week" }).click();
   await page.keyboard.press("Alt+KeyX");
-  await expect(tree(page).filter({ hasText: "Earlier this week" })).toHaveCount(
-    0,
-  );
+  await expect(
+    recent(page).filter({ hasText: "Earlier this week" }),
+  ).toHaveCount(0);
 });
 
 test("failed optional storage retains the current selection", async ({

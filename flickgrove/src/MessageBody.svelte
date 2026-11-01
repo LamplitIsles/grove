@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, type Snippet } from "svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import { reading } from "./api";
   import * as m from "./paraglide/messages";
   import Markdown from "./Markdown.svelte";
   import CopyButton from "./CopyButton.svelte";
-  let { text, bodyRef, agentId, readPath, expand = false, fileAgentId = agentId, copyMessage = false }: { text: string; bodyRef?: string; agentId: string; readPath?: string; expand?: boolean; fileAgentId?: string; copyMessage?: boolean } = $props();
+  import MessageTime from "./MessageTime.svelte";
+  let { text, bodyRef, agentId, readPath, expand = false, fileAgentId = agentId, copyMessage = false, at, children }: { text: string; bodyRef?: string; agentId: string; readPath?: string; expand?: boolean; fileAgentId?: string; copyMessage?: boolean; at?: number; children?: Snippet } = $props();
   let body = $state<string>();
   let loading = $state(false), error = $state("");
   const abort = new AbortController();
@@ -22,5 +23,9 @@
   $effect(() => { if (expand && bodyRef) void load(); });
   onMount(() => () => abort.abort());
 </script>
-{#if !bodyRef || body !== undefined}<Markdown text={body ?? text} agentId={fileAgentId} />{#if copyMessage && (body ?? text)}<CopyButton text={body ?? text} label={m.copy_message()} class="copy-message" />{/if}
+<div class="message-content">
+{#if !bodyRef || body !== undefined}<Markdown text={body ?? text} agentId={fileAgentId} />
 {:else}<div class="message-body">{#if error}<p class="inline-error" role="alert">{error}</p>{/if}<Button variant="ghost" size="sm" disabled={loading} onclick={load}>{loading ? m.loading_message() : error ? m.retry() : m.read_full_message()}</Button></div>{/if}
+{@render children?.()}
+</div>
+{#if at !== undefined || copyMessage}<div class="message-actions">{#if at !== undefined}<MessageTime {at} />{/if}{#if copyMessage && (!bodyRef || body !== undefined) && (body ?? text)}<CopyButton text={body ?? text} label={m.copy_message()} size="icon-xs" class="copy-message" />{/if}</div>{/if}

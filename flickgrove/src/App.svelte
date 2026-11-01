@@ -54,7 +54,7 @@
   let detail = $state<Detail | null>(null); let skills = $state<Skill[]>([]);
   let projects = $state<Project[]>([]); let projectsLoading = $state(true); let models = $state<Model[]>(preferences.models);
   let connected = $state(false); let loading = $state(true); let error = $state("");
-  let now = $state(Date.now()); let sessionList: { visibleIds(): string[]; openVisible(id: string): void; switchVisible(event: KeyboardEvent): void; keydown(event: KeyboardEvent): Promise<void>; expandFocused(): void; reveal(id: string): Promise<void>; closeTarget(): string | null };
+  let now = $state(Date.now()); let sessionList: { visibleIds(): string[]; openVisible(id: string): void; switchVisible(event: KeyboardEvent): void; keydown(event: KeyboardEvent): Promise<void>; expandFocused(): void; reveal(id: string): Promise<void>; closeTarget(): string | null; selectAgentOrg(agent: Agent): void };
   let projectSearch = $state<HTMLInputElement | null>(null); let modalOpen = $state(false); let modal = $state<"new" | "settings" | "keys" | "abandon-close" | null>(null);
   let search = $state(""); let projectId = $state(""); let projectHighlight=$state(""); let projectError=$state(""); let saving = $state(false);
   const projectListId=$props.id();
@@ -268,7 +268,7 @@
   }
   async function create() {
     if (!projectId || saving || !connected) return; saving = true;
-    try { const agent = await api<Agent>("/agents", { project: projectReference(projects.find(p=>projectReference(p)===projectId)!), settings: await creationSettings() }); await closeModal(); adopt(await api<Snapshot>("/snapshot")); focusCreatedId = agent.id; open(agent.id); await sessionList?.reveal(agent.id); }
+    try { const agent = await api<Agent>("/agents", { project: projectReference(projects.find(p=>projectReference(p)===projectId)!), settings: await creationSettings() }); await closeModal(); adopt(await api<Snapshot>("/snapshot")); sessionList?.selectAgentOrg(agent); focusCreatedId = agent.id; open(agent.id); await sessionList?.reveal(agent.id); }
     catch (e) { error = e instanceof Error ? e.message : m.load_failure(); }
     finally { saving = false; }
   }
@@ -583,11 +583,11 @@
     window.addEventListener("compositionend", compositionEnd);
     const timer = setInterval(() => now = Date.now(), 1000);
     const permission = () => { if ("Notification" in window && Notification.permission === "default") void Notification.requestPermission().catch(() => {}); };
-    const completionTab = (e: KeyboardEvent) => { if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey && e.target !== document.body && !(e.target instanceof HTMLElement && e.target.closest('[data-sidebar="sidebar"], [data-sidebar="trigger"], [role=menu], .question-panel, .history-controls, [data-choice-layer], [data-slot=select-content], [data-slot=select-trigger], [data-choice-trigger]'))) e.preventDefault(); };
-    window.addEventListener("keydown", completionTab, true);
+    const reserveTab = (e: KeyboardEvent) => { if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing && e.keyCode !== 229) e.preventDefault(); };
+    window.addEventListener("keydown", reserveTab, true);
     const installer = (e: Event) => { e.preventDefault(); install = e as Event & { prompt: () => Promise<void> }; };
     window.addEventListener("pointerdown", permission, { once: true }); window.addEventListener("keydown", permission, { once: true }); window.addEventListener("keydown", keydown); window.addEventListener("beforeinstallprompt", installer);
-    return () => { window.removeEventListener("compositionstart", compositionStart); window.removeEventListener("compositionend", compositionEnd); media.removeEventListener("change", resize); cleanupNavigation(); window.removeEventListener("keydown", completionTab, true); disposed = true; client?.close(); setClient(undefined); clearInterval(timer);window.removeEventListener("pointerdown", permission); window.removeEventListener("keydown", permission); window.removeEventListener("keydown", keydown); window.removeEventListener("beforeinstallprompt", installer); };
+    return () => { window.removeEventListener("compositionstart", compositionStart); window.removeEventListener("compositionend", compositionEnd); media.removeEventListener("change", resize); cleanupNavigation(); window.removeEventListener("keydown", reserveTab, true); disposed = true; client?.close(); setClient(undefined); clearInterval(timer);window.removeEventListener("pointerdown", permission); window.removeEventListener("keydown", permission); window.removeEventListener("keydown", keydown); window.removeEventListener("beforeinstallprompt", installer); };
   });
 </script>
 

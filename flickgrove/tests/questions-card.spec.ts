@@ -7,10 +7,6 @@ import {
 } from "@playwright/test";
 import sharp from "sharp";
 const origin = "http://127.0.0.1:14319";
-const shots = new URL(
-  "../../.scratch/questions-panel-readiness/screenshots",
-  import.meta.url,
-).pathname;
 const panel = (page: Page) => page.locator(".question-panel");
 const composer = (page: Page) =>
   page.getByRole("textbox", { name: "Message Orc", exact: true });
@@ -22,7 +18,9 @@ async function start(page: Page, request: APIRequestContext, width = 1440) {
   await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
   await page.goto(origin);
   await openSidebar(page);
-  if (width === 390) await page.locator(".session-open").first().click();
+  await page
+    .getByRole("button", { name: "Open Streaming voice input Orc" })
+    .click();
   await expect(composer(page)).toBeVisible();
 }
 async function inputs(request: APIRequestContext) {
@@ -46,7 +44,7 @@ for (const width of [1440, 390]) {
   test(`card batch keyboard, queue, drafts and readonly restoration ${width}`, async ({
     page,
     request,
-  }) => {
+  }, testInfo) => {
     await start(page, request, width);
     await composer(page).fill("ordinary $grove-research draft");
     const image = await sharp({
@@ -110,7 +108,9 @@ for (const width of [1440, 390]) {
       await page
         .getByRole("button", { name: "‹ Sessions", exact: true })
         .click();
-      await page.locator(".session-open").first().click();
+      await page
+        .getByRole("button", { name: "Open Streaming voice input Orc" })
+        .click();
     } else {
       await page.reload();
     }
@@ -147,7 +147,9 @@ for (const width of [1440, 390]) {
     await expect(
       panel(page).getByRole("button", { name: "Send all answers" }),
     ).not.toBeVisible();
-    await page.screenshot({ path: `${shots}/${width}-readonly.png` });
+    await page.screenshot({
+      path: testInfo.outputPath(`${width}-readonly.png`),
+    });
     await question(request, "during-review");
     await expect(panel(page).locator(".recorded-answer")).toContainText(
       "First answer",
@@ -175,12 +177,14 @@ for (const width of [1440, 390]) {
     await page.keyboard.press("Escape");
     await expect(panel(page)).not.toBeVisible();
     await expect(composer(page)).toHaveValue("ordinary $grove-research draft");
-    await page.screenshot({ path: `${shots}/${width}-collapsed.png` });
+    await page.screenshot({
+      path: testInfo.outputPath(`${width}-collapsed.png`),
+    });
   });
   test(`loading retry long options, single choice and Enter validation ${width}`, async ({
     page,
     request,
-  }) => {
+  }, testInfo) => {
     await start(page, request, width);
     let fail = true;
     const gate = Promise.withResolvers<void>();
@@ -203,12 +207,14 @@ for (const width of [1440, 390]) {
     await expect(panel(page).getByRole("status")).toContainText(
       "Loading questions",
     );
-    await page.screenshot({ path: `${shots}/${width}-loading.png` });
+    await page.screenshot({
+      path: testInfo.outputPath(`${width}-loading.png`),
+    });
     gate.resolve();
     await expect(panel(page).getByRole("alert")).toContainText(
       "Owned question read failure",
     );
-    await page.screenshot({ path: `${shots}/${width}-failed.png` });
+    await page.screenshot({ path: testInfo.outputPath(`${width}-failed.png`) });
     fail = false;
     await panel(page)
       .getByRole("button", { name: "Retry", exact: true })
@@ -234,8 +240,8 @@ for (const width of [1440, 390]) {
     // Unmarked first option must not be selected implicitly.
     await panel(page).locator(".question-option").first().focus();
     await panel(page).locator(".question-option").first().press("Tab");
-    await expect(panel(page).locator(".question-option").last()).toBeFocused();
-    await panel(page).locator(".question-option").last().press("Shift+Tab");
+    await expect(panel(page).locator(".question-option").first()).toBeFocused();
+    await panel(page).locator(".question-option").first().press("Shift+Tab");
     await expect(panel(page).locator(".question-option").first()).toBeFocused();
     await panel(page).locator(".question-option").first().press("Enter");
     expect((await inputs(request)).length).toBe(before);
@@ -248,7 +254,9 @@ for (const width of [1440, 390]) {
     ).toBeVisible();
     await panel(page).locator(".question-option").last().click();
     expect((await inputs(request)).length).toBe(before);
-    await page.screenshot({ path: `${shots}/${width}-long-options.png` });
+    await page.screenshot({
+      path: testInfo.outputPath(`${width}-long-options.png`),
+    });
     const footer = await panel(page).locator(".question-footer").boundingBox();
     expect(footer!.y + footer!.height).toBeLessThan(width === 390 ? 844 : 900);
     expect(
@@ -409,6 +417,9 @@ test("a new browser freezes an unresolved answer outside the delivery window fro
   try {
     const observer = await context.newPage();
     await observer.goto(origin);
+    await observer
+      .getByRole("button", { name: "Open Streaming voice input Orc" })
+      .click();
     await expect(panel(observer).locator(".answer-batch")).toHaveAttribute(
       "data-operation-id",
       operation!,

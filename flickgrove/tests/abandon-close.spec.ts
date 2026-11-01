@@ -668,7 +668,7 @@ test.describe("touch unknown close", () => {
   });
 });
 
-test("AltX unknown refusal preserves folded org and never replays", async ({
+test("AltX unknown refusal preserves selection and never replays", async ({
   page,
   request,
 }) => {
@@ -678,11 +678,8 @@ test("AltX unknown refusal preserves folded org and never replays", async ({
   ).json();
   const before = await (await request.get(origin + "/fixture/info")).json();
   await page.goto(origin);
-  const row = page.locator(
-    `.session-open[data-location="tree"][data-agent-id="${target}"]`,
-  );
+  const row = page.locator(`.session-open[data-agent-id="${target}"]`);
   await row.click();
-  await page.locator(".org-disclosure").click();
   const input = page.getByRole("textbox", { name: "Message Orc", exact: true });
   await input.fill("Unknown close keeps this draft");
   await input.evaluate((el: HTMLTextAreaElement) => el.setSelectionRange(2, 7));
@@ -696,12 +693,8 @@ test("AltX unknown refusal preserves folded org and never replays", async ({
     page.getByRole("heading", { name: action, exact: true }),
   ).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.locator(".org-disclosure")).toHaveAttribute(
-    "aria-expanded",
-    "false",
-  );
   await expect(page.locator('.session-open[aria-current="true"]')).toHaveCount(
-    0,
+    1,
   );
   await expect(input).toHaveValue("Unknown close keeps this draft");
   expect(

@@ -29,7 +29,7 @@
 <Popover.Root bind:open>
   <Popover.Trigger bind:ref={trigger}>
     {#snippet child({props})}
-      <Button {...props} data-choice-trigger tabindex={0} variant="outline" class="w-full min-w-0 justify-between font-normal text-foreground" role="combobox" aria-label={label} aria-expanded={open} aria-controls={open?listId:undefined} aria-haspopup="listbox" aria-busy={loading} disabled={disabled || !choices.length} title={selected?.name ?? fallback} onkeydown={event=>{if(event.key==="ArrowDown"&&!disabled&&choices.length){event.preventDefault();open=true;}}}>
+      <Button {...props} data-choice-trigger variant="outline" class="w-full min-w-0 justify-between font-normal text-foreground" role="combobox" aria-label={label} aria-expanded={open} aria-controls={open?listId:undefined} aria-haspopup="listbox" aria-busy={loading} disabled={disabled || !choices.length} title={selected?.name ?? fallback} onkeydown={event=>{if(event.key==="ArrowDown"&&!disabled&&choices.length){event.preventDefault();open=true;}}}>
         <span class="min-w-0 truncate">{loading&&!choices.length ? "Loading models…" : selected?.name ?? fallback}</span><ChevronDown class="size-4 shrink-0 text-muted-foreground" />
       </Button>
     {/snippet}

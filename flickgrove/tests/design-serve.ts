@@ -51,6 +51,7 @@ const orgProjects = [
   { alias: "local", name: "Local", path: join(directory, "local") },
 ];
 let orgFixture = false;
+let orgLongFixture = false;
 let activityFixture = false;
 let projectsDelay = 0;
 let projectsFailure = false;
@@ -93,7 +94,9 @@ function unit(
           orgProjects.map((p, i) => ({
             ...p,
             remote: [
-              "https://github.com/GuionAI/one",
+              orgLongFixture
+                ? "https://github.com/a-very-long-organization-name-for-the-sidebar-layout-check/one"
+                : "https://github.com/GuionAI/one",
               "ssh://git@forge.example/lamplitisles/two",
               "git@forge.example:guionai/three",
               "https://github.com/Personal/four",
@@ -396,7 +399,10 @@ async function reset(mode = "working") {
     unit.app.dispose();
   }
   units = [];
-  orgFixture = ["org-groups", "org-groups-idle"].includes(mode);
+  orgFixture = ["org-groups", "org-groups-idle", "org-groups-long"].includes(
+    mode,
+  );
+  orgLongFixture = mode === "org-groups-long";
   activityFixture = mode === "activity";
   projectsDelay = 0;
   projectsFailure = false;
@@ -494,7 +500,7 @@ async function reset(mode = "working") {
                 },
               ]
             : []),
-          ...(mode === "dense"
+          ...(["dense", "dense-idle"].includes(mode)
             ? Array.from({ length: 18 }, (_, i) =>
                 agent(`extra-${i}`, "orc", `Additional task ${i + 1}`, 0),
               )
@@ -510,7 +516,9 @@ async function reset(mode = "working") {
                 agent(
                   "docs",
                   "worker",
-                  ["dense", "branches", "org-groups"].includes(mode)
+                  ["dense", "dense-idle", "branches", "org-groups"].includes(
+                    mode,
+                  )
                     ? "Documentation for a very long Worker assignment covering mobile navigation and persistent conversation drafts across hosts"
                     : "Documentation",
                   1,
@@ -526,6 +534,7 @@ async function reset(mode = "working") {
     ![
       "empty",
       "idle",
+      "dense-idle",
       "org-groups-idle",
       "no-workers",
       "host-selection",
@@ -806,14 +815,8 @@ const server = Bun.serve({
           const db = new Database(
             join(prior.stateDirectory, "workspace.sqlite"),
           );
-          const row = db
-            .query("SELECT value FROM workspace WHERE id=1")
-            .get() as { value: string };
-          const state = JSON.parse(row.value);
-          state.agents.find((a: Detail) => a.id === body.closedAgent).closed =
-            true;
-          db.query("UPDATE workspace SET value=? WHERE id=1").run(
-            JSON.stringify(state),
+          db.query("UPDATE sessions SET closed = 1 WHERE id = ?").run(
+            body.closedAgent,
           );
           db.close();
         }

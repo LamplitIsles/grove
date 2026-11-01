@@ -13,7 +13,7 @@
 <details class="worker-report" open={expanded} ontoggle={event => { expanded = event.currentTarget.open; onexpanded?.(expanded); }}>
   <summary tabindex="-1" aria-label={`${(kind ?? m.worker_report())} · ${heading}`}>
     <ChevronRight class="report-chevron" aria-hidden="true" />
-    <span class="report-summary"><span class="report-heading"><strong>{heading}</strong><span>{(kind ?? m.worker_report())}</span><MessageTime {at} /></span><span class="report-preview">{preview}</span></span>
+    <span class="report-summary"><span class="report-heading"><strong>{heading}</strong><span>{(kind ?? m.worker_report())}</span></span><span class="report-preview">{preview}</span>{#if !expanded}<span class="report-time"><MessageTime {at} /></span>{/if}</span>
   </summary>
-  {#if expanded}<div class="report-content"><MessageBody {text} {bodyRef} agentId={owningAgentId ?? agentId ?? ""} fileAgentId={agentId} {readPath} expand={true} copyMessage={true} /></div>{/if}
+  {#if expanded}<div class="report-content"><MessageBody {text} {bodyRef} {at} agentId={owningAgentId ?? agentId ?? ""} fileAgentId={agentId} {readPath} expand={true} copyMessage={true} /></div>{/if}
 </details>

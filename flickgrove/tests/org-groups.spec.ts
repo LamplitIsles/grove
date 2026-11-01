@@ -1,18 +1,16 @@
 import { expect, test, type Page } from "@playwright/test";
-import { newSession, createSession, openSidebar } from "./browser-actions";
+import { createSession, openSidebar } from "./browser-actions";
+
 const origin = "http://127.0.0.1:14319";
-test.use({ serviceWorkers: "block" });
-const group = (p: Page, key: string) =>
-  p.locator(`.org-group[data-org="${key}"]`);
-const roots = (p: Page) =>
-  p.locator(".session-item:not(.worker-item) .session-open");
-const ids = (p: Page) =>
-  roots(p).evaluateAll((els) =>
-    els.map((el) => el.getAttribute("data-agent-id")),
-  );
-const heading = (p: Page) => p.locator(".agent-detail h1");
-const composer = (p: Page) =>
-  p.getByRole("textbox", { name: "Message Orc", exact: true });
+const org = (page: Page) =>
+  page.getByRole("combobox", { name: "Select organization" });
+const recent = (page: Page) =>
+  page.getByRole("region", { name: "Recent activity" });
+const opened = (page: Page) => page.getByRole("region", { name: "Opened" });
+async function chooseOrg(page: Page, name: string) {
+  await org(page).click();
+  await page.getByRole("option", { name, exact: true }).click();
+}
 
 test.beforeEach(async ({ request }) => {
   await request.post(origin + "/fixture/reset", {
@@ -20,279 +18,505 @@ test.beforeEach(async ({ request }) => {
   });
 });
 
-test("derived groups, member summaries, folding, visible keyboard order and selected restoration", async ({
-  page,
-  request,
-}) => {
-  await page.goto(origin);
-  await expect(page.locator(".org-name")).toHaveText([
-    "guionai",
-    "lamplitisles",
-    "personal",
-    "Ungrouped",
-  ]);
-  await expect(group(page, "guionai").locator(".session-open")).toHaveCount(2);
-  await expect(group(page, "").locator(".session-open")).toHaveCount(2);
-  await request.post(origin + "/fixture/change", {
-    data: { question: true, questionAgent: "voice" },
+for (const width of [1440, 390]) {
+  test(`creating a session selects its project's organization at ${width}`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await page.goto(origin);
+    await openSidebar(page);
+    await expect(org(page)).toContainText("guionai");
+    await page
+      .getByRole("button", { name: "New session", exact: true })
+      .click();
+    let dialog = page.getByRole("dialog", { name: "New session" });
+    await dialog
+      .getByRole("combobox", { name: "Search projects" })
+      .fill("Personal");
+    await expect(
+      dialog.getByRole("option", { name: "Personal", exact: true }),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await openSidebar(page);
+    await expect(org(page)).toContainText("guionai");
+    await page
+      .getByRole("button", { name: "New session", exact: true })
+      .click();
+    dialog = page.getByRole("dialog", { name: "New session" });
+    await dialog
+      .getByRole("combobox", { name: "Search projects" })
+      .fill("Personal");
+    await dialog.getByRole("option", { name: "Personal", exact: true }).click();
+    await createSession(page);
+    await openSidebar(page);
+    await expect(org(page)).toContainText("personal");
+    await page.reload();
+    await openSidebar(page);
+    await expect(org(page)).toContainText("personal");
   });
-  await expect(
-    group(page, "guionai").getByLabel("Needs input: 1"),
-  ).toBeVisible();
-  await expect(
-    group(page, "guionai").getByLabel("2 working", { exact: true }),
-  ).toBeVisible();
-  await group(page, "guionai").locator(".org-disclosure").click();
-  await expect(heading(page)).toHaveText("Streaming voice input");
-  // A background publication cannot undo explicit folding of the selected group.
-  await request.post(origin + "/fixture/change", { data: { usage: 55 } });
-  await expect(group(page, "guionai").locator(".session-open")).toHaveCount(0);
-  await page.locator(".role-project").click();
-  await page.keyboard.press("ArrowDown");
-  await expect(heading(page)).toHaveText("Reader performance");
-  await page.keyboard.press("ArrowDown");
-  await expect(heading(page)).toHaveText("Personal repository");
-  await composer(page).evaluate((el) => el.blur());
-  await page.keyboard.press("ArrowDown");
-  await expect(heading(page)).toHaveText("Local repository without remote");
-  await page.reload();
-  await expect(
-    group(page, "guionai").locator(".org-disclosure"),
-  ).toHaveAttribute("aria-expanded", "false");
-  // Reach the folded group using only navigation keys; no direct focus helper.
-  const disclosure = group(page, "guionai").locator(".org-disclosure");
-  await page.keyboard.press("ArrowLeft");
-  await expect(group(page, "").locator(".org-disclosure")).toBeFocused();
-  await page.keyboard.press("ArrowUp");
-  await page.keyboard.press("ArrowUp");
-  await page.keyboard.press("ArrowUp");
-  await expect(disclosure).toBeFocused();
-  await page.keyboard.press("Enter");
-  await expect(disclosure).toHaveAttribute("aria-expanded", "true");
-  await page.keyboard.press("Space");
-  await expect(disclosure).toHaveAttribute("aria-expanded", "false");
-  await newSession(page);
-  await createSession(page);
-  await expect(disclosure).toHaveAttribute("aria-expanded", "true");
-  await page
-    .getByRole("button", { name: "Expand Workers", exact: true })
-    .first()
-    .click();
-  await page
-    .getByRole("button", { name: /Open Documentation.*Worker/ })
-    .click();
-  await disclosure.click();
-  await page.reload();
-  await expect(disclosure).toHaveAttribute("aria-expanded", "true");
-  await expect(
-    page.getByRole("button", { name: /Open Documentation.*Worker/ }),
-  ).toHaveAttribute("aria-current", "true");
-  await page.screenshot({ path: "../.scratch/org-session-groups/desktop.png" });
-});
 
-test("keyboard-only group route preserves member navigation and Composer completion", async ({
-  page,
-}) => {
-  await page.goto(origin);
-  await expect(heading(page)).toHaveText("Streaming voice input");
-  // Start from page focus and enter the existing session navigation with keys.
-  await page.keyboard.press("ArrowDown");
-  await expect(roots(page).nth(1)).toBeFocused();
-  await page.keyboard.press("ArrowUp");
-  await page.keyboard.press("ArrowRight"); // Expand members.
-  await page.keyboard.press("ArrowRight"); // First member.
-  await expect(
-    page.getByRole("button", { name: "Open Voice input Worker", exact: true }),
-  ).toBeFocused();
-  await page.keyboard.press("ArrowLeft"); // Existing child → parent.
-  await expect(roots(page).first()).toBeFocused();
-  await page.keyboard.press("ArrowLeft"); // Existing member collapse.
-  await expect(roots(page).first()).toBeFocused();
-  await page.keyboard.press("ArrowLeft"); // Collapsed root → group header.
-  const header = group(page, "guionai").locator(".org-disclosure");
-  await expect(header).toBeFocused();
-  await page.screenshot({
-    path: "../.scratch/org-session-groups/keyboard-header-focus.png",
-  });
-  await page.keyboard.press("Alt+ArrowDown");
-  await expect(header).toBeFocused();
-  await page.keyboard.press("Enter");
-  await expect(header).toHaveAttribute("aria-expanded", "false");
-  await expect(heading(page)).toHaveText("Streaming voice input");
-  await page.keyboard.press("ArrowDown");
-  await expect(
-    group(page, "lamplitisles").locator(".org-disclosure"),
-  ).toBeFocused();
-  await page.keyboard.press("ArrowUp");
-  await expect(header).toBeFocused();
-  await page.keyboard.press("Space");
-  await expect(header).toHaveAttribute("aria-expanded", "true");
-  await page.keyboard.press("ArrowLeft");
-  await expect(header).toHaveAttribute("aria-expanded", "false");
-  await page.keyboard.press("ArrowRight"); // Expand and return to first Orc.
-  await expect(header).toHaveAttribute("aria-expanded", "true");
-  await expect(roots(page).first()).toBeFocused();
-  await page.keyboard.press("i");
-  await expect(composer(page)).toBeFocused();
-  await page.keyboard.type("Preserved draft");
-  await page.keyboard.press("Tab");
-  await expect(composer(page)).toBeFocused();
-  await expect(composer(page)).toHaveValue("Preserved draft");
-  await page.keyboard.press("Shift+Tab");
-  await expect(composer(page)).toBeFocused();
-});
-
-test("same-group drag persists; cross-group/header/member drop rejects without navigation", async ({
-  page,
-}) => {
-  await page.goto(origin);
-  await expect(heading(page)).toHaveText("Streaming voice input");
-  const before = await ids(page);
-  const source = group(page, "guionai").locator(".session-open").first();
-  const target = group(page, "guionai").locator(".session-open").last();
-  await composer(page).fill("Retained draft");
-  await source.dragTo(target, { targetPosition: { x: 25, y: 55 } });
-  const expected = [before[1], before[0], ...before.slice(2)];
-  await expect.poll(() => ids(page)).toEqual(expected);
-  await expect(composer(page)).toHaveValue("Retained draft");
-  await page.reload();
-  await expect.poll(() => ids(page)).toEqual(expected);
-  const moving = group(page, "guionai").locator(".session-open").first();
-  for (const rejected of [
-    group(page, "personal").locator(".session-open"),
-    group(page, "lamplitisles").locator(".org-disclosure"),
-  ]) {
-    await moving.dragTo(rejected);
-    await expect.poll(() => ids(page)).toEqual(expected);
-    await expect(page.locator(".drop-before, .drop-after")).toHaveCount(0);
-    await expect(heading(page)).toHaveText("Streaming voice input");
-  }
-  await page.waitForTimeout(510); // Let the post-drag click guard expire.
-  await group(page, "guionai")
-    .getByRole("button", { name: "Expand Workers", exact: true })
-    .click();
-  const member = page.getByRole("button", {
-    name: "Open Voice input Worker",
-    exact: true,
-  });
-  await expect(member).toHaveAttribute("draggable", "false");
-  await moving.dragTo(member);
-  await expect.poll(() => ids(page)).toEqual(expected);
-  await expect(page.locator(".drop-before, .drop-after")).toHaveCount(0);
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole("button", { name: "‹ Sessions", exact: true }).click();
-  await openSidebar(page);
-  await expect.poll(() => ids(page)).toEqual(expected);
-  await expect(roots(page).first()).toHaveAttribute("draggable", "false");
-  await group(page, "personal").locator(".org-disclosure").click();
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= innerWidth,
-    ),
-  ).toBe(true);
-  await page.screenshot({ path: "../.scratch/org-session-groups/mobile.png" });
-  const row = group(page, "").locator(".session-row").first();
-  const rowId = await row.getAttribute("data-swipe-id");
-  const box = (await row.boundingBox())!;
-  const cdp = await page.context().newCDPSession(page);
-  await cdp.send("Input.dispatchTouchEvent", {
-    type: "touchStart",
-    touchPoints: [{ x: box.x + 230, y: box.y + 25 }],
-  });
-  for (let i = 1; i <= 6; i++) {
-    await cdp.send("Input.dispatchTouchEvent", {
-      type: "touchMove",
-      touchPoints: [{ x: box.x + 230 - i * 20, y: box.y + 25 }],
-    });
-    await page.waitForTimeout(20);
-  }
-  await cdp.send("Input.dispatchTouchEvent", {
-    type: "touchEnd",
-    touchPoints: [],
-  });
-  await cdp.detach();
-  const close = row.getByRole("button", {
-    name: "Close this tree",
-    exact: true,
-  });
-  await expect(close).toBeVisible();
-  await page.screenshot({
-    path: "../.scratch/org-session-groups/mobile-swipe.png",
-  });
-  await close.click();
-  await expect
-    .poll(() => ids(page))
-    .toEqual(
-      expected.filter((id) => id !== rowId && !id?.endsWith(":personal-orc")),
+  test(`cross-org recent and selected opened are disjoint at ${width}`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await page.goto(origin);
+    await openSidebar(page);
+    await expect(org(page)).toContainText("guionai");
+    await expect(recent(page).locator(".session-open strong")).toHaveText([
+      "Reader performance",
+      "Streaming voice input",
+    ]);
+    await expect(opened(page).locator(".session-open strong")).toHaveText([
+      "Forge repository in the same organization",
+    ]);
+    await page.screenshot({ path: testInfo.outputPath(`${width}-org.png`) });
+    if (width === 1440) {
+      await org(page).hover();
+      await expect(org(page).locator("svg")).toHaveCSS("opacity", "1");
+      await page.screenshot({ path: testInfo.outputPath("desktop-hover.png") });
+    }
+    await chooseOrg(page, "lamplitisles");
+    await expect(org(page)).toContainText("lamplitisles");
+    await expect(recent(page).locator(".session-open strong")).toHaveText([
+      "Reader performance",
+      "Streaming voice input",
+    ]);
+    await expect(opened(page).locator(".session-open")).toHaveCount(0);
+    await expect(opened(page)).toContainText("No other open sessions");
+    await chooseOrg(page, "personal");
+    await expect(opened(page).locator(".session-open strong")).toHaveText([
+      "Personal repository",
+    ]);
+    const allIds = await page
+      .locator(".session-open")
+      .evaluateAll((els) => els.map((el) => el.getAttribute("data-agent-id")));
+    expect(new Set(allIds).size).toBe(allIds.length);
+    await recent(page)
+      .getByRole("button", { name: "Open Reader performance Orc" })
+      .click();
+    await expect(page.locator(".agent-detail h1")).toHaveText(
+      "Reader performance",
     );
-});
+    await openSidebar(page);
+    await expect(org(page)).toContainText("personal");
+    await page.reload();
+    await openSidebar(page);
+    await expect(org(page)).toContainText("personal");
+    await expect(opened(page)).toContainText("Personal repository");
+    await chooseOrg(page, "Ungrouped");
+    await expect(opened(page).locator(".session-open strong")).toHaveText([
+      "Local repository without remote",
+      "Project removed from catalogue",
+    ]);
+  });
+}
 
-test("catalogue delay stays accessible without false Ungrouped; failure recovers on refresh", async ({
+test("activity moves an opened tree into recent without losing detail", async ({
   page,
   request,
 }) => {
+  await request.post(origin + "/fixture/reset", {
+    data: { mode: "org-groups-idle" },
+  });
+  await page.goto(origin);
+  await expect(org(page)).toContainText("guionai");
+  const root = opened(page).getByRole("button", {
+    name: "Open Streaming voice input Orc",
+  });
+  await root.click();
+  const input = page.getByRole("textbox", { name: "Message Orc", exact: true });
+  await input.fill("Start work");
+  await input.press("Enter");
+  await expect(
+    recent(page).getByRole("button", {
+      name: "Open Streaming voice input Orc",
+    }),
+  ).toHaveAttribute("aria-current", "true");
+  await expect(
+    opened(page).getByRole("button", {
+      name: "Open Streaming voice input Orc",
+    }),
+  ).toHaveCount(0);
+  await expect(page.locator(".agent-detail h1")).toHaveText(
+    "Streaming voice input",
+  );
+});
+
+test("choosing another org keeps the current detail and unsent draft", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  await recent(page)
+    .getByRole("button", { name: "Open Streaming voice input Orc" })
+    .click();
+  const input = page.getByRole("textbox", { name: "Message Orc", exact: true });
+  await input.fill("Keep this draft");
+  await chooseOrg(page, "personal");
+  await expect(page.locator(".agent-detail h1")).toHaveText(
+    "Streaming voice input",
+  );
+  await expect(input).toHaveValue("Keep this draft");
+  await expect(opened(page)).toContainText("Personal repository");
+});
+
+test("recent members stay with their root when switching organization", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  const row = recent(page)
+    .locator(".session-row")
+    .filter({
+      has: page.getByRole("button", { name: "Open Streaming voice input Orc" }),
+    });
+  await row.getByRole("button", { name: "Expand Workers" }).click();
+  const member = recent(page).getByRole("button", {
+    name: "Open Voice input Worker",
+  });
+  await member.click();
+  await chooseOrg(page, "personal");
+  await expect(member).toHaveAttribute("aria-current", "true");
+  await expect(
+    opened(page).getByRole("button", { name: "Open Voice input Worker" }),
+  ).toHaveCount(0);
+  await expect(page.locator(".agent-detail h1")).toHaveText("Voice input");
+});
+
+test("keyboard navigation expands and enters a recent tree", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  const root = recent(page).getByRole("button", {
+    name: "Open Streaming voice input Orc",
+  });
+  const member = recent(page).getByRole("button", {
+    name: "Open Voice input Worker",
+  });
+  await root.focus();
+  await page.keyboard.press("ArrowRight");
+  await expect(member).toBeVisible();
+  await expect(root).toBeFocused();
+  await page.keyboard.press("ArrowRight");
+  await expect(member).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(root).toBeFocused();
+  await page.keyboard.press("ArrowLeft");
+  await expect(member).toHaveCount(0);
+  await page.keyboard.press("e");
+  await expect(member).toBeVisible();
+});
+
+for (const selection of ["guionai", "lamplitisles"]) {
+  test(`shortcut-selected recent trees accept arrow navigation with ${selection} selected`, async ({
+    page,
+  }) => {
+    await page.goto(origin);
+    await expect(org(page)).toContainText("guionai");
+    if (selection !== "guionai") await chooseOrg(page, selection);
+    const input = page.getByRole("textbox", {
+      name: "Message Orc",
+      exact: true,
+    });
+    await input.focus();
+    await page.keyboard.press("Escape");
+    await expect(input).not.toBeFocused();
+    await page.keyboard.press("Alt+j");
+    await expect(page.locator(".agent-detail h1")).toHaveText(
+      "Streaming voice input",
+    );
+    const member = recent(page).getByRole("button", {
+      name: "Open Voice input Worker",
+    });
+    await page.keyboard.press("ArrowRight");
+    await expect(member).toBeVisible();
+    await expect(page.locator(".agent-detail h1")).toHaveText(
+      "Streaming voice input",
+    );
+    await page.keyboard.press("ArrowRight");
+    await expect(page.locator(".agent-detail h1")).toHaveText("Voice input");
+    await page.keyboard.press("ArrowLeft");
+    await expect(page.locator(".agent-detail h1")).toHaveText(
+      "Streaming voice input",
+    );
+  });
+}
+
+test("Tab keeps focus in the sidebar and project selection", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  await expect(org(page)).toContainText("guionai");
+  await org(page).focus();
+  await page.keyboard.press("Tab");
+  await expect(org(page)).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(org(page)).toBeFocused();
+  await org(page).click();
+  const focused = await page.evaluate(() => document.activeElement?.outerHTML);
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => document.activeElement?.outerHTML)).toBe(
+    focused,
+  );
+  await expect(
+    page.getByRole("option", { name: "personal", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("option", { name: "guionai", exact: true }).click();
+  await page.getByRole("button", { name: "New session", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "New session" });
+  const search = dialog.getByRole("combobox", { name: "Search projects" });
+  await search.fill("Personal");
+  await search.press("Tab");
+  await expect(search).toBeFocused();
+  await expect(
+    dialog.getByRole("option", { name: "Personal", exact: true }),
+  ).toHaveAttribute("data-checked", "true");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("combobox", { name: "Orc model" }).click();
+  const modelSearch = page.getByRole("combobox", { name: "Search orc model" });
+  await expect(modelSearch).toBeFocused();
+  await modelSearch.press("Tab");
+  await expect(modelSearch).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+});
+
+test("opened tree order remains draggable and survives reload", async ({
+  page,
+  request,
+}) => {
+  await request.post(origin + "/fixture/reset", {
+    data: { mode: "org-groups-idle" },
+  });
+  await page.goto(origin);
+  const rows = opened(page).locator('.session-open[data-location="tree"]');
+  await expect(rows.locator("strong")).toHaveText([
+    "Streaming voice input",
+    "Forge repository in the same organization",
+  ]);
+  const target = rows.nth(1);
+  const box = (await target.boundingBox())!;
+  await rows
+    .first()
+    .dragTo(target, { targetPosition: { x: 10, y: box.height - 3 } });
+  await expect(rows.locator("strong")).toHaveText([
+    "Forge repository in the same organization",
+    "Streaming voice input",
+  ]);
+  await page.reload();
+  await expect(rows.locator("strong")).toHaveText([
+    "Forge repository in the same organization",
+    "Streaming voice input",
+  ]);
+});
+
+test("catalogue delay keeps the remembered organization and recovers", async ({
+  page,
+  request,
+}) => {
+  await page.goto(origin);
+  await chooseOrg(page, "personal");
   await request.post(origin + "/fixture/change", {
     data: { projectsDelay: 1200 },
   });
+  await page.reload();
+  await expect(org(page)).toContainText("personal");
+  await expect(opened(page)).toContainText("Personal repository");
+});
+
+test("catalogue failure keeps sessions reachable and recovers organization choices", async ({
+  page,
+  request,
+}) => {
   await page.goto(origin);
-  await expect(
-    page.locator('.org-group[data-org="@loading"] .session-open'),
-  ).toHaveCount(6);
-  await expect(group(page, "")).toHaveCount(0);
-  await expect(roots(page).first()).toHaveAttribute("draggable", "false");
-  await expect(group(page, "guionai")).toBeVisible();
+  await chooseOrg(page, "personal");
   await request.post(origin + "/fixture/change", {
-    data: { projectsDelay: 0, projectsFailure: true },
+    data: { projectsFailure: true },
   });
   await page.reload();
-  await expect(group(page, "").locator(".session-open")).toHaveCount(6);
-  await group(page, "")
-    .getByRole("button", { name: "Open Personal repository Orc", exact: true })
-    .click();
-  await expect(heading(page)).toHaveText("Personal repository");
+  await expect(org(page)).toContainText("Ungrouped");
+  await expect(opened(page)).toContainText("Personal repository");
   await request.post(origin + "/fixture/change", {
     data: { projectsFailure: false },
   });
   await page.reload();
-  await expect(
-    group(page, "personal").locator(".session-open"),
-  ).toHaveAttribute("aria-current", "true");
-  // Refreshing creation choices retains sidebar grouping, but cannot offer stale choices.
-  await request.post(origin + "/fixture/change", {
-    data: { projectsDelay: 1200, projectsFailure: true },
+  await expect(org(page)).toContainText("personal");
+  await expect(opened(page)).toContainText("Personal repository");
+});
+
+test("organization choices follow open trees, including trees only in recent", async ({
+  page,
+  request,
+}) => {
+  await page.goto(origin);
+  await chooseOrg(page, "personal");
+  const restart = await request.post(origin + "/fixture/change", {
+    data: { restartHub: true, closedAgent: "personal-orc" },
   });
-  await newSession(page);
-  const dialog = page.getByRole("dialog", { name: "New session", exact: true });
+  expect(restart.ok()).toBe(true);
+  await expect(org(page)).toContainText("guionai");
+  await org(page).click();
   await expect(
-    dialog.getByRole("listbox", { name: "Project", exact: true }),
-  ).toHaveAttribute("aria-busy", "true");
-  await expect(
-    dialog.getByRole("option").filter({ hasNotText: "Saved history" }),
+    page.getByRole("option", { name: "personal", exact: true }),
   ).toHaveCount(0);
-  await expect(group(page, "personal").locator(".session-open")).toHaveCount(1);
-  await expect(dialog.getByText("Synthetic catalogue failure")).toBeVisible();
   await expect(
-    dialog.getByRole("button", { name: "New session", exact: true }),
-  ).toBeDisabled();
+    page.getByRole("option", { name: "lamplitisles", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("option", { name: "lamplitisles", exact: true }).click();
+  await expect(opened(page)).toContainText("No other open sessions");
   await expect(
-    dialog.getByRole("option").filter({ hasNotText: "Saved history" }),
-  ).toHaveCount(0);
-  await request.post(origin + "/fixture/change", {
-    data: { projectsDelay: 0, projectsFailure: false },
+    recent(page).locator('.session-open[data-agent-id$=":reader-orc"]'),
+  ).toBeVisible();
+});
+
+test("creating the first open tree selects its previously unavailable organization", async ({
+  page,
+  request,
+}) => {
+  await page.goto(origin);
+  await expect(org(page)).toContainText("guionai");
+  const restart = await request.post(origin + "/fixture/change", {
+    data: { restartHub: true, closedAgent: "personal-orc" },
   });
-  await dialog.getByRole("button", { name: "Retry", exact: true }).click();
+  expect(restart.ok()).toBe(true);
+  await org(page).click();
   await expect(
-    dialog.getByRole("option").filter({ hasNotText: "Saved history" }),
-  ).toHaveCount(5);
-  const search = dialog.getByRole("combobox", {
-    name: "Search projects…",
+    page.getByRole("option", { name: "personal", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("option", { name: "guionai", exact: true }).click();
+  await page.getByRole("button", { name: "New session", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "New session" });
+  await dialog
+    .getByRole("combobox", { name: "Search projects" })
+    .fill("Personal");
+  await dialog.getByRole("option", { name: "Personal", exact: true }).click();
+  await createSession(page);
+  await expect(org(page)).toContainText("personal");
+});
+
+test("long organization names leave the new session action usable", async ({
+  page,
+  request,
+}) => {
+  await request.post(origin + "/fixture/reset", {
+    data: { mode: "org-groups-long" },
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(origin);
+  await openSidebar(page);
+  await expect(org(page)).toContainText("a-very-long-organization-name");
+  const title = (await org(page).boundingBox())!;
+  const add = page.getByRole("button", { name: "New session", exact: true });
+  const button = (await add.boundingBox())!;
+  expect(title.x + title.width).toBeLessThanOrEqual(button.x);
+  await add.click();
+  await expect(page.getByRole("dialog", { name: "New session" })).toBeVisible();
+});
+
+test("organization choice accepts keyboard and Escape preserves detail", async ({
+  page,
+}) => {
+  await page.goto(origin);
+  const title = page.locator(".agent-detail h1");
+  const original = await title.textContent();
+  await org(page).focus();
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByRole("option", { name: "personal", exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(title).toHaveText(original!);
+  await expect(org(page)).toContainText("guionai");
+});
+
+test("Opened folding keeps detail and draft, is per org, and survives reload", async ({
+  page,
+}, testInfo) => {
+  await page.goto(origin);
+  const openedToggle = opened(page).getByRole("button", {
+    name: "Opened",
     exact: true,
   });
-  await search.fill("forge");
-  await search.press("Enter");
-  await expect(
-    dialog.getByRole("option", { name: "Forge", exact: true }),
-  ).toHaveAttribute("data-checked", "true");
-  await expect(dialog).toBeVisible();
-  await expect(heading(page)).toHaveText("Personal repository");
+  await opened(page)
+    .getByRole("button", {
+      name: "Open Forge repository in the same organization Orc",
+    })
+    .click();
+  const input = page.getByRole("textbox", { name: "Message Orc", exact: true });
+  await input.fill("Draft stays here");
+  await openedToggle.click();
+  await expect(openedToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(opened(page).locator(".session-open")).toHaveCount(0);
+  await expect(recent(page).locator(".session-open")).toHaveCount(2);
+  await expect(page.locator(".agent-detail h1")).toHaveText(
+    "Forge repository in the same organization",
+  );
+  await expect(input).toHaveValue("Draft stays here");
+  await page.screenshot({ path: testInfo.outputPath("desktop-folded.png") });
+  await chooseOrg(page, "personal");
+  await expect(openedToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(opened(page)).toContainText("Personal repository");
+  await chooseOrg(page, "guionai");
+  await expect(openedToggle).toHaveAttribute("aria-expanded", "false");
+  await page.reload();
+  await expect(openedToggle).toHaveAttribute("aria-expanded", "false");
+  await expect(input).toHaveValue("Draft stays here");
+  await openedToggle.click();
+  await expect(opened(page)).toContainText(
+    "Forge repository in the same organization",
+  );
+});
+
+test.describe("touch Opened disclosure", () => {
+  test.use({ hasTouch: true });
+  test("Opened folds and unfolds by touch without hiding Recent activity", async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(origin);
+    await openSidebar(page);
+    const toggle = opened(page).getByRole("button", {
+      name: "Opened",
+      exact: true,
+    });
+    await expect(opened(page).locator(".session-open")).toHaveCount(1);
+    await toggle.tap();
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(opened(page).locator(".session-open")).toHaveCount(0);
+    await expect(recent(page).locator(".session-open")).toHaveCount(2);
+    await page.screenshot({ path: testInfo.outputPath("mobile-folded.png") });
+    await toggle.tap();
+    await expect(opened(page).locator(".session-open")).toHaveCount(1);
+  });
+});
+
+test("session shortcuts skip folded Opened entries", async ({ page }) => {
+  await page.goto(origin);
+  await opened(page)
+    .getByRole("button", {
+      name: "Open Forge repository in the same organization Orc",
+    })
+    .click();
+  await opened(page)
+    .getByRole("button", { name: "Opened", exact: true })
+    .click();
+  await page.keyboard.press("Alt+KeyJ");
+  await expect(page.locator(".agent-detail h1")).toHaveText(
+    "Reader performance",
+  );
+  await page.keyboard.press("Alt+KeyJ");
+  await expect(page.locator(".agent-detail h1")).toHaveText(
+    "Streaming voice input",
+  );
+  await page.keyboard.press("Alt+KeyJ");
+  await expect(page.locator(".agent-detail h1")).toHaveText(
+    "Reader performance",
+  );
+  const toggle = opened(page).getByRole("button", {
+    name: "Opened",
+    exact: true,
+  });
+  await toggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("Space");
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
 });

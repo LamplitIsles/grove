@@ -9,7 +9,7 @@ const markdown = `A [link](https://example.com)\n\n\`\`\`typescript\n${code}\n\`
 for (const width of [1440, 390]) {
   test(`${width} copies message Markdown and code in history, live and reports`, async ({
     page,
-  }) => {
+  }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
     await page.addInitScript(() => {
       const state = window as Window & {
@@ -38,7 +38,25 @@ for (const width of [1440, 390]) {
       .getByRole("button", { name: "Open Copy reading Orc", exact: true })
       .click();
     const history = page.locator(".historical-messages");
+    const historyMessage = history.locator(".assistant-message");
+    const actions = historyMessage.locator(".message-actions");
+    await page.mouse.move(0, 0);
+    await expect(actions).toHaveCSS("opacity", width === 1440 ? "0" : "1");
+    const heightBefore = await historyMessage.evaluate(
+      (el) => el.getBoundingClientRect().height,
+    );
+    await historyMessage.hover();
+    await expect(actions).toHaveCSS("opacity", "1");
+    expect(
+      await historyMessage.evaluate((el) => el.getBoundingClientRect().height),
+    ).toBe(heightBefore);
+    expect(
+      await actions
+        .locator(":scope > *")
+        .evaluateAll((els) => els.map((el) => el.tagName)),
+    ).toEqual(["TIME", "BUTTON"]);
     const historyCopy = history.getByRole("button", { name: "Copy message" });
+    await page.screenshot({ path: testInfo.outputPath(`footer-${width}.png`) });
     await historyCopy.click();
     await expect
       .poll(() =>
@@ -69,7 +87,7 @@ for (const width of [1440, 390]) {
     });
     expect((await copyCode.boundingBox())?.x).toBe(beforeScroll?.x);
     await page.screenshot({
-      path: `../.scratch/flickgrove-browser/copy-${width}.png`,
+      path: testInfo.outputPath(`copy-${width}.png`),
     });
     expect(
       await page.evaluate(
@@ -86,6 +104,7 @@ for (const width of [1440, 390]) {
       },
     });
     const live = page.locator('[data-message-id="live-item"]');
+    await live.locator(".assistant-message").hover();
     await live.getByRole("button", { name: "Copy message" }).click();
     await expect
       .poll(() =>
@@ -94,13 +113,35 @@ for (const width of [1440, 390]) {
         ),
       )
       .toBe(markdown);
-    await expect(
-      page
-        .locator(".user-message")
-        .getByRole("button", { name: "Copy message" }),
-    ).toHaveCount(0);
+    const user = page
+      .locator(".user-message")
+      .filter({ hasText: "User input" });
+    await user.hover();
+    expect(
+      await user
+        .locator(".message-actions > *")
+        .evaluateAll((els) => els.map((el) => el.tagName)),
+    ).toEqual(["TIME", "BUTTON"]);
+    await user.getByRole("button", { name: "Copy message" }).click();
+    await page.screenshot({ path: testInfo.outputPath(`user-${width}.png`) });
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => (window as Window & { copiedText?: string }).copiedText,
+        ),
+      )
+      .toBe("User input");
     const report = page.locator(".worker-report");
+    await report.hover();
+    await expect(report.locator(".report-time time")).toHaveCount(1);
     await report.locator("summary").click();
+    await expect(report.locator(".message-actions > *")).toHaveCount(2);
+    expect(
+      await report
+        .locator(".message-actions > *")
+        .evaluateAll((els) => els.map((el) => el.tagName)),
+    ).toEqual(["TIME", "BUTTON"]);
+    await page.screenshot({ path: testInfo.outputPath(`report-${width}.png`) });
     await report.getByRole("button", { name: "Copy message" }).click();
     await expect
       .poll(() =>
@@ -113,6 +154,7 @@ for (const width of [1440, 390]) {
     await page.evaluate(() => {
       (window as Window & { failCopy?: boolean }).failCopy = true;
     });
+    await live.locator(".assistant-message").hover();
     await live.getByRole("button", { name: "Copy message" }).click();
     await expect(
       page.getByText("Copy failed. Please try again."),
@@ -188,7 +230,11 @@ test("copies an assistant message from the read-only history preview", async ({
     .fill("scrolling");
   await page.locator(".history-result").click();
   const transcript = page.locator(".history-transcript");
-  await transcript.getByRole("button", { name: "Copy message" }).click();
+  await transcript.locator(".assistant-message").hover();
+  await transcript
+    .locator(".assistant-message")
+    .getByRole("button", { name: "Copy message" })
+    .click();
   await expect
     .poll(() =>
       page.evaluate(
@@ -196,9 +242,14 @@ test("copies an assistant message from the read-only history preview", async ({
       ),
     )
     .toBe("Previous result preserved in Codex.");
-  await expect(
-    transcript
-      .locator(".user-message")
-      .getByRole("button", { name: "Copy message" }),
-  ).toHaveCount(0);
+  const user = transcript.locator(".user-message");
+  await user.hover();
+  await user.getByRole("button", { name: "Copy message" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as Window & { copiedText?: string }).copiedText,
+      ),
+    )
+    .toBe("Investigate slow scrolling");
 });

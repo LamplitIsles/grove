@@ -21,4 +21,4 @@
     return () => controller.abort();
   });
 </script>
-{#if loading}<p class="question-load" role="status">Loading questions…</p>{:else if error}<div class="question-load"><p class="inline-error" role="alert">{error}</p><Button tabindex={0} variant="secondary" size="sm" disabled={!connected} onclick={() => revision++}>Retry</Button></div>{:else}<Questions agentId={peerOrAgent} {previewAgentId} {historyPreview} {questions} readonly />{/if}
+{#if loading}<p class="question-load" role="status">Loading questions…</p>{:else if error}<div class="question-load"><p class="inline-error" role="alert">{error}</p><Button variant="secondary" size="sm" disabled={!connected} onclick={() => revision++}>Retry</Button></div>{:else}<Questions agentId={peerOrAgent} {previewAgentId} {historyPreview} {questions} readonly />{/if}

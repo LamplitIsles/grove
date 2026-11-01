@@ -168,12 +168,12 @@ test("Close shortcut uses detail before navigation, blocks surfaces/IME and neve
   await page.reload();
   await page.keyboard.press("Alt+h");
   await page
-    .locator('.session-open[data-location="tree"]')
+    .locator('.session-open[data-location="recent"]')
     .filter({ hasText: "Streaming voice input" })
     .click();
   await page.getByRole("button", { name: "Expand Workers" }).first().click();
   await page
-    .locator('.session-open[data-location="tree"]')
+    .locator('.session-open[data-location="recent"]')
     .filter({ hasText: "Voice input" })
     .last()
     .click();
@@ -214,7 +214,7 @@ test("mobile swipe only reveals, one row at a time; right/outside collapse and e
   await swipe(page, 300, secondBox.y + 30, -150);
   await expect(page.locator(".tree-close-action")).toHaveCount(1);
   await expect(second.locator(".tree-close-action")).toBeVisible();
-  await page.locator(".session-list-heading h1").click();
+  await page.getByRole("heading", { name: "Recent activity" }).click();
   await expect(page.locator(".tree-close-action")).toHaveCount(0);
   await swipe(page, 300, 650, 0, -250);
   await expect
@@ -251,7 +251,7 @@ test("mobile swipe only reveals, one row at a time; right/outside collapse and e
   });
   await page.reload();
   await openSidebar(page);
-  const cleanRow = page.locator(".org-group .session-row").filter({
+  const cleanRow = page.locator(".recent-sessions .session-row").filter({
     has: page.getByRole("button", { name: "Open Earlier today Orc" }),
   });
   await cleanRow.scrollIntoViewIfNeeded();

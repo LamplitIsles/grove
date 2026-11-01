@@ -37,7 +37,7 @@ const fixtures = [
 for (const width of [1440, 390]) {
   test(`Only Orc filters resolved roles, preserves preview and resets on reentry (${width})`, async ({
     page,
-  }) => {
+  }, testInfo) => {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
     await page.request.post("/fixture/history-filter", {
       data: { sessions: fixtures },
@@ -62,11 +62,11 @@ for (const width of [1440, 390]) {
       "Closed",
     );
     await page.screenshot({
-      path: `../.scratch/history-orc-filter/${width}-only-orc.png`,
+      path: testInfo.outputPath(`${width}-only-orc.png`),
     });
     await search.press("Tab");
-    await expect(toggle).toBeFocused();
-    await page.keyboard.press("Space");
+    await expect(search).toBeFocused();
+    await toggle.click();
     await expect(toggle).not.toBeChecked();
     await expect(titles).toHaveText([
       "worker",
@@ -80,7 +80,7 @@ for (const width of [1440, 390]) {
     await search.fill("keyword");
     await expect(titles).toHaveCount(7);
     await page.screenshot({
-      path: `../.scratch/history-orc-filter/${width}-all.png`,
+      path: testInfo.outputPath(`${width}-all.png`),
     });
     await page.getByRole("button", { name: /^native/ }).click();
     await expect(page.locator(".history-transcript")).toContainText(

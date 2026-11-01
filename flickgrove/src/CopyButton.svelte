@@ -5,7 +5,7 @@
   import { Button } from "$lib/components/ui/button/index.js";
   import * as m from "./paraglide/messages";
 
-  let { text, label, class: className = "" }: { text: string; label: string; class?: string } = $props();
+  let { text, label, class: className = "", size = "icon-sm" }: { text: string; label: string; class?: string; size?: "icon-sm" | "icon-xs" } = $props();
   let copied = $state(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let destroyed = false;
@@ -24,6 +24,6 @@
   }
 </script>
 
-<Button variant="ghost" size="icon-sm" class={`copy-button ${className}`} aria-label={label} title={copied ? m.copied() : label} onclick={copy}>
+<Button variant="ghost" {size} class={`copy-button ${className}`} aria-label={label} title={copied ? m.copied() : label} onclick={copy}>
   {#if copied}<Check aria-hidden="true" />{:else}<Copy aria-hidden="true" />{/if}
 </Button>
