@@ -3,7 +3,6 @@
   "private": true,
   "workspaces": [
     "flickgrove",
-    "utterlog",
     "codex-tps"
   ],
   "scripts": {
