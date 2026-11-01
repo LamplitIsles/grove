@@ -30,7 +30,7 @@
     if (target !== url) return;
     const selected = generation;
     try {
-      const response = await fetch(target, { method: "HEAD", credentials: "omit", signal: AbortSignal.timeout(8000) });
+      const response = await fetch(target, { method: "HEAD", credentials: "same-origin", signal: AbortSignal.timeout(8000) });
       if (!response.ok) throw new Error("Preview expired or unavailable. Retry from the conversation.");
       if (selected === generation && target === url) loading = false;
     } catch {

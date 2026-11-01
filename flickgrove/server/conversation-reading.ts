@@ -23,6 +23,7 @@ export function deliveryMetadata(d: Delivery): Delivery {
     error: d.error?.slice(0, 2000),
     turnId: d.turnId,
     recoveryRef: true,
+    author: d.author,
   };
 }
 export function associate(message: Message, deliveries: Delivery[]): Message {
@@ -32,6 +33,7 @@ export function associate(message: Message, deliveries: Delivery[]): Message {
   return d
     ? {
         ...message,
+        ...(message.role === "user" && d.author ? { author: d.author } : {}),
         at: message.at || d.at,
         delivery: deliveryMetadata(d),
         ...(d.images?.length ? { images: d.images } : {}),

@@ -25,4 +25,7 @@
 <style>
   .model-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 12px; }
   .model-fields > label:last-child { grid-column: 1 / -1; }
+  @media (max-width: 600px) {
+    .model-fields { grid-template-columns: minmax(0, 1fr); }
+  }
 </style>

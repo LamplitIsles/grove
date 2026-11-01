@@ -41,6 +41,7 @@ function qualified<T extends Agent>(host: Host, a: T): T {
     finalFailure: a.finalFailure,
     workingSince: a.workingSince,
     lastActivityAt: a.lastActivityAt,
+    participants: a.participants,
     threadId: a.threadId,
     turnId: a.turnId,
     error: a.error,
@@ -152,9 +153,15 @@ export class HostService {
       ...this.workspace.snapshot(),
       entryId: this.identity.id,
       hosts: [this.local()],
-      agents: this.workspace
-        .snapshot()
-        .agents.map((a) => qualified(this.local(), a)),
+      agents: this.workspace.snapshot().agents.map((a) =>
+        qualified(this.local(), {
+          ...a,
+          participants:
+            a.role === "orc"
+              ? this.workspace.store.participants(a.id)
+              : undefined,
+        }),
+      ),
     };
   }
   projects(environment?: string) {
@@ -349,6 +356,7 @@ export class HostService {
     operationId: string,
     images?: MessageImage[],
     retry?: import("../src/chord-contract").RetrySend,
+    authorUserId?: string,
   ) {
     const result = await this.workspace.send(
       this.raw(id),
@@ -356,6 +364,7 @@ export class HostService {
       operationId,
       images,
       retry,
+      authorUserId,
     );
     return {
       ...qualified(this.local(), result),
@@ -367,6 +376,7 @@ export class HostService {
     text: string,
     operationId: string,
     images?: MessageImage[],
+    authorUserId?: string,
   ) {
     return qualified(
       this.local(),
@@ -375,6 +385,7 @@ export class HostService {
         text,
         operationId,
         images,
+        authorUserId,
       ),
     );
   }
@@ -426,10 +437,20 @@ export class HostService {
   closeTree(id: string, abandonUnknownOperationIds?: string[]) {
     return this.workspace.closeTree(this.raw(id), abandonUnknownOperationIds);
   }
-  async answerBatch(id: string, answers: Answer[], operationId: string) {
+  async answerBatch(
+    id: string,
+    answers: Answer[],
+    operationId: string,
+    authorUserId?: string,
+  ) {
     return qualified(
       this.local(),
-      await this.workspace.answerBatch(this.raw(id), answers, operationId),
+      await this.workspace.answerBatch(
+        this.raw(id),
+        answers,
+        operationId,
+        authorUserId,
+      ),
     );
   }
   retryDelivery(id: string, deliveryId: string) {

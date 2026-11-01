@@ -399,3 +399,196 @@ test("bounded grants, preflight, stream intake and replaced resource roots", asy
   await symlink(f.cwd, f.reports);
   expect((await fetch(recent)).ok).toBe(false);
 });
+
+test("authenticated preview capabilities follow only their issuing session through logout, recovery and expiry", async () => {
+  const { GroveAuth } = await import("./auth");
+  const { authenticator } = await import("./synthetic-auth");
+  const f = await fixture();
+  const origin = "http://localhost:3082";
+  const auth = new GroveAuth(f.app.store, join(f.root, "state"), origin);
+  cleanup.push(() => auth.close());
+  const handler = createHandler(f.app, {
+    service: f.service,
+    origin: () => origin,
+    auth,
+  });
+  const call = (
+    path: string,
+    body?: unknown,
+    cookies: string[] = [],
+    extra: Record<string, string> = {},
+  ) =>
+    handler(
+      new Request(new URL(path, origin), {
+        method: body === undefined ? "GET" : "POST",
+        headers: {
+          origin,
+          cookie: cookies.join("; "),
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+          ...extra,
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      }),
+    );
+  const cookie = (r: Response, name: string) => {
+    const value = r.headers
+      .getSetCookie()
+      .find((v) => v.startsWith(`${name}=`));
+    if (!value)
+      throw new Error(`Missing synthetic ${name} cookie: ${r.status}`);
+    return value.split(";")[0]!;
+  };
+  const aliceDevice = authenticator(origin);
+  async function register(
+    code: string,
+    nickname: string | undefined,
+    device = authenticator(origin),
+  ) {
+    const paired = await call("/api/auth/pair", { code, nickname });
+    expect(paired.status).toBe(200);
+    const pairCookie = cookie(paired, "grove_pair");
+    const opts = await call(
+      "/api/auth/passkey/generate-register-options",
+      undefined,
+      [pairCookie],
+    );
+    expect(opts.status).toBe(200);
+    const { challenge } = (await opts.clone().json()) as { challenge: string };
+    const response = await call(
+      "/api/auth/passkey/verify-registration",
+      {
+        createSession: true,
+        response: device.register(challenge),
+      },
+      [pairCookie, cookie(opts, "better-auth.better-auth-passkey")],
+    );
+    expect(response.status).toBe(200);
+    return cookie(response, "better-auth.session_token");
+  }
+  const create = (session?: string) =>
+    call(
+      "/api/file-preview",
+      { agent: f.id, href: "reports/page.html" },
+      session ? [session] : [],
+      { "X-Grove-Peer": f.service.identity.id },
+    );
+  expect((await create()).status).toBe(401);
+  expect((await call(`/preview/${"a".repeat(64)}/page.html`)).status).toBe(410);
+  const alice = await register(
+    auth.issue("bootstrap").code,
+    "Alice",
+    aliceDevice,
+  );
+  const invite = await call("/api/auth/invitations", {}, [alice]);
+  const bob = await register(
+    ((await invite.json()) as { code: string }).code,
+    "Bob",
+  );
+  const aliceHuman = await auth.session(new Headers({ cookie: alice }));
+  const aliceGrant = await create(alice),
+    bobGrant = await create(bob);
+  expect(aliceGrant.status).toBe(200);
+  expect(bobGrant.status).toBe(200);
+  expect(aliceGrant.headers.get("cache-control")).toBe("no-store");
+  expect(aliceGrant.headers.get("referrer-policy")).toBe("no-referrer");
+  const aliceUrl = ((await aliceGrant.json()) as { url: string }).url;
+  const bobUrl = ((await bobGrant.json()) as { url: string }).url;
+  expect(aliceUrl).not.toContain(f.root);
+  expect(aliceUrl).not.toContain(aliceHuman!.sessionId);
+  expect(aliceUrl).not.toContain(alice.split("=")[1]!);
+  const document = await call(aliceUrl, undefined, [], { origin: "null" });
+  expect(document.status).toBe(200);
+  expect(document.headers.get("cache-control")).toBe("no-store");
+  expect(document.headers.get("referrer-policy")).toBe("no-referrer");
+  expect(document.headers.get("content-security-policy")).toBe(
+    "sandbox allow-scripts",
+  );
+  expect(document.headers.get("access-control-allow-origin")).toBe("*");
+  expect(await document.text()).toContain("Report");
+  await writeFile(join(f.reports, "style.css"), "body {color: red}");
+  const cssUrl = aliceUrl.replace("page.html", "style.css");
+  expect((await call(cssUrl, undefined, [], { origin: "null" })).status).toBe(
+    200,
+  );
+  expect(
+    (
+      await handler(
+        new Request(cssUrl, { method: "HEAD", headers: { origin: "null" } }),
+      )
+    ).status,
+  ).toBe(200);
+  expect(
+    (await call(aliceUrl.replace("page.html", "%2e%2e%2fprivate.json"))).status,
+  ).toBe(400);
+
+  // A read already awaiting a remote source must fail when its issuer logs out.
+  const originalProject = f.service.previewProject.bind(f.service);
+  const originalRead = f.service.remoteProjectRead.bind(f.service);
+  const started = Promise.withResolvers<void>();
+  const issuing = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let blockIssue = false;
+  f.service.previewProject = () => ({
+    alias: "remote",
+    name: "Remote",
+    path: "/project",
+    environment: { id: "fixture", name: "Fixture", target: "synthetic" },
+  });
+  f.service.remoteProjectRead = async (_project, request) => {
+    if (request.operation === "preview-read") {
+      started.resolve();
+      await release.promise;
+    } else if (request.operation === "preview-grant" && blockIssue) {
+      issuing.resolve();
+      await release.promise;
+    }
+    return {
+      canonical: "/project/reports/page.html",
+      root: "/project/reports",
+      bytes: Buffer.from("<h1>synthetic remote</h1>").toString("base64"),
+    };
+  };
+  const remoteGrant = await create(alice);
+  expect(remoteGrant.status).toBe(200);
+  const remoteUrl = ((await remoteGrant.json()) as { url: string }).url;
+  const inFlight = call(remoteUrl);
+  await started.promise;
+  blockIssue = true;
+  const pendingIssue = create(alice);
+  await issuing.promise;
+  expect((await call("/api/auth/sign-out", {}, [alice])).status).toBe(200);
+  release.resolve();
+  expect((await inFlight).status).toBe(410);
+  expect((await pendingIssue).status).toBe(401);
+  f.service.previewProject = originalProject;
+  f.service.remoteProjectRead = originalRead;
+  expect((await call(aliceUrl)).status).toBe(410);
+  expect((await call(bobUrl)).status).toBe(200);
+
+  const loginOptions = await call(
+    "/api/auth/passkey/generate-authenticate-options",
+  );
+  const challenge = (
+    (await loginOptions.clone().json()) as { challenge: string }
+  ).challenge;
+  const login = await call(
+    "/api/auth/passkey/verify-authentication",
+    { response: aliceDevice.login(challenge) },
+    [cookie(loginOptions, "better-auth.better-auth-passkey")],
+  );
+  expect(login.status).toBe(200);
+  const aliceAgain = cookie(login, "better-auth.session_token");
+  const nextGrant = (
+    (await (await create(aliceAgain)).json()) as { url: string }
+  ).url;
+  const bobUser = auth.users().find((u) => u.name === "Bob")!;
+  await register(auth.issue("recovery", bobUser.id).code, undefined);
+  expect((await call(bobUrl)).status).toBe(410);
+  expect((await call(bobUrl, undefined, [aliceAgain])).status).toBe(410);
+  expect((await call(nextGrant)).status).toBe(200);
+  const session = await auth.session(new Headers({ cookie: aliceAgain }));
+  f.app.store.sqlite
+    .query('UPDATE "session" SET "expiresAt" = ? WHERE id = ?')
+    .run(new Date(0).toISOString(), session!.sessionId);
+  expect((await call(nextGrant)).status).toBe(410);
+});

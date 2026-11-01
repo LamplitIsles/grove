@@ -215,14 +215,14 @@ test("real Bun migrator converts all durable roles, envelopes and order atomical
   ).toBeNull();
   expect(
     db.sqlite.query("SELECT count(*) AS n FROM __drizzle_migrations").get(),
-  ).toEqual({ n: 4 });
+  ).toEqual({ n: 5 });
   const reopened = store(path);
   expect(reopened.byId("parent")?.deliveries).toEqual(parent.deliveries);
   expect(
     reopened.sqlite
       .query("SELECT count(*) AS n FROM __drizzle_migrations")
       .get(),
-  ).toEqual({ n: 4 });
+  ).toEqual({ n: 5 });
 });
 test("conversion failure rolls back schema, data and success log and refuses Workspace startup", () => {
   const { path, directory } = fixture();

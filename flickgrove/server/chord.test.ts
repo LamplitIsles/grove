@@ -11,7 +11,11 @@ import { FakeRuntime, fixtureProjects } from "./testing";
 import { createUpgrade, createHandler } from "./http";
 import { groveWebsocket } from "./chord-socket";
 import { socketWithHeaders } from "./socket-testing";
-import { openGrove } from "../src/chord-client";
+import {
+  openGrove,
+  RequestRejected,
+  RequestTimeout,
+} from "../src/chord-client";
 import type { Detail } from "../src/contracts";
 import type { Receipt, View } from "../src/chord-contract";
 const cleanups: (() => void)[] = [];
@@ -453,6 +457,76 @@ test("slow read and late result leave the socket and other calls alive", async (
   expect(disconnected).toBe(0);
 });
 
+test("timed-out reconnect selections identify the read and later publish the selected history", async () => {
+  const f = fixture();
+  const a = await f.app.createOrc("alpha"),
+    b = await f.app.createOrc("beta");
+  const aid = qualify(f.service.identity.id, a.id),
+    bid = qualify(f.service.identity.id, b.id);
+  const runtime = f.restart();
+  runtime.historyItems.set(a.threadId!, [
+    {
+      id: "native-after-restart",
+      role: "assistant",
+      text: "Updated history",
+      at: 1,
+    },
+  ]);
+  let gate = Promise.withResolvers<void>();
+  const read = runtime.historyMessages.bind(runtime);
+  let slowReads = 0,
+    completedReads = 0;
+  runtime.historyMessages = async (thread, cursor) => {
+    if (thread === a.threadId) {
+      slowReads++;
+      await gate.promise;
+      completedReads++;
+    }
+    return read(thread, cursor);
+  };
+  let view: View | undefined,
+    offline = 0;
+  const client = await f.client(
+    (value) => (view = value),
+    () => offline++,
+    80,
+  );
+  const attempts = await Promise.allSettled(
+    [1, 2, 3].map(() => client.call("select", { ids: [aid] })),
+  );
+  expect(slowReads).toBe(3);
+  for (const result of attempts) {
+    expect(result.status).toBe("rejected");
+    if (result.status !== "rejected") throw new Error("Expected timeout");
+    expect(result.reason).toBeInstanceOf(RequestTimeout);
+    expect(result.reason.member).toBe("select");
+    expect(result.reason.message).toBe("Response timed out. Outcome unknown.");
+  }
+  expect(view?.details[aid]).toBeUndefined();
+  gate.resolve();
+  await until(
+    () =>
+      view?.details[aid]?.messages.some(
+        (m) => m.id === "native-after-restart",
+      ) === true,
+  );
+  expect(runtime.inputs).toHaveLength(0);
+  expect(offline).toBe(0);
+  gate = Promise.withResolvers<void>();
+  await expect(client.call("select", { ids: [aid] })).rejects.toBeInstanceOf(
+    RequestTimeout,
+  );
+  expect(slowReads).toBe(4);
+  await client.call("select", { ids: [bid] });
+  await until(() => !!view?.details[bid]);
+  gate.resolve();
+  await until(() => completedReads === 4);
+  expect(view?.details[aid]).toBeUndefined();
+  await expect(
+    client.call("select", { ids: ["foreign:missing"] }),
+  ).rejects.toBeInstanceOf(RequestRejected);
+});
+
 test("timed out mutation is reconciled by receipt without replay or disconnect", async () => {
   const f = fixture();
   const agent = await f.app.createOrc("alpha");
@@ -465,9 +539,14 @@ test("timed out mutation is reconciled by receipt without replay or disconnect",
   );
   const hold = Promise.withResolvers<string>();
   f.runtime.sendOverride = () => hold.promise;
-  await expect(
-    client.call("send", { id, text: "once", operationId: "slow-once" }),
-  ).rejects.toThrow("Outcome unknown");
+  const failure = await client
+    .call("send", { id, text: "once", operationId: "slow-once" })
+    .catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(RequestTimeout);
+  expect((failure as RequestTimeout).member).toBe("send");
+  expect((failure as RequestTimeout).message).toBe(
+    "Response timed out. Outcome unknown.",
+  );
   expect(f.runtime.inputs).toHaveLength(1);
   expect(disconnected).toBe(0);
   hold.resolve("fixture-turn");

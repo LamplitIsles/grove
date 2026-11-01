@@ -29,6 +29,13 @@
       "when": 1793504938744,
       "tag": "0003_follow_up_mode",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1793544200824,
+      "tag": "0004_multi_user_auth",
+      "breakpoints": true
     }
   ]
 }

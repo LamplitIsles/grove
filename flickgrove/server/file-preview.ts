@@ -8,6 +8,7 @@ import type { Project } from "../src/contracts";
 import { z } from "zod";
 import { localFile } from "../src/local-file";
 import type { HostService } from "./hosts";
+import type { GroveAuth, HumanSession } from "./auth";
 
 export const PREVIEW_BYTES = 20 * 1024 * 1024;
 export const PREVIEW_TTL = 15 * 60 * 1000;
@@ -72,10 +73,14 @@ async function read(root: string, target: string) {
     await handle.close();
   }
 }
-export function filePreview(service: HostService, now = Date.now) {
+export function filePreview(
+  service: HostService,
+  now = Date.now,
+  authProvider?: () => GroveAuth | undefined,
+) {
   const grants = new Map<
     string,
-    { root: string; expires: number; project?: Project }
+    { root: string; expires: number; project?: Project; sessionId?: string }
   >();
   const remote = async (project: Project, request: Record<string, unknown>) => {
     const value = z
@@ -99,7 +104,9 @@ export function filePreview(service: HostService, now = Date.now) {
   return async (
     request: Request,
     origins: string[],
+    human?: HumanSession | null,
   ): Promise<Response | undefined> => {
+    const auth = authProvider?.();
     const url = new URL(request.url);
     const resource = url.pathname.startsWith("/preview/");
     if (!resource && url.pathname !== "/api/file-preview") return;
@@ -119,11 +126,17 @@ export function filePreview(service: HostService, now = Date.now) {
       if (resource) {
         const match = /^\/preview\/([a-f0-9]{64})\/(.+)$/.exec(url.pathname);
         const grant = match && grants.get(match[1]);
-        if (!grant)
+        const active = () =>
+          !!grant &&
+          grant.expires > now() &&
+          (!auth || (!!grant.sessionId && auth.sessionActive(grant.sessionId)));
+        if (!grant || !active()) {
+          if (match) grants.delete(match[1]);
           return fail(
             "Preview expired or unavailable. Retry from the conversation.",
             410,
           );
+        }
         if (request.method !== "GET" && request.method !== "HEAD")
           return fail("Read only", 405);
         const path = decodeURIComponent(match![2]);
@@ -137,6 +150,15 @@ export function filePreview(service: HostService, now = Date.now) {
               target: posix.resolve(grant.root, path),
             })
           : await read(grant.root, resolve(grant.root, path));
+        // The read can cross an async local or remote boundary; a revoked session
+        // must not receive bytes that finished loading after revocation.
+        if (!active()) {
+          grants.delete(match![1]);
+          return fail(
+            "Preview expired or unavailable. Retry from the conversation.",
+            410,
+          );
+        }
         headers.set("Content-Type", file.type);
         headers.set("Access-Control-Allow-Origin", "*");
         const markdown = file.type.startsWith("text/markdown");
@@ -155,6 +177,7 @@ export function filePreview(service: HostService, now = Date.now) {
           headers,
         });
       }
+      if (auth && !human) return fail("Authentication required", 401);
       const origin = browserOrigin(request, origins);
       if (!origin)
         return fail("Open FlickGrove from its configured address", 403);
@@ -202,6 +225,8 @@ export function filePreview(service: HostService, now = Date.now) {
         });
         if (!file.root || !localFile(file.canonical))
           throw new Error("File type is not supported");
+        if (auth && (!human || !auth.sessionActive(human.sessionId)))
+          return fail("Authentication required", 401);
         const id =
           crypto.randomUUID().replaceAll("-", "") +
           crypto.randomUUID().replaceAll("-", "");
@@ -210,6 +235,7 @@ export function filePreview(service: HostService, now = Date.now) {
           root: file.root,
           project: structuredClone(project),
           expires: now() + PREVIEW_TTL,
+          sessionId: human?.sessionId,
         });
         return Response.json(
           {
@@ -242,11 +268,17 @@ export function filePreview(service: HostService, now = Date.now) {
       if (!localFile(target)) return fail("File type is not supported");
       const root = dirname(target);
       await read(root, target);
+      if (auth && (!human || !auth.sessionActive(human.sessionId)))
+        return fail("Authentication required", 401);
       const id =
         crypto.randomUUID().replaceAll("-", "") +
         crypto.randomUUID().replaceAll("-", "");
       if (grants.size >= 256) grants.delete(grants.keys().next().value!);
-      grants.set(id, { root, expires: now() + PREVIEW_TTL });
+      grants.set(id, {
+        root,
+        expires: now() + PREVIEW_TTL,
+        sessionId: human?.sessionId,
+      });
       return Response.json(
         {
           url: `${origin}/preview/${id}/${encodeURIComponent(basename(target))}${link.fragment}`,

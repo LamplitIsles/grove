@@ -36,6 +36,12 @@ export function decodeFrame(raw: string) {
   return frame;
 }
 export class RequestRejected extends Error {}
+export class RequestTimeout extends Error {
+  constructor(readonly member: string) {
+    super("Response timed out. Outcome unknown.");
+    this.name = "RequestTimeout";
+  }
+}
 export async function openGrove(
   socket: WebSocket,
   changed: (view: View) => void,
@@ -87,8 +93,10 @@ export async function openGrove(
       const id = String(++sequence);
       const timer = setTimeout(() => {
         pending.delete(id);
-        reject(new Error("Response timed out. Outcome unknown."));
-        timedOut(call.serviceId === Grove.id ? call.member : "subscription");
+        const member =
+          call.serviceId === Grove.id ? call.member : "subscription";
+        reject(new RequestTimeout(member));
+        timedOut(member);
       }, timeoutMs);
       pending.set(id, { resolve, reject, timer });
       try {

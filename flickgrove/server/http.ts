@@ -1,3 +1,4 @@
+import type { GroveAuth } from "./auth";
 import { browserOrigin } from "./browser-origin";
 import { readingHttp } from "./reading-http";
 import { filePreview } from "./file-preview";
@@ -19,11 +20,13 @@ type Options = {
   localOrigin?: () => string;
   assets?: string;
   service: HostService;
+  auth?: GroveAuth;
 };
 export function createUpgrade(workspace: Workspace, options: Options) {
   return (
     request: Request,
     server: Pick<Server<SocketData>, "upgrade">,
+    human?: import("./auth").HumanSession | null,
   ): Response | true | undefined => {
     const url = new URL(request.url);
     if (url.pathname !== "/api/socket") return;
@@ -49,6 +52,8 @@ export function createUpgrade(workspace: Workspace, options: Options) {
         { error: "Open FlickGrove from its configured address" },
         403,
       );
+    if (options.auth && !human)
+      return json({ error: "Authentication required" }, 401);
     if (
       server.upgrade(request, {
         ...(protocols.includes("grove.v1")
@@ -57,6 +62,9 @@ export function createUpgrade(workspace: Workspace, options: Options) {
         data: {
           app: options.service,
           service: options.service,
+          auth: options.auth,
+          human,
+          authHeaders: request.headers,
         },
       })
     )
@@ -65,7 +73,7 @@ export function createUpgrade(workspace: Workspace, options: Options) {
   };
 }
 export function createHandler(workspace: Workspace, options: Options) {
-  const preview = filePreview(options.service);
+  const preview = filePreview(options.service, Date.now, () => options.auth);
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
     const mcp = url.pathname.startsWith("/api/mcp/");
@@ -77,7 +85,22 @@ export function createHandler(workspace: Workspace, options: Options) {
       : [origin, options.localOrigin?.()].filter(
           (value): value is string => !!value,
         );
-    const file = await preview(request, origins);
+    let human: import("./auth").HumanSession | null | undefined;
+    if (options.auth && !mcp) {
+      if (url.pathname.startsWith("/api/auth/")) {
+        if (!browserOrigin(request, origins))
+          return json({ error: "Wrong origin" }, 403);
+        return options.auth.handle(request, (user) =>
+          workspace.updateHuman(user),
+        );
+      }
+      if (url.pathname.startsWith("/api/")) {
+        human = await options.auth.session(request.headers);
+        if (!human) return json({ error: "Authentication required" }, 401);
+      }
+    }
+    // The preview handler validates each bearer grant against its issuing session.
+    const file = await preview(request, origins, human);
     const voice = await voiceHttp(
       request,
       options.service,
@@ -170,6 +193,16 @@ export function servePeer(
     maxRequestBodySize: IMAGE_UPLOAD_BYTES,
     websocket: groveWebsocket,
     async fetch(request, server) {
+      const human =
+        options.auth && new URL(request.url).pathname.startsWith("/api/voice/")
+          ? await options.auth.session(request.headers)
+          : undefined;
+      if (
+        options.auth &&
+        new URL(request.url).pathname.startsWith("/api/voice/") &&
+        !human
+      )
+        return json({ error: "Authentication required" }, 401);
       const voice = await voiceHttp(
         request,
         options.service,
@@ -178,9 +211,16 @@ export function servePeer(
         ),
         options.voice,
         server,
+        options.auth
+          ? { auth: options.auth, human: human!, authHeaders: request.headers }
+          : undefined,
       );
       if (voice) return voice === true ? undefined : voice;
-      const result = upgrade(request, server);
+      const socketHuman =
+        options.auth && new URL(request.url).pathname === "/api/socket"
+          ? await options.auth.session(request.headers)
+          : undefined;
+      const result = upgrade(request, server, socketHuman);
       return result === true ? undefined : (result ?? handler(request));
     },
   });

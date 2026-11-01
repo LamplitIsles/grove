@@ -15,7 +15,7 @@ import {
 } from "./directory-branches";
 import type { MessageImage } from "../src/contracts";
 import { WorkspaceStore } from "./workspace-store";
-import { mkdirSync, realpathSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import type {
   Agent,
@@ -77,7 +77,7 @@ type State = {
 export class Workspace {
   private readonly branches: DirectoryBranches;
   readonly images: ImageStore;
-  private readonly store: WorkspaceStore;
+  readonly store: WorkspaceStore;
   private readonly messageNavigation = new MessageNavigation();
   private readonly state: State;
   private readonly handles = new Map<string, RuntimeHandle>();
@@ -165,6 +165,7 @@ export class Workspace {
     },
   ) {
     mkdirSync(options.directory, { recursive: true, mode: 0o700 });
+    chmodSync(options.directory, 0o700);
     this.images = new ImageStore(join(options.directory, "media"));
     this.store = new WorkspaceStore(
       join(options.directory, "workspace.sqlite"),
@@ -284,6 +285,17 @@ export class Workspace {
   subscribe(listener: () => void) {
     this.subscribers.add(listener);
     return () => this.subscribers.delete(listener);
+  }
+  updateHuman(user: import("../src/contracts").Human) {
+    for (const agent of this.state.agents) {
+      for (const delivery of agent.deliveries)
+        if (delivery.authorUserId === user.id) delivery.author = user;
+      for (const message of agent.messages) {
+        if (message.author?.id === user.id) message.author = user;
+        if (message.delivery?.author?.id === user.id)
+          message.delivery.author = user;
+      }
+    }
   }
   private confirmNative(a: RuntimeAgent, clientId?: string, turnId?: string) {
     const d = clientId
@@ -1642,6 +1654,7 @@ export class Workspace {
     answers?: Answer[],
     images?: MessageImage[],
     startOnly = false,
+    authorUserId?: string,
   ) {
     if (this.writeFailure) throw this.writeFailure;
     if (this.disposed) throw new Error("Workspace is stopped");
@@ -1682,6 +1695,8 @@ export class Workspace {
         id: requestId,
         text,
         source,
+        authorUserId,
+        author: authorUserId ? this.store.user(authorUserId) : undefined,
         status: "sending",
         questionIds,
         ...(answers ? { answers: structuredClone(answers) } : {}),
@@ -1693,6 +1708,7 @@ export class Workspace {
       d.status = "sending";
       d.error = undefined;
     }
+    d.admissionAt = Date.now();
     // Retries use the persisted envelope, including its delegated question IDs.
     text = d.text;
     questionIds = d.questionIds;
@@ -1981,6 +1997,7 @@ export class Workspace {
     text: string,
     requestId: string,
     images?: MessageImage[],
+    authorUserId?: string,
   ) {
     return this.serialize(id, async () => {
       const a = this.agent(id);
@@ -2013,6 +2030,8 @@ export class Workspace {
         id: requestId,
         mode: "follow_up",
         source: "user",
+        authorUserId,
+        author: authorUserId ? this.store.user(authorUserId) : undefined,
         status: "waiting",
         text,
         images: images?.length ? structuredClone(images) : undefined,
@@ -2268,6 +2287,7 @@ export class Workspace {
     requestId: string,
     images?: MessageImage[],
     retry?: import("../src/chord-contract").RetrySend,
+    authorUserId?: string,
   ): Promise<import("../src/chord-contract").SendResult> {
     return this.serialize(id, async () => {
       const a = this.agent(id);
@@ -2319,6 +2339,8 @@ export class Workspace {
           attemptId: retry?.attempt,
           text,
           source: "user",
+          authorUserId,
+          author: authorUserId ? this.store.user(authorUserId) : undefined,
           status: "failed",
           questionIds: [],
           images,
@@ -2334,13 +2356,25 @@ export class Workspace {
           attemptId: retry.attempt,
           text,
           source: "user",
+          authorUserId,
+          author: authorUserId ? this.store.user(authorUserId) : undefined,
           status: "failed",
           questionIds: [],
           images,
           at: Date.now(),
         });
       }
-      return this.deliver(a, text, requestId, "user", [], undefined, images);
+      return this.deliver(
+        a,
+        text,
+        requestId,
+        "user",
+        [],
+        undefined,
+        images,
+        false,
+        authorUserId,
+      );
     });
   }
   abandonCloseCandidate(id: string) {
@@ -2474,7 +2508,12 @@ export class Workspace {
       return { closed: true as const, id };
     });
   }
-  answerBatch(id: string, answers: Answer[], operationId: string) {
+  answerBatch(
+    id: string,
+    answers: Answer[],
+    operationId: string,
+    authorUserId?: string,
+  ) {
     return this.serialize(id, async () => {
       const a = this.agent(id);
       if (a.role !== "orc")
@@ -2534,6 +2573,9 @@ export class Workspace {
         "question",
         frozen.map((answer) => answer.questionId),
         frozen,
+        undefined,
+        false,
+        authorUserId,
       );
     });
   }

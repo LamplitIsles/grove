@@ -1,5 +1,9 @@
 # FlickGrove interface
 
+In Settings, Models presents Orc and Worker as tabs. Switching tabs retains each role's edits, while Fast and Save remain shared. Keep the form within the available width; short mobile windows may scroll vertically to reach all controls.
+
+The sidebar footer displays the current user's avatar and nickname, followed by right-aligned Settings and Sign out icon buttons. Sign out opens a confirmation dialog; cancel, Escape and Back retain the session, and a failed sign-out stays visible for retry.
+
 Keep open-session items to a title and one metadata line. Put execution state and needs-input indicators in the upper-right, and Worker counts/disclosure at the lower-right. History results also use two lines; their conversation content belongs in a preview rather than another result row.
 
 N opens the local project selection. Find history then opens an independent title/first-message search, with a compact result list and read-only conversation preview. Back returns from preview to the same search, then to creation. Resume opens the original thread and dismisses the creation journey. Preserve Orc/Worker identity; Workers cannot be promoted. Show writer-lock refusal beside Resume and permit explicit retry, without a force action or automatic mutation replay. Restored transcripts include external continuation in its original order and retain folded Worker/Reviewer/Researcher report cards through per-item clientId association, without duplicate user messages across page boundaries.

@@ -1,6 +1,11 @@
 import { inputs, jsonValue, type Method } from "../src/chord-contract";
 import type { HostService } from "./hosts";
-export async function invoke(app: HostService, member: Method, input: unknown) {
+export async function invoke(
+  app: HostService,
+  member: Method,
+  input: unknown,
+  authorUserId?: string,
+) {
   // Each case narrows its schema before invoking the existing domain methods.
   const parse = <K extends Method>(
     key: K,
@@ -52,11 +57,24 @@ export async function invoke(app: HostService, member: Method, input: unknown) {
     }
     case "send": {
       const p = parse(member);
-      return await app.send(p.id, p.text, p.operationId, p.images, p.retry);
+      return await app.send(
+        p.id,
+        p.text,
+        p.operationId,
+        p.images,
+        p.retry,
+        authorUserId,
+      );
     }
     case "enqueueFollowUp": {
       const p = parse(member);
-      return await app.enqueueFollowUp(p.id, p.text, p.operationId, p.images);
+      return await app.enqueueFollowUp(
+        p.id,
+        p.text,
+        p.operationId,
+        p.images,
+        authorUserId,
+      );
     }
     case "cancelFollowUp": {
       const p = parse(member);
@@ -86,7 +104,12 @@ export async function invoke(app: HostService, member: Method, input: unknown) {
     }
     case "answerBatch": {
       const p = parse(member);
-      return await app.answerBatch(p.id, p.answers, p.operationId);
+      return await app.answerBatch(
+        p.id,
+        p.answers,
+        p.operationId,
+        authorUserId,
+      );
     }
     case "stop": {
       const p = parse(member);

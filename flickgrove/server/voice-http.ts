@@ -11,6 +11,7 @@ export async function voiceHttp(
   origins: string[],
   options: VoiceOptions = {},
   server?: Pick<Server<SocketData>, "upgrade">,
+  authData?: Pick<SocketData, "auth" | "human" | "authHeaders">,
 ): Promise<Response | true | undefined> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/voice/")) return;
@@ -58,6 +59,7 @@ export async function voiceHttp(
         app: service,
         service,
         voice: { key: value.key, peerId: service.identity.id, options },
+        ...authData,
       },
     })
   )

@@ -44,6 +44,8 @@ const configKeys = [
 ] as const;
 const deliveryKeys = [
   "mode",
+  "authorUserId",
+  "admissionAt",
   "attemptId",
   "images",
   "answers",
@@ -250,6 +252,32 @@ export class WorkspaceStore {
       throw error;
     }
   }
+  user(id: string) {
+    return this.db
+      .select({
+        id: s.authUsers.id,
+        name: s.authUsers.name,
+        color: s.authUsers.color,
+      })
+      .from(s.authUsers)
+      .where(eq(s.authUsers.id, id))
+      .get();
+  }
+  participants(rootSessionId: string) {
+    return this.db
+      .select({
+        user: {
+          id: s.authUsers.id,
+          name: s.authUsers.name,
+          color: s.authUsers.color,
+        },
+        lastSpokeAt: s.treeUserActivity.lastSpokeAt,
+      })
+      .from(s.treeUserActivity)
+      .innerJoin(s.authUsers, eq(s.authUsers.id, s.treeUserActivity.userId))
+      .where(eq(s.treeUserActivity.rootSessionId, rootSessionId))
+      .all();
+  }
   historyProjects() {
     return this.db
       .select({ id: s.sessions.id, project: s.sessions.project })
@@ -345,6 +373,8 @@ export class WorkspaceStore {
             at: d.at,
             ...optional(d.report),
             ...optional({
+              authorUserId: d.authorUserId,
+              admissionAt: d.admissionAt,
               attemptId: d.attemptId,
               turnId: d.turnId,
               error: d.error,
@@ -353,6 +383,8 @@ export class WorkspaceStore {
             questionIds: qs.map((q) => q.questionId),
             ...(answers.length ? { answers } : {}),
           };
+          if (d.authorUserId)
+            Object.assign(delivery, { author: this.user(d.authorUserId) });
           this.positions.set(delivery, d.position);
           return delivery;
         }),
@@ -496,6 +528,8 @@ export class WorkspaceStore {
           position,
           ...pick(d, ["text", "source", "status", "at"]),
           mode: d.mode ?? "direct",
+          authorUserId: d.authorUserId ?? null,
+          admissionAt: d.admissionAt ?? null,
           attemptId: d.attemptId ?? null,
           turnId: d.turnId ?? null,
           error: d.error ?? null,
@@ -515,6 +549,25 @@ export class WorkspaceStore {
             set: row,
           })
           .run();
+        if (d.status === "sent" && d.authorUserId && d.admissionAt) {
+          const rootSessionId = a.ownerId ?? a.id;
+          tx.insert(s.treeUserActivity)
+            .values({
+              rootSessionId,
+              userId: d.authorUserId,
+              lastSpokeAt: d.admissionAt,
+            })
+            .onConflictDoUpdate({
+              target: [
+                s.treeUserActivity.rootSessionId,
+                s.treeUserActivity.userId,
+              ],
+              set: {
+                lastSpokeAt: sql`max(${s.treeUserActivity.lastSpokeAt}, excluded.last_spoke_at)`,
+              },
+            })
+            .run();
+        }
         // Immutable associations insert once; status confirmation never rewrites them.
         for (const [i, questionId] of d.questionIds.entries())
           tx.insert(s.deliveryQuestions)

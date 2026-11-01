@@ -6,11 +6,15 @@ import {
   type ReplicatedState,
 } from "@earendil-works/chord";
 import { z } from "zod";
-import type { Detail, Snapshot } from "./contracts";
+import type { Detail, Human, Snapshot } from "./contracts";
 
 // Returned only by the explicit send call; never published as reading state.
 export type SendResult = Detail & { retryNotAdmitted?: string };
-export type View = { snapshot: Snapshot; details: Record<string, Detail> };
+export type View = {
+  snapshot: Snapshot;
+  details: Record<string, Detail>;
+  users?: Human[];
+};
 export type Receipt = {
   operationId: string;
   attemptId?: string;
@@ -170,7 +174,11 @@ const question = z.object({
   answer: z.string().optional(),
   at: z.number(),
 });
+const human = z.object({ id, name: z.string(), color: z.string() });
 const agent = z.object({
+  participants: z
+    .array(z.object({ user: human, lastSpokeAt: z.number() }))
+    .optional(),
   userHandoff: z.object({ id, summary: z.string().min(1).max(300) }).optional(),
   finalFailure: z.object({ id }).optional(),
   backend: z.enum(["codex", "pi"]).optional(),
@@ -231,6 +239,7 @@ const agent = z.object({
     .optional(),
 });
 export const deliverySchema = z.object({
+  author: human.optional(),
   mode: z.enum(["direct", "follow_up"]).optional(),
   attemptId: id.optional(),
   recoveryRef: z.boolean().optional(),
@@ -279,6 +288,7 @@ export const detailSchema = agent.extend({
     z.object({
       id,
       questionItemId: id.optional(),
+      author: human.optional(),
       provisional: z.boolean().optional(),
       clientId: id.optional(),
       bodyRef: z.string().optional(),
@@ -313,6 +323,7 @@ export const snapshotSchema = z.object({
 export const viewSchema = z.object({
   snapshot: snapshotSchema,
   details: z.record(z.string(), detailSchema),
+  users: z.array(human).optional(),
 });
 export function jsonValue<T>(value: T): JsonRepresentation<T> {
   return JSON.parse(JSON.stringify(value));

@@ -6,6 +6,7 @@ import {
   index,
   foreignKey,
   uniqueIndex,
+  customType,
 } from "drizzle-orm/sqlite-core";
 import type { Agent, Delivery, Project, Question } from "../src/contracts";
 import type { RuntimeAgent, ExecutionSettings } from "./runtime";
@@ -35,6 +36,97 @@ export type ReportContext = Pick<
   | "researchQuestion"
 >;
 const json = <T>(name: string) => text(name, { mode: "json" }).$type<T>();
+// Better Auth's SQLite adapter owns the encoding of its DATE columns.
+const authDate = customType<{ data: string }>({ dataType: () => "date" });
+export const authUsers = sqliteTable("user", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  email: text("email").notNull().unique(),
+  emailVerified: integer("emailVerified").notNull(),
+  image: text("image"),
+  createdAt: authDate("createdAt").notNull(),
+  updatedAt: authDate("updatedAt").notNull(),
+  color: text("color").notNull(),
+});
+export const authSessions = sqliteTable(
+  "session",
+  {
+    id: text("id").primaryKey(),
+    expiresAt: authDate("expiresAt").notNull(),
+    token: text("token").notNull().unique(),
+    createdAt: authDate("createdAt").notNull(),
+    updatedAt: authDate("updatedAt").notNull(),
+    ipAddress: text("ipAddress"),
+    userAgent: text("userAgent"),
+    userId: text("userId")
+      .notNull()
+      .references(() => authUsers.id, { onDelete: "cascade" }),
+  },
+  (t) => [index("session_userId_idx").on(t.userId)],
+);
+export const authAccounts = sqliteTable(
+  "account",
+  {
+    id: text("id").primaryKey(),
+    accountId: text("accountId").notNull(),
+    providerId: text("providerId").notNull(),
+    userId: text("userId")
+      .notNull()
+      .references(() => authUsers.id, { onDelete: "cascade" }),
+    accessToken: text("accessToken"),
+    refreshToken: text("refreshToken"),
+    idToken: text("idToken"),
+    accessTokenExpiresAt: authDate("accessTokenExpiresAt"),
+    refreshTokenExpiresAt: authDate("refreshTokenExpiresAt"),
+    scope: text("scope"),
+    password: text("password"),
+    createdAt: authDate("createdAt").notNull(),
+    updatedAt: authDate("updatedAt").notNull(),
+  },
+  (t) => [index("account_userId_idx").on(t.userId)],
+);
+export const authVerifications = sqliteTable(
+  "verification",
+  {
+    id: text("id").primaryKey(),
+    identifier: text("identifier").notNull(),
+    value: text("value").notNull(),
+    expiresAt: authDate("expiresAt").notNull(),
+    createdAt: authDate("createdAt").notNull(),
+    updatedAt: authDate("updatedAt").notNull(),
+  },
+  (t) => [index("verification_identifier_idx").on(t.identifier)],
+);
+export const authPasskeys = sqliteTable(
+  "passkey",
+  {
+    id: text("id").primaryKey(),
+    name: text("name"),
+    publicKey: text("publicKey").notNull(),
+    userId: text("userId")
+      .notNull()
+      .references(() => authUsers.id, { onDelete: "cascade" }),
+    credentialID: text("credentialID").notNull(),
+    counter: integer("counter").notNull(),
+    deviceType: text("deviceType").notNull(),
+    backedUp: integer("backedUp").notNull(),
+    transports: text("transports"),
+    createdAt: authDate("createdAt"),
+    aaguid: text("aaguid"),
+  },
+  (t) => [
+    index("passkey_userId_idx").on(t.userId),
+    index("passkey_credentialID_idx").on(t.credentialID),
+  ],
+);
+export const authPairing = sqliteTable("authPairing", {
+  id: text("id").primaryKey(),
+  codeHash: text("codeHash").notNull().unique(),
+  kind: text("kind").$type<"bootstrap" | "invite" | "recovery">().notNull(),
+  targetUserId: text("targetUserId").references(() => authUsers.id),
+  expiresAt: authDate("expiresAt").notNull(),
+  generation: text("generation").notNull(),
+});
 export const sessions = sqliteTable(
   "sessions",
   {
@@ -85,6 +177,8 @@ export const deliveries = sqliteTable(
     attemptId: text("attempt_id"),
     turnId: text("turn_id"),
     at: integer("at").notNull(),
+    authorUserId: text("author_user_id").references(() => authUsers.id),
+    admissionAt: integer("admission_at"),
     error: text("error"),
     images: json<NonNullable<Delivery["images"]>>("images"),
     report: json<ReportContext>("report").notNull(),
@@ -94,6 +188,19 @@ export const deliveries = sqliteTable(
     index("deliveries_status").on(t.sessionId, t.status),
     index("deliveries_order").on(t.sessionId, t.position),
   ],
+);
+export const treeUserActivity = sqliteTable(
+  "tree_user_activity",
+  {
+    rootSessionId: text("root_session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => authUsers.id),
+    lastSpokeAt: integer("last_spoke_at").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.rootSessionId, t.userId] })],
 );
 export const questions = sqliteTable(
   "questions",

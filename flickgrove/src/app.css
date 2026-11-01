@@ -360,6 +360,9 @@ main {
 .user-message .message-role {
   display: none;
 }
+.user-message .message-role:has(.message-author) {
+  display: block;
+}
 .markdown {
   line-height: 1.8;
   overflow-wrap: anywhere;
@@ -761,7 +764,6 @@ pre {
 }
 .defaults-note,
 .project-keyboard,
-.settings-scope,
 .keyboard-scope {
   color: var(--muted-foreground);
   font-size: 12px;
@@ -1089,6 +1091,30 @@ pre {
 .session-item.navigation-focus {
   outline: 2px solid var(--primary);
   outline-offset: -2px;
+}
+.session-context-menu {
+  z-index: 70;
+  min-width: 150px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow: 0 8px 24px #0006;
+}
+.session-context-item {
+  border-radius: 4px;
+  padding: 7px 9px;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+}
+.session-context-item[data-highlighted] {
+  background: var(--accent);
+}
+.session-context-item[data-disabled] {
+  opacity: 0.5;
+  cursor: default;
 }
 .session-open {
   display: block;
@@ -2064,4 +2090,370 @@ button.question-option {
   outline: 2px solid var(--primary);
   outline-offset: -3px;
   border-radius: 6px;
+}
+
+.auth-screen {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: var(--background);
+  color: var(--foreground);
+}
+.auth-panel {
+  width: min(100%, 360px);
+  padding: 2rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--card);
+}
+.auth-panel h1 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin: 1rem 0 0.25rem;
+}
+.auth-panel p {
+  color: var(--muted-foreground);
+  font-size: 0.875rem;
+}
+.auth-mark,
+.account-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  flex: none;
+  border-radius: 0.375rem;
+  background: var(--primary);
+  color: white;
+  font-weight: 600;
+  font-size: 0.75rem;
+}
+.auth-form {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+}
+.auth-form label {
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+.auth-form input {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  background: var(--background);
+  color: var(--foreground);
+  padding: 0.5rem 0.65rem;
+}
+.auth-optional {
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+.auth-panel .auth-error {
+  color: var(--destructive);
+  margin-top: 0.5rem;
+}
+.account-footer {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 1rem;
+  border-top: 1px solid var(--border);
+}
+.account-footer-actions {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 0.125rem;
+  color: var(--muted-foreground);
+}
+.account-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+.account-settings {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+.account-settings h3 {
+  font-weight: 600;
+}
+.account-users {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.account-users li {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  font-size: 0.875rem;
+}
+.account-users small {
+  color: var(--muted-foreground);
+}
+.account-actions,
+.invite-code {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.invite-code code {
+  overflow-wrap: anywhere;
+}
+.invite-code small {
+  color: var(--muted-foreground);
+}
+.participants {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  flex-shrink: 0;
+}
+.participant-avatar,
+.participant-more {
+  display: inline-grid;
+  place-items: center;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 0.3rem;
+  color: white;
+  font-size: 0.6rem;
+  font-weight: 700;
+}
+.participant-more {
+  color: var(--muted-foreground);
+  width: auto;
+}
+.message-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--author-color);
+  font-weight: 600;
+}
+.message-author span {
+  display: inline-grid;
+  place-items: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 0.3rem;
+  background: var(--author-color);
+  color: white;
+  font-size: 0.65rem;
+}
+
+.grove-dialog.settings-modal {
+  display: flex;
+  flex-direction: column;
+  width: 760px;
+  height: min(540px, calc(100dvh - 48px));
+  overflow: hidden;
+}
+.grove-dialog.signout-dialog {
+  width: 420px;
+}
+.grove-dialog.signout-dialog [data-slot="dialog-title"] {
+  font-size: 18px;
+  line-height: 1.3;
+}
+.signout-actions {
+  flex-direction: row;
+  justify-content: flex-end;
+  margin-top: 24px;
+}
+.settings-layout {
+  display: grid;
+  grid-template-columns: 144px minmax(0, 1fr);
+  gap: 28px;
+  margin-top: 24px;
+  flex: 1;
+  min-height: 0;
+}
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-right: 1px solid var(--border);
+  padding-right: 12px;
+}
+.settings-nav button {
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  text-align: left;
+}
+.settings-nav button:hover,
+.settings-nav button.active {
+  color: var(--foreground);
+  background: var(--accent);
+}
+.settings-content {
+  min-width: 0;
+  min-height: 0;
+  padding: 4px;
+  overflow-y: auto;
+}
+.settings-content .role-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.role-tabs button {
+  padding: 8px 12px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  border-bottom: 2px solid transparent;
+}
+.role-tabs button:hover,
+.role-tabs button.active {
+  color: var(--foreground);
+}
+.role-tabs button.active {
+  border-bottom-color: var(--primary);
+}
+.settings-content .role-settings {
+  margin-top: 16px;
+}
+.settings-content .fast-setting {
+  padding-right: 12px;
+}
+.settings-content .modal-action {
+  gap: 4px;
+  margin-top: 16px;
+  padding-top: 12px;
+}
+.settings-content .modal-action:has(.install-link) {
+  flex-wrap: wrap;
+}
+.settings-content .modal-action:has(.install-link) .settings-action-start {
+  min-width: 0;
+}
+.settings-action-start {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-right: auto;
+}
+.model-fields > label {
+  min-width: 0;
+}
+.settings-section h2 {
+  font-size: 17px;
+  font-weight: 600;
+}
+.settings-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.settings-section > h2 {
+  margin-bottom: 20px;
+}
+.settings-heading + .role-tabs {
+  margin-top: 16px;
+}
+.profile-form {
+  display: grid;
+  gap: 8px;
+  max-width: 360px;
+  font-size: 13px;
+}
+.profile-form > label,
+.profile-form legend {
+  font-weight: 600;
+}
+.profile-form > input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+}
+.profile-form fieldset {
+  margin: 12px 0;
+  border: 0;
+  padding: 0;
+}
+.color-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.color-choice {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.color-choice input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.color-choice span {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+}
+.color-choice:has(input:checked) {
+  outline: 2px solid var(--foreground);
+  outline-offset: 1px;
+}
+.color-choice:has(input:focus-visible) {
+  box-shadow: 0 0 0 3px var(--ring);
+}
+.profile-form > button {
+  justify-self: start;
+}
+.profile-error {
+  color: var(--destructive);
+}
+.account-security {
+  margin-top: 30px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+.account-security h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+.settings-section .account-actions {
+  margin-top: 20px;
+}
+@media (max-width: 600px) {
+  .settings-layout {
+    grid-template-columns: 84px minmax(0, 1fr);
+    gap: 14px;
+  }
+  .settings-nav {
+    padding-right: 8px;
+  }
+  .settings-nav button {
+    padding: 8px 6px;
+  }
 }

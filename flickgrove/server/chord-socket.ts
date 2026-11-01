@@ -26,6 +26,11 @@ import { voiceRelay, type VoiceSocketData } from "./voice";
 type Channel = ReturnType<typeof connect>;
 export type SocketData = {
   voice?: VoiceSocketData;
+  auth?: import("./auth").GroveAuth;
+  human?: import("./auth").HumanSession | null;
+  authHeaders?: Headers;
+  unbindAuth?: () => void;
+  authExpiry?: ReturnType<typeof setTimeout>;
   app: HostService;
   service: HostService;
   channel?: Channel;
@@ -35,8 +40,12 @@ export type SocketData = {
 };
 function connect(socket: ServerWebSocket<SocketData>) {
   const { app, service } = socket.data;
+  const users = () =>
+    socket.data.auth && socket.data.human
+      ? { users: socket.data.auth.users() }
+      : {};
   const view = replicatedState(
-    jsonValue<View>({ snapshot: app.snapshot(), details: {} }),
+    jsonValue<View>({ snapshot: app.snapshot(), details: {}, ...users() }),
   );
   const provider = new RemoteServiceProvider([Grove]);
   let disposed = false,
@@ -70,7 +79,11 @@ function connect(socket: ServerWebSocket<SocketData>) {
           dirty = true;
           continue;
         }
-        const next = jsonValue<View>({ snapshot: app.snapshot(), details });
+        const next = jsonValue<View>({
+          snapshot: app.snapshot(),
+          details,
+          ...users(),
+        });
         if (JSON.stringify(view.value) !== JSON.stringify(next))
           view.replace(BACKGROUND_CONTEXT, next);
       }
@@ -106,7 +119,22 @@ function connect(socket: ServerWebSocket<SocketData>) {
           inputs.identity.parse(input);
           return service.identity;
         }
-        return jsonValue(await invoke(app, member as Method, input));
+        if (
+          socket.data.auth &&
+          (!socket.data.authHeaders ||
+            !(await socket.data.auth.session(socket.data.authHeaders)))
+        ) {
+          socket.close(1008, "Session expired");
+          throw new Error("Authentication required");
+        }
+        return jsonValue(
+          await invoke(
+            app,
+            member as Method,
+            input,
+            socket.data.human?.user.id,
+          ),
+        );
       },
     ]),
   );
@@ -114,6 +142,11 @@ function connect(socket: ServerWebSocket<SocketData>) {
   const off = app.subscribe(() => {
     void refresh().catch(() => socket.close(1011, "State unavailable"));
   });
+  const offUsers = socket.data.human
+    ? socket.data.auth?.onUsersChanged(() => {
+        void refresh().catch(() => socket.close(1011, "State unavailable"));
+      })
+    : undefined;
   const subscriptions = new Map<string, ServiceSubscription>();
   const active = new Set<string>();
   function dispose() {
@@ -121,6 +154,7 @@ function connect(socket: ServerWebSocket<SocketData>) {
     disposed = true;
     generation++;
     off();
+    offUsers?.();
     unobserve();
     for (const sub of subscriptions.values()) sub.close();
     subscriptions.clear();
@@ -229,6 +263,28 @@ export const groveWebsocket = {
   idleTimeout: 0,
   sendPings: false,
   open(socket: ServerWebSocket<SocketData>) {
+    if (socket.data.auth && socket.data.human) {
+      const human = socket.data.human;
+      const expire = () => {
+        const remaining = human.expiresAt - Date.now();
+        if (remaining <= 0) socket.terminate();
+        else
+          socket.data.authExpiry = setTimeout(
+            expire,
+            Math.min(remaining, 2_147_483_647),
+          );
+      };
+      expire();
+      socket.data.unbindAuth = socket.data.auth.onRevoke(
+        (userId, sessionId) => {
+          if (
+            human.user.id === userId &&
+            (!sessionId || human.sessionId === sessionId)
+          )
+            socket.terminate();
+        },
+      );
+    }
     if (socket.data.voice) {
       socket.data.voice.relay = voiceRelay(socket, socket.data.voice);
       return;
@@ -263,6 +319,8 @@ export const groveWebsocket = {
     socket.data.ping = undefined;
   },
   close(socket: ServerWebSocket<SocketData>) {
+    socket.data.unbindAuth?.();
+    clearTimeout(socket.data.authExpiry);
     if (socket.data.voice) {
       socket.data.voice.relay?.dispose();
       return;

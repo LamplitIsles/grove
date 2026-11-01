@@ -53,7 +53,13 @@ export interface MessageImage {
   mediaType: string;
   availability?: "missing";
 }
+export interface Human {
+  id: string;
+  name: string;
+  color: string;
+}
 export interface Message {
+  author?: Human;
   questionItemId?: string;
   provisional?: boolean;
   clientId?: string;
@@ -136,6 +142,9 @@ export type OutputSpeed = {
   status: "loading" | "ready" | "unavailable";
 };
 export interface Delivery {
+  authorUserId?: string;
+  admissionAt?: number;
+  author?: Human;
   mode?: "direct" | "follow_up";
   attemptId?: string;
   recoveryRef?: boolean;
@@ -163,6 +172,7 @@ export interface Delivery {
   at: number;
 }
 export interface Agent {
+  participants?: { user: Human; lastSpokeAt: number }[];
   followUpPaused?: boolean;
   /** Follow-ups still waiting, in admission, unconfirmed, or failed. */
   followUpCount?: number;

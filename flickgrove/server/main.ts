@@ -16,6 +16,9 @@ import { Workspace } from "./workspace";
 import { ProjectEnvironments } from "./project-environments";
 import { HostService } from "./hosts";
 import { servePeer } from "./http";
+import { WorkspaceStore } from "./workspace-store";
+import { GroveAuth } from "./auth";
+import { chmodSync, mkdirSync } from "node:fs";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),
@@ -28,6 +31,8 @@ const { values } = parseArgs({
     state: { type: "string" },
     codex: { type: "string", default: "codex" },
     "pi-agent-dir": { type: "string" },
+    auth: { type: "string" },
+    user: { type: "string" },
   },
 });
 const port = Number(values.port);
@@ -44,6 +49,23 @@ const directory =
   values.state ?? join(homedir(), ".local", "share", "flickgrove");
 const configPath =
   values.config ?? join(homedir(), ".config", "flickgrove", "config.toml");
+if (values.auth) {
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(directory, 0o700);
+  const store = new WorkspaceStore(join(directory, "workspace.sqlite"));
+  const auth = new GroveAuth(store, directory, origin);
+  try {
+    if (values.auth === "users") console.log(JSON.stringify(auth.users()));
+    else if (values.auth === "bootstrap" || values.auth === "recovery")
+      console.log(JSON.stringify(auth.issue(values.auth, values.user)));
+    else
+      throw new Error("Use --auth bootstrap, users, or recovery --user <id>");
+  } finally {
+    auth.close();
+    store.close();
+  }
+  process.exit(0);
+}
 await initializeReviewerConfig(configPath);
 const environments = new ProjectEnvironments(configPath);
 const codexRuntime = new CodexRuntime({
@@ -71,12 +93,14 @@ const app: Workspace = new Workspace({
   researcherSnapshot: () => researcherSnapshot(configPath),
   reviewerSnapshot: (profile) => reviewerSnapshot(configPath, profile),
 });
+const auth = new GroveAuth(app.store, directory, origin);
 const service = new HostService(app, {
   directory,
   name: values.name,
   origin: () => origin,
 });
 const httpOptions = {
+  auth,
   voice: { configPath },
   origin: () => origin,
   localOrigin: () => localOrigin,
@@ -96,6 +120,7 @@ const stop = async () => {
   await server.stop(true);
   await runtime.close();
   service.dispose();
+  auth.close();
   app.dispose();
   process.exit(0);
 };

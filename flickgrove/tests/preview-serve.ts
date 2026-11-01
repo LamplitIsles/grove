@@ -9,6 +9,7 @@ import { createHandler, createUpgrade } from "../server/http";
 import type { ServerWebSocket } from "bun";
 import { groveWebsocket, type SocketData } from "../server/chord-socket";
 import { FakeRuntime } from "../server/testing";
+import { GroveAuth } from "../server/auth";
 const directory = await mkdtemp(join(tmpdir(), "grove-file-browser-"));
 const assets = resolve(
   process.env.PREVIEW_ASSETS ?? "../.scratch/flickgrove-browser/assets",
@@ -213,7 +214,10 @@ async function unit(name: string, color: string, origin: () => string) {
     patches.set(id, text);
     for (const reader of readers) reader();
   };
-  const handler = createHandler(app, { service, assets, origin });
+  const auth = process.env.PREVIEW_AUTH
+    ? new GroveAuth(app.store, join(cwd, "state"), origin())
+    : undefined;
+  const handler = createHandler(app, { service, assets, origin, auth });
   return {
     app,
     runtime,
@@ -221,13 +225,16 @@ async function unit(name: string, color: string, origin: () => string) {
     worker,
     service,
     handler,
+    auth,
     emit,
     turn,
     history,
     patch,
   };
 }
-const origin = "http://127.0.0.1:14320";
+const origin = process.env.PREVIEW_AUTH
+  ? "http://localhost:14320"
+  : "http://127.0.0.1:14320";
 let offline = false;
 const sockets = new Set<ServerWebSocket<SocketData>>();
 let local = await unit("Local", "#355d98", () => origin);
@@ -251,9 +258,20 @@ const server = Bun.serve({
     const upgraded = createUpgrade(local.app, {
       service: local.service,
       origin: () => origin,
-    })(request, server);
+      auth: local.auth,
+    })(
+      request,
+      server,
+      local.auth ? await local.auth.session(request.headers) : undefined,
+    );
     if (upgraded) return upgraded === true ? undefined : upgraded;
     const url = new URL(request.url);
+    if (
+      url.pathname === "/fixture/bootstrap" &&
+      request.method === "POST" &&
+      local.auth
+    )
+      return Response.json(local.auth.issue("bootstrap"));
     if (
       url.pathname === "/fixture/reading-transition" &&
       request.method === "POST"
@@ -357,6 +375,7 @@ const server = Bun.serve({
     if (url.pathname === "/fixture/reset" && request.method === "POST") {
       offline = false;
       for (const unit of [local]) {
+        unit.auth?.close();
         unit.service.dispose();
         unit.app.dispose();
       }
@@ -600,6 +619,7 @@ async function cleanup() {
   server.stop(true);
   cdn.stop(true);
   for (const unit of [local]) {
+    unit.auth?.close();
     unit.service.dispose();
     unit.app.dispose();
   }

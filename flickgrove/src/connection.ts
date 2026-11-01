@@ -138,6 +138,7 @@ export class LocalConnection {
   private revision = 0;
   private selected: string | null = null;
   private details: Record<string, Detail> = {};
+  private users: View["users"];
   constructor(
     private changed: (view: View) => void,
     private offline: (id: string) => void,
@@ -153,7 +154,11 @@ export class LocalConnection {
   }
   private publish() {
     this.revision++;
-    this.changed({ snapshot: this.snapshot(), details: { ...this.details } });
+    this.changed({
+      snapshot: this.snapshot(),
+      details: { ...this.details },
+      users: this.users,
+    });
   }
   async start() {
     const storedIdentity = identitySchema.safeParse(
@@ -175,6 +180,7 @@ export class LocalConnection {
         if (this.link) this.stop(this.link);
         this.link = undefined;
         this.details = {};
+        this.users = undefined;
       }
       if (!local || local.id !== actual.id) {
         this.entryId = actual.id;
@@ -244,6 +250,7 @@ export class LocalConnection {
             return;
           }
           link.agents = view.snapshot.agents;
+          this.users = view.users;
           const active = new Set(link.agents.map((a) => a.id));
           for (const id of Object.keys(this.details))
             if (id.startsWith(link.config.id + ":") && !active.has(id))
@@ -339,7 +346,7 @@ export class LocalConnection {
     const response = await fetch(new URL(path, location.origin), {
       ...init,
       headers,
-      credentials: "omit",
+      credentials: "same-origin",
       signal: init.signal
         ? AbortSignal.any([init.signal, AbortSignal.timeout(60_000)])
         : AbortSignal.timeout(60_000),
@@ -368,7 +375,7 @@ export class LocalConnection {
         headers: {
           "X-Grove-Peer": id,
         },
-        credentials: "omit",
+        credentials: "same-origin",
         signal: signal
           ? AbortSignal.any([signal, AbortSignal.timeout(8000)])
           : AbortSignal.timeout(8000),
@@ -398,6 +405,7 @@ export class LocalConnection {
   }
   close() {
     this.disposed = true;
+    this.users = undefined;
     if (this.link) this.stop(this.link);
   }
 }

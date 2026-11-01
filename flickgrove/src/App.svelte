@@ -5,20 +5,25 @@
   import * as Command from "$lib/components/ui/command/index.js";
   import { Switch } from "$lib/components/ui/switch/index.js";
   import { Kbd } from "$lib/components/ui/kbd/index.js";
-  import { X, Plus, History, Settings as SettingsIcon } from "@lucide/svelte";
+  import { X, Plus, History, CircleHelp } from "@lucide/svelte";
+  import { createAuthClient } from "better-auth/svelte";
+  import { passkeyClient } from "@better-auth/passkey/client";
   import { Button } from "$lib/components/ui/button/index.js";
   import { navigation, initializeNavigation, resumeFilePreview, openConversation, setSurface, back, validateNavigation, removeSidebarDrawer } from "./navigation.svelte";
   import { readingCache, reading } from "./api";
   import { retainReading } from "./reading-cache";
   import { retainTranscriptPositions } from "./transcript-state";
   import { LocalConnection, preferences, readPreference, writePreference } from "./connection";
+  import { choiceLayer } from "./choice-layer.svelte";
   import { onMount, tick, untrack } from "svelte";
   import * as Select from "$lib/components/ui/select/index.js";
+  import * as Popover from "$lib/components/ui/popover/index.js";
+  import { buttonVariants } from "$lib/components/ui/button/button.svelte";
   import { projectReference, mergeProjectCatalogue } from "./project-identity";
   import type { ProjectEnvironment } from "./contracts";
-  import type { Answer, Agent, Detail, HistorySession, Model, Project, Settings, Skill, Snapshot } from "./contracts";
+  import type { Answer, Agent, Detail, HistorySession, Human, Model, Project, Settings, Skill, Snapshot } from "./contracts";
   import { api, editable, setClient } from "./api";
-  import { RequestRejected } from "./chord-client";
+  import { RequestRejected, RequestTimeout } from "./chord-client";
   import { lookupSchema, abandonCloseSchema, deliverySchema, followUpInspectionSchema, type Receipt } from "./chord-contract";
   import { addOutgoing, observeOutgoing, outgoing, withOutgoing, acceptReceipt, unknownOutgoing, submissionResult, beginRetry, observeSendResult } from "./outgoing.svelte";
   import { imageSchema } from "./chord-contract";
@@ -30,10 +35,33 @@
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
   const sidebar = Sidebar.useSidebar();
   import SessionList from "./SessionList.svelte";
+  import AccountSettings from "./AccountSettings.svelte";
   import { historyCache } from "./history-cache";
   import AgentDetail from "./AgentDetail.svelte";
   import SessionHistory from "./SessionHistory.svelte";
   import * as m from "./paraglide/messages";
+  let { user, colors, onlogout, ondisconnect } = $props<{user:Human; colors:string[]; onlogout:()=>void; ondisconnect:()=>void}>();
+  const auth = createAuthClient({ plugins: [passkeyClient()] });
+  let users = $state<Human[] | undefined>();
+  const showAuthors = $derived((users?.length ?? 0) > 1);
+  const currentUser = $derived(users?.find(person => person.id === user.id) ?? user);
+  let settingsPage = $state<"account" | "users" | "models">("account");
+  let modelRole = $state<"orc" | "worker">("orc");
+  let modelHelpOpen = $state(false);
+  const projectListId = $props.id();
+  const modelHelpId = projectListId + "-model-help";
+  choiceLayer(modelHelpId, () => modelHelpOpen, () => modelHelpOpen = false);
+  let invitation = $state<{code:string;expiresAt:string} | null>(null), inviteError = $state(""), inviteBusy = $state(false);
+  async function invite() { inviteBusy = true; inviteError = ""; try { const r = await fetch("/api/auth/invitations", { method:"POST" }); if (!r.ok) throw new Error(m.invitation_failed()); invitation = await r.json(); } catch(e) { inviteError = e instanceof Error ? e.message : m.invitation_failed(); } finally { inviteBusy = false; } }
+  let logoutBusy = $state(false), logoutError = $state("");
+  async function logout() {
+    if (logoutBusy) return;
+    logoutBusy = true; logoutError = "";
+    try { const result = await auth.signOut(); if (result.error) throw new Error(result.error.message ?? m.sign_out_failed()); onlogout(); }
+    catch (cause) { logoutError = cause instanceof Error ? cause.message : m.sign_out_failed(); }
+    finally { logoutBusy = false; }
+  }
+  async function addPasskey() { const result = await auth.passkey.addPasskey({createSession:false}); if (result.error) toast.error(result.error.message ?? m.passkey_add_failed()); else toast.success(m.passkey_added()); }
 
   $effect(() => resumeFilePreview());
   $effect(() => {
@@ -56,9 +84,8 @@
   let projects = $state<Project[]>([]); let projectsLoading = $state(true); let models = $state<Model[]>(preferences.models);
   let connected = $state(false); let loading = $state(true); let error = $state("");
   let now = $state(Date.now()); let sessionList: { visibleIds(): string[]; openVisible(id: string): void; switchVisible(event: KeyboardEvent): void; keydown(event: KeyboardEvent): Promise<void>; expandFocused(): void; reveal(id: string): Promise<void>; closeTarget(): string | null; selectAgentOrg(agent: Agent): void };
-  let projectSearch = $state<HTMLInputElement | null>(null); let modalOpen = $state(false); let modal = $state<"new" | "settings" | "keys" | "abandon-close" | null>(null);
+  let projectSearch = $state<HTMLInputElement | null>(null); let modalOpen = $state(false); let modal = $state<"new" | "settings" | "sign-out" | "keys" | "abandon-close" | null>(null);
   let search = $state(""); let projectId = $state(""); let projectHighlight=$state(""); let projectError=$state(""); let saving = $state(false);
-  const projectListId=$props.id();
   let modelRefreshBusy = $state(false); let modalModelsLoading=$state(false); let modalModelSequence=0;
   let settings = $state<Settings | null>(null); let sequence = 0; let focusCreatedId = $state<string | null>(null);
   let install = $state<(Event & { prompt: () => Promise<void> }) | null>(null);
@@ -134,7 +161,7 @@
     if (id !== selectedId) { ++sequence; selectedId = id; detail = null; queueAuthority = null; skills = []; error = ""; if (id) void restoreDetail(id); else { void client?.call("select", {ids:[]}).catch(() => {}); } }
   });
   $effect(() => {
-    const kind = navigation.surfaces.find(s => s === "new" || s === "settings" || s === "keys" || s === "abandon-close") ?? null;
+    const kind = navigation.surfaces.find(s => s === "new" || s === "settings" || s === "sign-out" || s === "keys" || s === "abandon-close") ?? null;
     if (kind !== modal) { modal = kind; modalOpen = !!kind; if (kind) void prepareModal(kind); }
   });
   async function refreshDetail(id: string) {
@@ -153,7 +180,7 @@
     remembered = { ...remembered, [host]: id };
     if (detail?.id !== id) detail = readingCache.readDetail(id); skills = [];
     if (hosts.find(h=>h.id===id.split(":")[0])?.connected) {
-      void client?.call('select', {ids:[id]}).catch(e => { if(selectedId === id) error = e instanceof Error ? e.message : m.load_failure(); });
+      void client?.call('select', {ids:[id]}).catch(e => { if(selectedId === id && !(e instanceof RequestTimeout && e.member === "select")) error = e instanceof Error ? e.message : m.load_failure(); });
       if (snapshot.agents.find(a => a.id === id)?.role === "orc" && hosts.find(h => h.id === snapshot.agents.find(a => a.id === id)?.hostId)?.connected) {
         try { const list = await api<Skill[]>(`/agents/${id}/skills`); if (selectedId === id) skills = list; }
         catch (e) { if (selectedId === id) error = e instanceof Error ? e.message : m.load_failure(); }
@@ -225,8 +252,8 @@
       notification.onclick = () => { window.focus(); void open(a.ownerId ?? a.id); notification.close(); };
     }
   }
-  function show(kind: "new" | "settings" | "keys") { setSurface(kind, true); }
-  async function prepareModal(kind: "new" | "settings" | "keys" | "abandon-close") {
+  function show(kind: "new" | "settings" | "sign-out" | "keys") { setSurface(kind, true); }
+  async function prepareModal(kind: "new" | "settings" | "sign-out" | "keys" | "abandon-close") {
     error = "";
     if (kind === "abandon-close" && !abandon) {
       const intent = closeRecovery.entries.find(i => i.agentId === selectedId);
@@ -234,6 +261,8 @@
       abandon = { id: intent.agentId, title: snapshot.agents.find(a => a.id === intent.agentId)?.title ?? "Orc", unknownOperationIds: intent.unknownOperationIds };
       closeUnknown = true;
     }
+    if (kind === "settings") settingsPage = "account";
+    if (kind === "sign-out") logoutError = "";
     if (kind === "new") { search = ""; void loadProjects(); }
     if (kind === "settings" || kind === "new") {
       const saved=preferences.settings;
@@ -592,6 +621,7 @@
     let disposed=false;
     client=new LocalConnection(value=>{
       if(disposed)return;
+      users = value.users;
       const before=snapshot;
       const entryWasConnected=before.hosts?.find(h=>h.id===value.snapshot.entryId)?.connected;
       connected=value.snapshot.hosts?.some(h=>h.connected)??false;
@@ -611,6 +641,7 @@
         if(modal==="new")void loadProjects();
       }
     },id=>{
+      ondisconnect();
       for(const pending of outgoing.entries)if(pending.agentId.startsWith(id+":")&&pending.status==='pending')unknownOutgoing(pending.agentId,pending.id,m.sending());
     });
     setClient(client);
@@ -631,18 +662,18 @@
 
 <Toaster theme="dark" position="bottom-center" />
 {#snippet globalActions()}
-  <div class="global-actions">{#if !loading && shownDetail?.backend !== "pi" && (!snapshot.agents.length || snapshot.agents.some(agent => agent.backend !== "pi"))}<Weekly agent={detail} hostId={snapshot.entryId} connected={!!hosts.find(h=>h.id===snapshot.entryId)?.connected} />{/if}<Button variant="ghost" size="icon-sm" aria-label={m.settings()} onclick={() => show("settings")}><SettingsIcon /></Button></div>
+  <div class="global-actions">{#if !loading && shownDetail?.backend !== "pi" && (!snapshot.agents.length || snapshot.agents.some(agent => agent.backend !== "pi"))}<Weekly agent={detail} hostId={snapshot.entryId} connected={!!hosts.find(h=>h.id===snapshot.entryId)?.connected} />{/if}</div>
 {/snippet}
 <div class="workbench" class:close-recovery-layout={closeRecovery.entries.some(i => modal !== "abandon-close" || abandon?.id !== i.agentId)}>
 <main>
   <Sidebar.Root>
-  <SessionList bind:this={sessionList} agents={visibleAgents} {projects} {projectsLoading} {instanceId} {activityWindow} onactivitywindow={value => activityWindow = value} {now} rootOrder={treeOrder[instanceId] ?? []} onreorder={ids => treeOrder = { ...treeOrder, [instanceId]: ids }} {hosts} {selectedId} {loading} {connected} {closingId} closeError={selectedId === closeError?.id && navigation.surfaces.at(-1) !== "sidebar" ? null : closeError} onclosetree={closeTree} onopen={open} onnew={() => show("new")}>
+  <SessionList bind:this={sessionList} user={currentUser} {showAuthors} onsettings={() => show("settings")} onlogout={() => show("sign-out")} agents={visibleAgents} {projects} {projectsLoading} {instanceId} {activityWindow} onactivitywindow={value => activityWindow = value} {now} rootOrder={treeOrder[instanceId] ?? []} onreorder={ids => treeOrder = { ...treeOrder, [instanceId]: ids }} {hosts} {selectedId} {loading} {connected} {closingId} closeError={selectedId === closeError?.id && navigation.surfaces.at(-1) !== "sidebar" ? null : closeError} onclosetree={closeTree} onopen={open} onnew={() => show("new")}>
     {#if !connected && !loading}<div class="connection-banner" role="status"><strong>{m.reconnecting()}</strong><span>{m.offline_help()}</span><Button variant="ghost" size="sm" onclick={load}>{m.retry()}</Button></div>{/if}
   </SessionList>
   </Sidebar.Root>
   {#if !shownDetail}<div class="detail-empty"><div class="empty-tools"><Sidebar.Trigger />{@render globalActions()}</div><div class="empty-message" role="status"><p>{selectedId ? m.loading() : m.select_conversation()}</p>{#if selectedId}<Button variant="ghost" size="sm" onclick={closeDetail}>{m.back_sessions()}</Button>{/if}</div></div>{/if}
   {#if error && !modal && !shownDetail}<div class="app-error" role="alert"><span>{error}</span><Button variant="ghost" size="icon-sm" aria-label={m.close()} onclick={() => error = ""}><X /></Button></div>{/if}
-  {#if shownDetail && selectedId}{#key selectedId}<AgentDetail {globalActions} detail={shownDetail!} ready={!!detail} queueReady={queueAuthority === selectedId && connected && hostConnected} onenqueue={enqueueFollowUp} oncheckqueue={lookupFollowUp} oninspectqueue={inspectFollowUp} onqueueaction={queueAction} tree={shownDetail!.role === "orc" ? target : owner} {owner} {skills} {now} connected={hostConnected} mediaConnected={connected && hostConnected} onstop={stop} onupdate={result => { if (selectedId === result.id) detail = result; snapshot = { ...snapshot, agents: snapshot.agents.map(a => a.id === result.id ? { ...a, model: result.model, effort: result.effort, serviceTier: result.serviceTier } : a) }; }} onrename={rename} onrefresh={load} onretryuser={retryUser} {retryErrors} dispatching={dispatches.filter(d=>d.key.startsWith(selectedId + "/") && dispatchActive(d)).map(d=>d.key.slice(selectedId!.length+1))} optimisticWorking={optimistic(selectedId)} actionError={error} closeError={closeError?.id === shownDetail.id ? closeError.reason : undefined} lastSeen={selectedHost?.lastSeen} workers={snapshot.agents.filter(w => w.ownerId === detail?.id)} onclose={closeDetail} onopen={id => open(id, true)} onsend={send} onanswer={answerBatch} onretry={retryDelivery} />{/key}{/if}
+  {#if shownDetail && selectedId}{#key selectedId}<AgentDetail {globalActions} {showAuthors} {users} detail={shownDetail!} ready={!!detail} queueReady={queueAuthority === selectedId && connected && hostConnected} onenqueue={enqueueFollowUp} oncheckqueue={lookupFollowUp} oninspectqueue={inspectFollowUp} onqueueaction={queueAction} tree={shownDetail!.role === "orc" ? target : owner} {owner} {skills} {now} connected={hostConnected} mediaConnected={connected && hostConnected} onstop={stop} onupdate={result => { if (selectedId === result.id) detail = result; snapshot = { ...snapshot, agents: snapshot.agents.map(a => a.id === result.id ? { ...a, model: result.model, effort: result.effort, serviceTier: result.serviceTier } : a) }; }} onrename={rename} onrefresh={load} onretryuser={retryUser} {retryErrors} dispatching={dispatches.filter(d=>d.key.startsWith(selectedId + "/") && dispatchActive(d)).map(d=>d.key.slice(selectedId!.length+1))} optimisticWorking={optimistic(selectedId)} actionError={error} closeError={closeError?.id === shownDetail.id ? closeError.reason : undefined} lastSeen={selectedHost?.lastSeen} workers={snapshot.agents.filter(w => w.ownerId === detail?.id)} onclose={closeDetail} onopen={id => open(id, true)} onsend={send} onanswer={answerBatch} onretry={retryDelivery} />{/key}{/if}
 </main>
 
 {#if closeRecovery.entries.some(i => modal !== "abandon-close" || abandon?.id !== i.agentId)}
@@ -652,8 +683,12 @@
 {/if}
 </div>
 <Dialog.Root open={modalOpen} onOpenChange={value => { if (!value && modal) void closeModal(); }}>
-  <Dialog.Content onEscapeKeydown={event=>{event.preventDefault();event.stopPropagation();void back();}} showCloseButton={false} class={`grove-dialog ${modal === "new" ? "new-modal" : modal === "settings" ? "settings-modal" : ""}`} onOpenAutoFocus={e => { e.preventDefault(); if (modal === "new") projectSearch?.focus(); }}><Button class="modal-close" variant="ghost" size="icon-sm" aria-label={m.close()} onclick={closeModal}><X /></Button>
-    {#if modal === "abandon-close" && abandon}
+  <Dialog.Content onEscapeKeydown={event=>{event.preventDefault();event.stopPropagation();void back();}} showCloseButton={false} class={`grove-dialog ${modal === "new" ? "new-modal" : modal === "settings" ? "settings-modal" : modal === "sign-out" ? "signout-dialog" : ""}`} onOpenAutoFocus={e => { e.preventDefault(); if (modal === "new") projectSearch?.focus(); }}><Button class="modal-close" variant="ghost" size="icon-sm" aria-label={m.close()} onclick={closeModal}><X /></Button>
+    {#if modal === "sign-out"}
+      <Dialog.Header><Dialog.Title>{m.sign_out_confirm()}</Dialog.Title><Dialog.Description>{m.sign_out_help()}</Dialog.Description></Dialog.Header>
+      {#if logoutError}<p class="inline-error" role="alert">{logoutError}</p>{/if}
+      <Dialog.Footer class="signout-actions"><Button variant="ghost" size="sm" disabled={logoutBusy} onclick={closeModal}>{m.cancel()}</Button><Button variant="default" size="sm" disabled={logoutBusy} onclick={logout}>{logoutBusy ? m.signing_out() : m.sign_out()}</Button></Dialog.Footer>
+    {:else if modal === "abandon-close" && abandon}
       <Dialog.Title>{m.abandon_close_title()}</Dialog.Title>
       <Dialog.Description>{m.abandon_close_help()}</Dialog.Description>
       <p class="break-words font-medium">{abandon.title}</p>
@@ -663,7 +698,7 @@
     {:else if modal === "new"}
       <Dialog.Title>{navigation.surfaces.includes("history") ? m.open_session() : m.new_session()}</Dialog.Title>
       {#if navigation.surfaces.includes("history") && projects.find(p => projectReference(p) === projectId)}
-        {#key createHost + ":" + selectedEnvironment + ":" + projectId}<SessionHistory hostId={createHost} project={projects.find(p => projectReference(p) === projectId)!} connected={connected && !!hosts.find(h => h.id === createHost)?.connected} onresume={resumeHistory} />{/key}
+        {#key createHost + ":" + selectedEnvironment + ":" + projectId}<SessionHistory {showAuthors} {users} hostId={createHost} project={projects.find(p => projectReference(p) === projectId)!} connected={connected && !!hosts.find(h => h.id === createHost)?.connected} onresume={resumeHistory} />{/key}
       {:else}
       {#if environments.length > 1 || selectedEnvironment !== "local"}
       <label class="form-section-label" for="execution-environment">Execution environment</label>
@@ -692,11 +727,26 @@
       <div class="modal-action"><Button variant="ghost" size="sm" disabled={!connected || !hosts.find(h => h.id === createHost)?.connected || saving || !projectId} onclick={() => setSurface("history", true)}><History />{m.find_history()}</Button><Button variant="default" size="sm" disabled={!connected || !hosts.find(h => h.id === createHost)?.connected || saving || remotePi || !!projects.find(p=>projectReference(p)===projectId)?.historyRef || !settingsValid || !filteredProjects.some(p => projectReference(p) === projectId)} onclick={create}>{saving ? m.sending() : m.new_session()}</Button></div>
       {/if}
     {:else if modal === "settings"}
-      <Dialog.Title>{m.settings()}</Dialog.Title><p class="modal-help">{m.settings_help()}</p>
-      {#if !settings&&modalModelsLoading}<p role="status">{m.loading()}</p>{/if}
-      {#if settings}{#each ["orc", "worker"] as role}{@const key = role as "orc" | "worker"}<section class="role-settings"><h3>{key === "orc" ? m.orc() : m.worker()}</h3><ModelFields bind:value={settings[key]} {models} loading={modelRefreshBusy||modalModelsLoading} disabled={saving||!connected} label={key === "orc" ? m.orc() : m.worker()} /></section>{/each}<label class="fast-setting"><span><strong>{m.fast_mode()}</strong><small>{fastAvailable ? m.fast_help() : m.fast_unavailable()}</small></span><Switch aria-label={m.fast_mode()} bind:checked={settings.fast} disabled={!fastAvailable && !settings.fast} /></label>{/if}
-      <Button variant="ghost" size="sm" disabled={modelRefreshBusy || !connected} onclick={refreshModels}>Refresh models</Button>
-      <p class="settings-scope">{m.settings_scope()}</p><div class="modal-action">{#if install}<button class="install-link" onclick={() => install?.prompt()}>{m.install_app()}</button>{/if}<Button variant="default" size="sm" disabled={!settings || !settingsValid || saving} onclick={saveSettings}>{saving ? m.sending() : m.save_changes()}</Button></div>
+      <Dialog.Title>{m.settings()}</Dialog.Title>
+      <div class="settings-layout">
+        <nav class="settings-nav" aria-label={m.settings_sections()}>
+          <button class:active={settingsPage === "account"} aria-current={settingsPage === "account" ? "page" : undefined} onclick={() => settingsPage = "account"}>{m.account()}</button>
+          <button class:active={settingsPage === "users"} aria-current={settingsPage === "users" ? "page" : undefined} onclick={() => settingsPage = "users"}>{m.users()}</button>
+          <button class:active={settingsPage === "models"} aria-current={settingsPage === "models" ? "page" : undefined} onclick={() => settingsPage = "models"}>{m.models()}</button>
+        </nav>
+        <div class="settings-content">
+          {#if settingsPage === "account"}
+            <AccountSettings user={currentUser} {colors} onpasskey={addPasskey} onsaved={value => { users = users?.map(person => person.id === value.id ? value : person); }} />
+          {:else if settingsPage === "users"}
+            <section class="settings-section"><h2>{m.users()}</h2>{#if users}<ul class="account-users">{#each users as person (person.id)}<li><span class="account-avatar" style:background={person.color}>{person.name.slice(0,1).toUpperCase()}</span><span>{person.name}</span>{#if person.id === user.id}<small>{m.you()}</small>{/if}</li>{/each}</ul>{:else}<p>{m.loading_users()}</p>{/if}<div class="account-actions"><Button variant="outline" size="sm" disabled={inviteBusy} onclick={invite}>{m.create_invitation()}</Button></div>{#if invitation}<div class="invite-code"><code>{invitation.code}</code><Button variant="ghost" size="sm" onclick={() => navigator.clipboard.writeText(invitation!.code).then(() => toast.success(m.copied())).catch(() => toast.error(m.could_not_copy()))}>{m.copy()}</Button><small>{m.expires_at({time:new Date(invitation.expiresAt).toLocaleTimeString()})}</small></div>{/if}{#if inviteError}<p role="alert">{inviteError}</p>{/if}</section>
+          {:else}
+            <section class="settings-section"><div class="settings-heading"><h2>{m.models()}</h2><Popover.Root bind:open={modelHelpOpen}><Popover.Trigger aria-label={m.model_settings_help()} title={m.settings_help()} class={buttonVariants({variant:"ghost",size:"icon-xs"})}><CircleHelp aria-hidden="true" /></Popover.Trigger><Popover.Content align="start" sideOffset={6} class="w-64 max-w-[calc(100vw-2rem)] p-3 text-xs" onEscapeKeydown={event => event.stopPropagation()}>{m.settings_help()}</Popover.Content></Popover.Root></div>
+            {#if !settings&&modalModelsLoading}<p role="status">{m.loading()}</p>{/if}
+            {#if settings}<div class="role-tabs" aria-label={m.model_role()}><button type="button" class:active={modelRole === "orc"} aria-pressed={modelRole === "orc"} onclick={() => modelRole = "orc"}>{m.orc()}</button><button type="button" class:active={modelRole === "worker"} aria-pressed={modelRole === "worker"} onclick={() => modelRole = "worker"}>{m.worker()}</button></div><section class="role-settings"><ModelFields bind:value={settings[modelRole]} {models} loading={modelRefreshBusy||modalModelsLoading} disabled={saving||!connected} label={modelRole === "orc" ? m.orc() : m.worker()} /></section><label class="fast-setting"><span><strong>{m.fast_mode()}</strong>{#if !fastAvailable}<small>{m.fast_unavailable()}</small>{/if}</span><Switch aria-label={m.fast_mode()} bind:checked={settings.fast} disabled={!fastAvailable && !settings.fast} /></label>{/if}
+            <div class="modal-action"><span class="settings-action-start"><Button variant="ghost" size="sm" disabled={modelRefreshBusy || !connected} onclick={refreshModels}>Refresh models</Button>{#if install}<button class="install-link" onclick={() => install?.prompt()}>{m.install_app()}</button>{/if}</span><Button variant="default" size="sm" disabled={!settings || !settingsValid || saving} onclick={saveSettings}>{saving ? m.sending() : m.save_changes()}</Button></div></section>
+          {/if}
+        </div>
+      </div>
     {:else if modal === "keys"}
       <Dialog.Title>{m.shortcuts()}</Dialog.Title><p class="modal-help">{m.keyboard_help()}</p><dl class="shortcut-list">{#each [["⌘ / Ctrl + B", m.toggle_sidebar()], ["⌘ / Ctrl + 1–9", m.key_visible_number()], ["Option/Alt + J / K", m.key_visible_cycle()], ["↑ ↓ ← →", m.key_focus()], ["Enter", m.key_open()], ["E", m.key_expand()], ["N", m.key_new()], ["I", m.key_input()], ["Option/Alt + S", m.search_skills()], ["Option/Alt + X", m.close_tree()], ["Esc", m.key_escape()], ["Tab", m.key_completion()], ["Tab", "Queue message while working"], ["Enter", m.key_send()], ["Shift + Enter", m.key_newline()]] as [key, label]}<div><dt><Kbd>{key}</Kbd></dt><dd>{label}</dd></div>{/each}</dl><p class="keyboard-scope">{m.keyboard_scope()}</p>
     {/if}
