@@ -1186,6 +1186,8 @@ async function handle(request) {
       };
     }
     case "thread/turns/list": {
+      if (control().turnListError)
+        rpcError(-32603, "fixture turn read failure");
       if (process.env.FAKE_HISTORY_ERROR) {
         const error = new Error(process.env.FAKE_HISTORY_ERROR);
         error.code = process.env.FAKE_HISTORY_ERROR_CODE

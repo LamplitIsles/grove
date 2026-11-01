@@ -55,6 +55,8 @@ function qualified<T extends Agent>(host: Host, a: T): T {
     treeFastError: a.treeFastError,
     stop: a.stop,
     closeRequest: a.closeRequest,
+    followUpPaused: a.followUpPaused,
+    followUpCount: a.followUpCount,
     readingRevision: a.readingRevision,
     historyCursor: a.historyCursor,
     hostId: host.id,
@@ -95,6 +97,7 @@ function qualified<T extends Agent>(host: Host, a: T): T {
           ? qualify(host.id, d.reportingWorkerId)
           : undefined,
       })),
+      followUps: detail.followUps,
     } as unknown as T;
   }
   return publicAgent as T;
@@ -358,6 +361,40 @@ export class HostService {
       ...qualified(this.local(), result),
       retryNotAdmitted: result.retryNotAdmitted,
     };
+  }
+  async enqueueFollowUp(
+    id: string,
+    text: string,
+    operationId: string,
+    images?: MessageImage[],
+  ) {
+    return qualified(
+      this.local(),
+      await this.workspace.enqueueFollowUp(
+        this.raw(id),
+        text,
+        operationId,
+        images,
+      ),
+    );
+  }
+  async cancelFollowUp(id: string, operationId: string) {
+    return qualified(
+      this.local(),
+      await this.workspace.cancelFollowUp(this.raw(id), operationId),
+    );
+  }
+  lookupFollowUp(id: string, operationId: string) {
+    return this.workspace.lookupFollowUp(this.raw(id), operationId);
+  }
+  inspectFollowUp(id: string, operationId: string) {
+    return this.workspace.inspectFollowUp(this.raw(id), operationId);
+  }
+  async resumeFollowUps(id: string) {
+    return qualified(
+      this.local(),
+      await this.workspace.resumeFollowUps(this.raw(id)),
+    );
   }
   reconcileSettings(id: string) {
     return this.workspace.reconcileSettings(this.raw(id));

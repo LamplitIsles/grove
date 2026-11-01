@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { readMigrationFiles } from "drizzle-orm/migrator";
-import { and, eq, ne, sql } from "drizzle-orm";
+import { and, eq, ne, or, sql } from "drizzle-orm";
 import { fileURLToPath } from "node:url";
 import type { Delivery, Question } from "../src/contracts";
 import type { RuntimeAgent } from "./runtime";
@@ -25,6 +25,7 @@ const sessionKeys = [
   "serviceTier",
   "turnId",
   "turnEnded",
+  "followUpPaused",
   "stop",
   "closeRequest",
   "reviewTarget",
@@ -42,6 +43,7 @@ const configKeys = [
   "workerDefaults",
 ] as const;
 const deliveryKeys = [
+  "mode",
   "attemptId",
   "images",
   "answers",
@@ -91,7 +93,13 @@ function sessionRow(a: RuntimeAgent) {
     ownerId: a.ownerId ?? null,
     threadId: a.threadId ?? null,
     settings: pick(a, ["model", "effort", "serviceTier", "provider"]),
-    recovery: pick(a, ["turnId", "turnEnded", "stop", "closeRequest"]),
+    recovery: pick(a, [
+      "turnId",
+      "turnEnded",
+      "stop",
+      "closeRequest",
+      "followUpPaused",
+    ]),
     task: pick(a, ["reviewTarget", "researchQuestion"]),
     diagnostics: pick(a, ["error", "execution", "treeFastError"]),
     treeFast: a.treeFast ?? null,
@@ -197,7 +205,14 @@ export class WorkspaceStore {
       })
       .from(s.deliveries)
       .where(
-        and(eq(s.deliveries.sessionId, id), eq(s.deliveries.source, "user")),
+        and(
+          eq(s.deliveries.sessionId, id),
+          eq(s.deliveries.source, "user"),
+          or(
+            ne(s.deliveries.mode, "follow_up"),
+            eq(s.deliveries.status, "sent"),
+          ),
+        ),
       )
       .orderBy(s.deliveries.position)
       .all();
@@ -326,6 +341,7 @@ export class WorkspaceStore {
             text: d.text,
             source: d.source,
             status: d.status,
+            ...(d.mode === "follow_up" ? { mode: d.mode } : {}),
             at: d.at,
             ...optional(d.report),
             ...optional({
@@ -479,6 +495,7 @@ export class WorkspaceStore {
           operationId: d.id,
           position,
           ...pick(d, ["text", "source", "status", "at"]),
+          mode: d.mode ?? "direct",
           attemptId: d.attemptId ?? null,
           turnId: d.turnId ?? null,
           error: d.error ?? null,

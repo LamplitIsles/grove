@@ -7,6 +7,7 @@ export const encodedBytes = (value: unknown) =>
 export function deliveryMetadata(d: Delivery): Delivery {
   return {
     id: d.id,
+    mode: d.mode,
     attemptId: d.attemptId,
     text: "",
     source: d.source,

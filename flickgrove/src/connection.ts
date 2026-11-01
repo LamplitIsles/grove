@@ -220,6 +220,10 @@ export class LocalConnection {
       clearInterval(link.probe);
       link.client = undefined;
       link.host.connected = false;
+      // Selected details are retained by the reading cache, but a reconnect
+      // must receive a fresh subscription before queued actions are enabled.
+      for (const id of Object.keys(this.details))
+        if (id.startsWith(link.config.id + ":")) delete this.details[id];
       historyCache.reconnect(link.config.id);
       link.host.error = "Instance disconnected. Reconnecting automatically.";
       this.offline(link.config.id);

@@ -50,6 +50,26 @@ function reviewTargetText(target: ReviewTarget) {
   return `${target.profile} · spec ${target.spec} · fixed point ${target.fixedPoint} → reviewed HEAD ${target.reviewedHead}`;
 }
 
+function pendingFollowUp(d: Delivery) {
+  return (
+    d.mode === "follow_up" && d.status !== "sent" && d.status !== "cancelled"
+  );
+}
+
+function followUpInspectionCandidate(a: RuntimeAgent) {
+  if (
+    !a.followUpPaused ||
+    a.turnEnded === true ||
+    a.deliveries.some((d) => d.mode === "follow_up" && d.status === "uncertain")
+  )
+    return undefined;
+  for (let i = a.deliveries.length - 1; i >= 0; i--) {
+    const delivery = a.deliveries[i];
+    if (delivery.mode === "follow_up" && delivery.status === "sent")
+      return delivery;
+  }
+}
+
 type State = {
   agents: RuntimeAgent[];
   revision: number;
@@ -103,7 +123,7 @@ export class Workspace {
       (w) =>
         w.questions.some((q) => q.state !== "answered") ||
         w.deliveries.some((d) =>
-          ["queued", "sending", "uncertain"].includes(d.status),
+          ["queued", "waiting", "sending", "uncertain"].includes(d.status),
         ) ||
         (w !== a &&
           (w.state === "working" ||
@@ -117,6 +137,7 @@ export class Workspace {
     );
   }
   private readonly completedTurns = new Set<string>();
+  private readonly nativeEventVersions = new WeakMap<RuntimeAgent, number>();
   // IDs only: retain live publication identity until this active turn ends, even
   // after the bounded reading window has evicted the corresponding bodies.
   private readonly completedItems = new Map<
@@ -192,6 +213,17 @@ export class Workspace {
           d.error =
             "Backend restarted before delivery was confirmed. Check the conversation before sending again.";
         }
+      if (
+        a.deliveries.some(
+          (d) => d.mode === "follow_up" && d.status === "waiting",
+        ) &&
+        ((a.turnEnded !== true &&
+          !(a.backend === "pi" && a.state === "working")) ||
+          a.stop?.status === "pending" ||
+          a.stop?.status === "unknown" ||
+          a.deliveries.some((d) => d.status === "uncertain"))
+      )
+        a.followUpPaused = true;
     }
     this.save();
     this.advanceChildCloses();
@@ -209,6 +241,7 @@ export class Workspace {
       // before any queued subsequent turn, retaining the cache if unavailable.
       void this.serialize(a.id, async () => {
         await this.handle(a);
+        this.scheduleFollowUps(a.id);
       }).catch(() => {});
     }
   }
@@ -315,6 +348,7 @@ export class Workspace {
     if (at > (root.lastActivityAt ?? 0)) root.lastActivityAt = at;
   }
   private event(a: RuntimeAgent, event: RuntimeEvent) {
+    this.nativeEventVersions.set(a, (this.nativeEventVersions.get(a) ?? 0) + 1);
     if (
       a.closed ||
       this.disposed ||
@@ -512,7 +546,19 @@ export class Workspace {
         this.handoffs.delete(a.id);
         if (a.role === "orc" && event.status === "failed")
           this.finalFailures.set(a.id, { id: event.turnId });
-        a.turnEnded = true;
+        a.turnEnded = a.role !== "orc" || event.verified !== false;
+        if (
+          a.deliveries.some(
+            (d) => d.mode === "follow_up" && d.status === "waiting",
+          ) &&
+          (event.status !== "completed" ||
+            event.verified === false ||
+            (event.replayed && event.recoveredActivityAt === undefined))
+        ) {
+          a.followUpPaused = true;
+          if (event.replayed && event.recoveredActivityAt === undefined)
+            a.turnEnded = false;
+        }
         const stopped =
           a.stop?.turnId === event.turnId && event.status === "interrupted";
         if (a.stop?.turnId === event.turnId)
@@ -549,11 +595,23 @@ export class Workspace {
       if (!event.willRetry) {
         a.state = "error";
         a.workingSince = undefined;
+        if (
+          a.deliveries.some(
+            (d) => d.mode === "follow_up" && d.status === "waiting",
+          )
+        )
+          a.followUpPaused = true;
       }
     } else {
       this.cancelHandoff(a.ownerId ?? a.id);
       a.execution = undefined;
       a.turnEnded = false;
+      if (
+        a.deliveries.some(
+          (d) => d.mode === "follow_up" && d.status === "waiting",
+        )
+      )
+        a.followUpPaused = true;
       if (event.type === "disconnected") this.handles.delete(a.id);
       if (a.stop?.status === "pending") a.stop.status = "unknown";
       a.state = "error";
@@ -563,6 +621,8 @@ export class Workspace {
     }
     this.save();
     this.advanceChildCloses();
+    if (event.type === "completed" && event.status === "completed")
+      this.scheduleFollowUps(a.id);
   }
   previewDirectory(id: string) {
     const agent =
@@ -660,7 +720,10 @@ export class Workspace {
       finalFailure: this.finalFailures.get(a.id),
       unansweredCount: a.questions.filter((q) => q.state === "unanswered")
         .length,
-      recoveryCount: a.deliveries.filter((d) => d.status !== "sent").length,
+      recoveryCount: a.deliveries.filter(
+        (d) => d.mode !== "follow_up" && d.status !== "sent",
+      ).length,
+      followUpCount: a.deliveries.filter(pendingFollowUp).length,
       error: agent.error?.slice(0, 8000),
       questions: agent.questions.slice(-100).map((q) => ({
         ...q,
@@ -692,6 +755,7 @@ export class Workspace {
   }
   detail(id: string): Detail {
     const a = this.agent(id);
+    const inspectionCandidate = followUpInspectionCandidate(a);
     return {
       ...this.publicAgent(a),
       messages: structuredClone(
@@ -700,12 +764,20 @@ export class Workspace {
       deliveries: a.deliveries
         .filter(
           (d) =>
-            d.status !== "sent" ||
+            (d.mode !== "follow_up" && d.status !== "sent") ||
             d.source === "question" ||
             a.messages.some((m) => m.clientId === d.id),
         )
         .slice(-100)
         .map(deliveryMetadata),
+      followUps: a.deliveries
+        .filter(
+          (d) =>
+            d.mode === "follow_up" &&
+            (!["sent", "cancelled"].includes(d.status) ||
+              d === inspectionCandidate),
+        )
+        .map((d) => ({ ...deliveryMetadata(d), text: d.text.slice(0, 2000) })),
     };
   }
   async synchronizeDetail(id: string) {
@@ -761,6 +833,7 @@ export class Workspace {
     const records = this.agent(id)
       .deliveries.filter(
         (d) =>
+          d.mode !== "follow_up" &&
           d.status !== "sent" &&
           (!before ||
             d.at < before[0] ||
@@ -1046,6 +1119,10 @@ export class Workspace {
     const handle = this.handles.get(id);
     if (!handle) throw new Error("Turn connection unavailable");
     this.cancelHandoff(a.id);
+    if (
+      a.deliveries.some((d) => d.mode === "follow_up" && d.status === "waiting")
+    )
+      a.followUpPaused = true;
     a.stop = { turnId, status: "pending" };
     a.state = "stopping";
     this.save();
@@ -1564,6 +1641,7 @@ export class Workspace {
     questionIds: string[] = [],
     answers?: Answer[],
     images?: MessageImage[],
+    startOnly = false,
   ) {
     if (this.writeFailure) throw this.writeFailure;
     if (this.disposed) throw new Error("Workspace is stopped");
@@ -1573,12 +1651,16 @@ export class Workspace {
       );
     if (a.state === "stopping") {
       const queued = a.deliveries.find(
-        (d) => d.id === requestId && d.status === "queued",
+        (d) =>
+          d.id === requestId &&
+          (d.status === "queued" || (startOnly && d.status === "sending")),
       );
       if (queued) {
         queued.status = "failed";
-        queued.error =
-          "Orc is stopping. Report retained; retry after its observed turn outcome.";
+        if (startOnly) a.followUpPaused = true;
+        queued.error = startOnly
+          ? "Orc is stopping. The follow-up was not sent."
+          : "Orc is stopping. Report retained; retry after its observed turn outcome.";
         this.save();
       }
       return this.detail(a.id);
@@ -1587,7 +1669,12 @@ export class Workspace {
       throw new Error("Write a message first");
     if (text.length > 100_000) throw new Error("Message is too long");
     let d = a.deliveries.find((d) => d.id === requestId);
-    if (d && d.status !== "failed" && d.status !== "queued")
+    if (
+      d &&
+      d.status !== "failed" &&
+      d.status !== "queued" &&
+      !(startOnly && d.status === "sending")
+    )
       return this.detail(a.id);
     this.cancelHandoff(a.ownerId ?? a.id);
     if (!d) {
@@ -1612,6 +1699,7 @@ export class Workspace {
     const previousState = a.state;
     this.save();
     const messagePosition = a.messages.length;
+    let startPrepared = false;
     try {
       let paths: string[] = [];
       try {
@@ -1631,6 +1719,20 @@ export class Workspace {
           error instanceof Error ? error.message : "Session unavailable",
         );
       }
+      if (
+        startOnly &&
+        (a.state !== "idle" ||
+          a.turnId ||
+          a.turnEnded !== true ||
+          a.followUpPaused ||
+          a.closed ||
+          a.closeRequest ||
+          this.disposed)
+      )
+        throw new DeliveryRejected(
+          "Conversation changed before the follow-up started",
+        );
+      startPrepared = startOnly;
       const activeTurn = !a.turnEnded ? a.turnId : undefined;
       a.turnEnded = false;
       if (!activeTurn && !a.error) {
@@ -1651,13 +1753,24 @@ export class Workspace {
       });
       const send = (observed?: string) =>
         a.backend === "pi"
-          ? handle.send(text, observed, paths, requestId, envelopeContext)
-          : handle.send(text, observed, paths, requestId);
+          ? handle.send(
+              text,
+              observed,
+              paths,
+              requestId,
+              envelopeContext,
+              startOnly,
+            )
+          : handle.send(text, observed, paths, requestId, undefined, startOnly);
       let turnId: string;
       try {
         turnId = await send(activeTurn);
       } catch (error) {
         if (!(error instanceof StaleTurn)) throw error;
+        if (startOnly)
+          throw new DeliveryRejected(
+            "Conversation changed before the follow-up started",
+          );
         if (
           a.stop &&
           a.stop.turnId === activeTurn &&
@@ -1728,10 +1841,29 @@ export class Workspace {
       }
     } catch (error) {
       if (this.writeFailure) throw this.writeFailure;
+      const restoreIdle =
+        startOnly &&
+        startPrepared &&
+        error instanceof DeliveryRejected &&
+        d.status !== "sent" &&
+        previousState === "idle" &&
+        a.state === "working" &&
+        !a.turnId &&
+        !this.disposed &&
+        a.stop?.status !== "pending" &&
+        a.stop?.status !== "unknown";
       if (d.status !== "sent") {
         d.status = error instanceof DeliveryRejected ? "failed" : "uncertain";
         d.error = error instanceof Error ? error.message : "Delivery failed";
       }
+      if (
+        startOnly ||
+        (d.status === "uncertain" &&
+          a.deliveries.some(
+            (item) => item.mode === "follow_up" && item.status === "waiting",
+          ))
+      )
+        a.followUpPaused = true;
       // A rejected steer does not stop the turn already running. Runtime
       // completion/disconnection events remain authoritative for its lifecycle.
       if (
@@ -1741,6 +1873,12 @@ export class Workspace {
         a.state = "error";
         // Delivery feedback belongs to the message; retain any native cause.
         a.workingSince = undefined;
+      }
+      if (restoreIdle) {
+        // The previous completion remains valid; a rejected start did not
+        // admit this input. Every subsequent start still checks native busy.
+        a.state = "idle";
+        a.turnEnded = true;
       }
       this.save();
     }
@@ -1814,7 +1952,10 @@ export class Workspace {
             m.role === "user" &&
             (m.id === operationId || m.clientId === operationId),
         ) ||
-        (d && (d.source !== "user" || d.status !== "failed"))
+        (d &&
+          (d.mode === "follow_up" ||
+            d.source !== "user" ||
+            d.status !== "failed"))
       )
         throw new Error("Only a rejected user submission can be deleted");
       if (!d) {
@@ -1833,6 +1974,294 @@ export class Workspace {
       return this.detail(id);
     });
   }
+  // A waiting row has never crossed the provider seam. Its identity remains in
+  // the ledger after cancellation so a delayed enqueue cannot recreate it.
+  enqueueFollowUp(
+    id: string,
+    text: string,
+    requestId: string,
+    images?: MessageImage[],
+  ) {
+    return this.serialize(id, async () => {
+      const a = this.agent(id);
+      if (a.role !== "orc" || a.closed || a.closeRequest)
+        throw new Error("Choose an open Orc conversation");
+      if (!text.trim() && !images?.length)
+        throw new Error("Write a message first");
+      if (text.length > 100_000) throw new Error("Message is too long");
+      const previous = a.deliveries.find((d) => d.id === requestId);
+      if (previous) {
+        if (
+          previous.mode !== "follow_up" ||
+          previous.text !== text ||
+          JSON.stringify(previous.images ?? []) !== JSON.stringify(images ?? [])
+        )
+          throw new Error("Operation ID is bound to different content");
+        return this.detail(id);
+      }
+      if (a.state === "stopping")
+        throw new Error("Wait for the observed turn outcome before queueing");
+      if (a.deliveries.filter(pendingFollowUp).length >= 50)
+        throw new Error("Follow-up queue is full");
+      if (images?.length) this.images.commit(a.id, requestId, text, images);
+      if (
+        !a.deliveries.some(pendingFollowUp) &&
+        !followUpInspectionCandidate(a)
+      )
+        a.followUpPaused = false;
+      a.deliveries.push({
+        id: requestId,
+        mode: "follow_up",
+        source: "user",
+        status: "waiting",
+        text,
+        images: images?.length ? structuredClone(images) : undefined,
+        at: Date.now(),
+        questionIds: [],
+      });
+      if (
+        a.state === "error" ||
+        (a.state === "idle" && a.turnEnded !== true) ||
+        a.deliveries.some((d) => d.status === "uncertain")
+      )
+        a.followUpPaused = true;
+      this.cancelHandoff(id);
+      this.save();
+      this.scheduleFollowUps(id);
+      return this.detail(id);
+    });
+  }
+  lookupFollowUp(id: string, operationId: string) {
+    if (this.writeFailure) throw this.writeFailure;
+    const a = this.state.agents.find((a) => a.id === id) ?? this.store.byId(id);
+    if (!a) throw new Error("Agent not found");
+    const d = a.deliveries.find(
+      (d) => d.id === operationId && d.mode === "follow_up",
+    );
+    return d ? structuredClone(d) : null;
+  }
+  inspectFollowUp(
+    id: string,
+    operationId: string,
+  ): Promise<import("../src/chord-contract").FollowUpInspection> {
+    return this.serialize(id, async () => {
+      const a = this.agent(id);
+      if (this.disposed || a.role !== "orc")
+        throw new Error("Choose an open Orc conversation");
+      const d = a.deliveries.find(
+        (item) => item.id === operationId && item.mode === "follow_up",
+      );
+      if (!d || !["uncertain", "sent"].includes(d.status))
+        throw new Error(
+          "Only an unconfirmed or accepted follow-up can be inspected",
+        );
+      const result = (
+        reason: import("../src/chord-contract").FollowUpInspection["reason"],
+        canContinue = false,
+      ) => {
+        if (this.writeFailure) throw this.writeFailure;
+        return {
+          admission:
+            d.status === "sent" ? ("accepted" as const) : ("unknown" as const),
+          canContinue,
+          reason,
+          delivery: structuredClone(d),
+        };
+      };
+      const handle = this.handles.get(id),
+        threadId = a.threadId;
+      if (!threadId || (handle && handle.threadId !== threadId))
+        return result("unavailable");
+      const inspect = handle?.inspectFollowUp
+        ? () => handle.inspectFollowUp!(operationId)
+        : !handle && a.backend === "pi" && this.options.runtime.inspectFollowUp
+          ? () => this.options.runtime.inspectFollowUp!(a, operationId)
+          : undefined;
+      if (!inspect) return result("unavailable");
+      const version = this.nativeEventVersions.get(a) ?? 0;
+      let native: import("./runtime").NativeFollowUpInspection;
+      try {
+        native = await inspect();
+      } catch {
+        return result("unavailable");
+      }
+      if (
+        this.disposed ||
+        a.closed ||
+        !this.state.agents.includes(a) ||
+        a.threadId !== threadId ||
+        this.handles.get(id) !== handle ||
+        (this.nativeEventVersions.get(a) ?? 0) !== version ||
+        a.deliveries.find((item) => item.id === operationId) !== d
+      )
+        return result("changed");
+      if (!native.accepted)
+        return result(
+          d.status === "sent" ? "turn_unconfirmed" : "admission_unknown",
+        );
+      this.confirmNative(a, operationId, native.turnId);
+      if (!native.settled || !native.turnId) {
+        this.save();
+        return result("turn_unconfirmed");
+      }
+      if (
+        (a.turnId && a.turnId !== native.turnId) ||
+        a.state === "stopping" ||
+        a.stop?.status === "pending" ||
+        a.stop?.status === "unknown" ||
+        a.execution?.retrying ||
+        a.closeRequest
+      ) {
+        this.save();
+        return result("session_busy");
+      }
+      if (
+        a.deliveries.some(
+          (item) =>
+            item.status === "uncertain" ||
+            item.status === "sending" ||
+            item.status === "queued" ||
+            (item.mode === "follow_up" && item.status === "failed"),
+        )
+      ) {
+        this.save();
+        return result("other_unresolved");
+      }
+      // The native inspection proves this operation's terminal turn and the
+      // currently idle thread in the same unchanged observation generation.
+      a.turnEnded = true;
+      a.turnId = undefined;
+      if (a.state === "working") {
+        a.state = "idle";
+        a.workingSince = undefined;
+      }
+      this.completedTurns.add(`${id}/${native.turnId}`);
+      this.save();
+      return result("ready", true);
+    });
+  }
+  cancelFollowUp(id: string, operationId: string) {
+    return this.serialize(id, async () => {
+      const a = this.agent(id);
+      const d = a.deliveries.find(
+        (d) => d.id === operationId && d.mode === "follow_up",
+      );
+      if (!d)
+        throw new Error("Follow-up not found; inspect the original admission");
+      if (d.status === "cancelled") return this.detail(id);
+      if (d.status !== "waiting" && d.status !== "failed")
+        throw new Error("Follow-up has started or its admission is unknown");
+      if (d.status === "failed")
+        await this.requireNativeRejection(a, operationId);
+      d.status = "cancelled";
+      d.error = undefined;
+      this.save();
+      this.scheduleFollowUps(id);
+      return this.detail(id);
+    });
+  }
+  resumeFollowUps(id: string) {
+    return this.serialize(id, async () => {
+      const a = this.agent(id);
+      const safeBoundary = () =>
+        !(
+          this.disposed ||
+          a.role !== "orc" ||
+          a.closed ||
+          !["idle", "error"].includes(a.state) ||
+          a.turnId ||
+          a.turnEnded !== true ||
+          a.execution?.retrying ||
+          a.stop?.status === "pending" ||
+          a.stop?.status === "unknown"
+        );
+      const unresolved = () =>
+        a.deliveries.some(
+          (d) =>
+            d.status === "uncertain" ||
+            d.status === "sending" ||
+            d.status === "queued" ||
+            (d.mode === "follow_up" && d.status === "failed"),
+        );
+      if (!safeBoundary())
+        throw new Error("The conversation has no verified idle boundary");
+      if (unresolved())
+        throw new Error(
+          "Inspect unresolved submissions before continuing the queue",
+        );
+      if (!this.handles.has(id)) {
+        if (a.backend !== "pi" || !a.threadId)
+          throw new Error("Session connection unavailable");
+        const threadId = a.threadId;
+        await this.handle(a, false);
+        if (
+          this.disposed ||
+          a.threadId !== threadId ||
+          !safeBoundary() ||
+          unresolved() ||
+          !this.handles.has(id)
+        )
+          throw new Error("The conversation changed while reconnecting");
+      }
+      a.followUpPaused = false;
+      a.state = "idle";
+      a.error = undefined;
+      a.execution = undefined;
+      this.save();
+      this.scheduleFollowUps(id);
+      return this.detail(id);
+    });
+  }
+  private scheduleFollowUps(id: string) {
+    if (this.disposed) return;
+    const agent = this.state.agents.find((a) => a.id === id);
+    if (
+      !agent ||
+      agent.role !== "orc" ||
+      !agent.deliveries.some(
+        (d) => d.mode === "follow_up" && d.status === "waiting",
+      )
+    )
+      return;
+    void this.serialize(id, async () => {
+      const a = this.agent(id);
+      if (
+        a.role !== "orc" ||
+        a.closed ||
+        a.followUpPaused ||
+        a.closeRequest ||
+        a.state !== "idle" ||
+        a.turnId ||
+        a.turnEnded !== true ||
+        !this.handles.has(id) ||
+        a.deliveries.some(
+          (d) =>
+            d.status === "uncertain" ||
+            d.status === "sending" ||
+            d.status === "queued" ||
+            (d.mode === "follow_up" && d.status === "failed"),
+        )
+      )
+        return;
+      const d = a.deliveries.find(
+        (d) => d.mode === "follow_up" && d.status === "waiting",
+      );
+      if (!d) return;
+      // Claim and persist before crossing either provider's admission seam.
+      d.status = "sending";
+      this.save();
+      await this.deliver(
+        a,
+        d.text,
+        d.id,
+        "user",
+        [],
+        undefined,
+        d.images,
+        true,
+      );
+    }).catch(() => {});
+  }
   send(
     id: string,
     text: string,
@@ -1845,6 +2274,8 @@ export class Workspace {
       if (a.role !== "orc") throw new Error("Send instructions through Orc");
       const previous = a.deliveries.find((d) => d.id === requestId);
       if (previous) {
+        if (previous.mode === "follow_up")
+          throw new Error("Operation belongs to a follow-up");
         if (
           previous.text !== text ||
           previous.source !== "user" ||
@@ -1936,8 +2367,10 @@ export class Workspace {
       this.treeActions.has(a.id) ||
       this.state.agents.some((w) => w.ownerId === a.id && !w.closed) ||
       a.questions.some((q) => q.state !== "answered") ||
+      !!followUpInspectionCandidate(a) ||
       a.deliveries.some(
         (d) =>
+          pendingFollowUp(d) ||
           d.status === "queued" ||
           d.status === "sending" ||
           (d.status === "uncertain" && d.source !== "user"),
@@ -2663,6 +3096,12 @@ export class Workspace {
     await Promise.all(releases);
   }
   private assertIdle(a: RuntimeAgent) {
+    if (a.deliveries.some(pendingFollowUp))
+      throw new Error(`${a.title} has follow-ups to resolve before closing`);
+    if (followUpInspectionCandidate(a))
+      throw new Error(
+        `${a.title} has a follow-up turn with an unconfirmed outcome`,
+      );
     if (
       a.state !== "idle" ||
       this.opening.has(a.id) ||

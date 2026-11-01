@@ -231,6 +231,16 @@ test("official codemode executes official MCP direct/deferred/codemode tools and
     await handle.send("Exercise configured tools", undefined, [], "operation");
     await firstStarted;
     await expect(
+      handle.send(
+        "Must wait for the next run",
+        undefined,
+        [],
+        "busy-follow-up",
+        undefined,
+        true,
+      ),
+    ).rejects.toThrow("busy");
+    await expect(
       handle.send("", undefined, [png], "unsupported-image"),
     ).rejects.toThrow("does not support images");
     await handle.updateSettings({
@@ -268,6 +278,9 @@ test("official codemode executes official MCP direct/deferred/codemode tools and
       events.some((e) => e.type === "item" && e.item.clientId === "operation"),
     ).toBe(true);
     expect(events.filter((e) => e.type === "completed")).toHaveLength(1);
+    expect(events.find((e) => e.type === "completed")).toMatchObject({
+      verified: true,
+    });
     plans[4] = {
       name: "codemode",
       args: { code: 'text(await tools.mcp__direct__echo({value:"hold"}));' },
@@ -285,6 +298,16 @@ test("official codemode executes official MCP direct/deferred/codemode tools and
     expect(await readFile(log, "utf8")).toContain('"event":"hold"');
     expect(requestedModels.at(-1)).toBe("next");
     await handle.interrupt(cancelRun);
+    for (
+      let i = 0;
+      i < 400 &&
+      !events.some((e) => e.type === "completed" && e.turnId === cancelRun);
+      i++
+    )
+      await Bun.sleep(5);
+    expect(
+      events.find((e) => e.type === "completed" && e.turnId === cancelRun),
+    ).toMatchObject({ status: "interrupted", verified: true });
     const stoppedPids = (await readFile(log, "utf8"))
       .trim()
       .split("\n")

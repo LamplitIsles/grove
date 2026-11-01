@@ -306,6 +306,7 @@ test("Orc tools own their Workers while Workers can only report to their parent"
   const tokenA = runtime.agents.get(a.id)!.token;
   const tokenB = runtime.agents.get(b.id)!.token;
   expect(app.identity(tokenA).tools).toEqual([
+    "orc_handoff",
     "researcher_start",
     "researcher_list",
     "researcher_read",

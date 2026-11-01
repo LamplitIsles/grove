@@ -15,6 +15,27 @@ async function fixture() {
   return f;
 }
 
+for (const status of ["waiting", "failed", "uncertain"] as const) {
+  test(`abandoning a direct unknown cannot close past a ${status} follow-up`, async () => {
+    const f = await fixture();
+    f.reload((a) => {
+      a.deliveries.push({
+        ...a.deliveries[0],
+        id: "follow-up",
+        mode: "follow_up",
+        status,
+      });
+    });
+    expect(f.app.detail(f.target.id).followUpCount).toBe(1);
+    await expect(f.app.closeTree(f.target.id)).rejects.toThrow();
+    await expect(f.app.abandonCloseCandidate(f.target.id)).rejects.toThrow();
+    await expect(
+      f.app.closeTree(f.target.id, ["original-unknown", "follow-up"]),
+    ).rejects.toThrow();
+    expect(f.app.lookupFollowUp(f.target.id, "follow-up")?.status).toBe(status);
+  });
+}
+
 test("ordinary close stays blocked; explicit original IDs close without resume or a receipt across reload", async () => {
   const f = await fixture();
   f.reload(); // Old stopped/error thread with no cached handle, including missing rollout.

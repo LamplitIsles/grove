@@ -106,6 +106,9 @@ main {
 .working i {
   background: #b8daf5;
 }
+.detail-status .queued i {
+  background: #e6ba7b;
+}
 .failed {
   color: #f2a3a3;
 }
@@ -515,6 +518,55 @@ pre {
 .composer-wrap {
   padding: 12px 16px 16px;
   position: relative;
+}
+.follow-up-queue {
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  max-height: 220px;
+  overflow-y: auto;
+}
+.follow-up-heading,
+.follow-up-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 12px;
+}
+.follow-up-heading {
+  justify-content: space-between;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  min-height: 32px;
+}
+.follow-up-item {
+  border-top: 1px solid var(--border);
+}
+.follow-up-info {
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  margin: 0;
+  padding: 8px 12px;
+}
+.follow-up-content {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+}
+.follow-up-content > span {
+  display: block;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.follow-up-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
 }
 .composer {
   border: 1px solid #45454d;

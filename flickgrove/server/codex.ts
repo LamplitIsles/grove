@@ -956,6 +956,116 @@ export class CodexRuntime implements Runtime {
         titleGeneration?.abort();
         await client.call("thread/name/set", { threadId: id, name });
       },
+      inspectFollowUp: async (operationId) => {
+        await checkTarget();
+        if (closed || this.threads.get(id) !== client)
+          throw new Error("Session connection unavailable");
+        const unconfirmed = async (turnId?: string) => {
+          await checkTarget();
+          if (closed || this.threads.get(id) !== client)
+            throw new Error("Session changed while inspecting");
+          return {
+            accepted: true,
+            ...(turnId ? { turnId } : {}),
+            settled: false,
+          };
+        };
+        let cursor: string | null = null;
+        let turnId: string | undefined;
+        const seen = new Set<string>();
+        for (let pages = 0; pages < 100; pages++) {
+          const page: v2.ThreadItemsListResponse = await client.call(
+            "thread/items/list",
+            {
+              threadId: id,
+              cursor,
+              limit: 100,
+              sortDirection: "desc",
+            },
+          );
+          for (const entry of page.data) {
+            const item = "item" in entry ? entry.item : entry;
+            const itemTurn = "turnId" in entry ? entry.turnId : undefined;
+            if (item.type === "userMessage" && item.clientId === operationId) {
+              if (turnId && itemTurn !== turnId)
+                throw new Error("Conflicting native operation identity");
+              turnId = itemTurn;
+              // A native item is positive admission even without turn identity.
+              if (!turnId) return unconfirmed();
+            }
+          }
+          if (turnId || !page.nextCursor) break;
+          if (seen.has(page.nextCursor))
+            throw new Error("Repeated native cursor");
+          seen.add(page.nextCursor);
+          cursor = page.nextCursor;
+        }
+        if (!turnId) return { accepted: false, settled: false };
+        cursor = null;
+        seen.clear();
+        let originalTerminal = false;
+        let latestTerminal = false;
+        try {
+          for (let pages = 0; pages < 100; pages++) {
+            const page: v2.ThreadTurnsListResponse = await client.call(
+              "thread/turns/list",
+              {
+                threadId: id,
+                cursor,
+                limit: 100,
+                sortDirection: "desc",
+                itemsView: "summary",
+              },
+            );
+            if (pages === 0)
+              latestTerminal =
+                !!page.data[0] &&
+                ["completed", "failed", "interrupted"].includes(
+                  page.data[0].status,
+                );
+            const original = page.data.find((turn) => turn.id === turnId);
+            if (original) {
+              originalTerminal = [
+                "completed",
+                "failed",
+                "interrupted",
+              ].includes(original.status);
+              break;
+            }
+            if (!page.nextCursor) break;
+            if (seen.has(page.nextCursor))
+              throw new Error("Repeated native turn cursor");
+            seen.add(page.nextCursor);
+            cursor = page.nextCursor;
+          }
+        } catch (error) {
+          if (closed || this.threads.get(id) !== client) throw error;
+          return unconfirmed(turnId);
+        }
+        if (!originalTerminal || !latestTerminal) return unconfirmed(turnId);
+        let current: v2.ThreadReadResponse;
+        try {
+          current = await client.threadRead({
+            threadId: id,
+            includeTurns: false,
+          });
+        } catch (error) {
+          if (closed || this.threads.get(id) !== client) throw error;
+          return unconfirmed(turnId);
+        }
+        await checkTarget();
+        if (
+          closed ||
+          this.threads.get(id) !== client ||
+          current.thread.id !== id
+        )
+          throw new Error("Session changed while inspecting");
+        return {
+          accepted: true,
+          turnId,
+          settled: current.thread.status.type === "idle",
+        };
+      },
       send: async (text, activeTurn, images = [], clientUserMessageId) => {
         try {
           await checkTarget();

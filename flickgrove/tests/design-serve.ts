@@ -750,6 +750,7 @@ const server = Bun.serve({
         usage?: number | null;
         stopMode?: string;
         sendMode?: string;
+        inspection?: { accepted: boolean; settled: boolean; turnId?: string };
         complete?: string;
         question?: boolean;
         questionId?: string;
@@ -866,6 +867,10 @@ const server = Bun.serve({
         sendMode = body.sendMode;
         if (sendMode !== "held") sendGate.resolve();
         else sendGate = Promise.withResolvers<void>();
+      }
+      if (body.inspection) {
+        const inspection = body.inspection;
+        current.runtime.inspectOverride = async () => inspection;
       }
       if (body.execution) {
         const id = body.execution.agentId ?? "orc";

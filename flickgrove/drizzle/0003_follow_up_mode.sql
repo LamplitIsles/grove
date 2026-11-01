@@ -1,0 +1,1 @@
+ALTER TABLE `deliveries` ADD `mode` text DEFAULT 'direct' NOT NULL;

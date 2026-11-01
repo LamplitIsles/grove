@@ -13,7 +13,7 @@ import type { RuntimeAgent, ExecutionSettings } from "./runtime";
 export type RecoveryContext = Pick<
   RuntimeAgent,
   "turnId" | "turnEnded" | "stop" | "closeRequest"
->;
+> & { followUpPaused?: boolean };
 export type TaskContext = Pick<Agent, "reviewTarget" | "researchQuestion">;
 export type SessionDiagnostics = Pick<
   Agent,
@@ -76,6 +76,10 @@ export const deliveries = sqliteTable(
     operationId: text("operation_id").notNull(),
     position: integer("position").notNull(),
     text: text("text").notNull(),
+    mode: text("mode")
+      .$type<"direct" | "follow_up">()
+      .notNull()
+      .default("direct"),
     source: text("source").$type<Delivery["source"]>().notNull(),
     status: text("status").$type<Delivery["status"]>().notNull(),
     attemptId: text("attempt_id"),

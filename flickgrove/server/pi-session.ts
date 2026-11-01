@@ -20,6 +20,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   Harness,
+  ConversationBusy,
   createRegistry,
   defineExtension,
   type ToolRegistration,
@@ -48,6 +49,7 @@ import { roleTools, toolDefinitions } from "./tools";
 import { PiMetadata, PiOperation, PiWithdrawal } from "./pi-documents";
 import { openPiStorage, acquirePiWriter } from "./pi-storage";
 import { recoveredPiActivity } from "./pi-completion";
+import { inspectPiFollowUp } from "./pi-inspection";
 import { openPiMcp } from "./pi-mcp";
 import { createDeepSeekSearch } from "./pi-deepseek-search";
 import { parseTitle, titlePrompt } from "./thread-title";
@@ -442,6 +444,8 @@ export async function openPiSession(
     let runInputs = new Set<number>();
     for (const delivery of agent.deliveries.filter(
       (d) =>
+        d.status !== "waiting" &&
+        d.status !== "cancelled" &&
         d.status !== "failed" &&
         (d.status !== "sent" || d.turnId === persistedTurn),
     )) {
@@ -630,14 +634,36 @@ export async function openPiSession(
       else if (next) dispatch({ type: "progress", turnId: next });
       if (!next && (runId || persistedTurn)) {
         const settledRun = runId ?? persistedTurn!;
+        const taskId = Number(settledRun);
+        const task =
+          Number.isSafeInteger(taskId) && taskId > 0
+            ? await storage!.task(
+                taskId as import("@earendil-works/pi-durable").TaskId,
+                ctx,
+              )
+            : undefined;
         const interrupted = [...knownSubmissions.values()]
           .filter((s) => runInputs.has(s.id))
           .some((s) => s.status === "unanswered" && s.reason === "aborted");
         const failed = [...knownSubmissions.values()]
           .filter((s) => runInputs.has(s.id))
           .some((s) => s.status === "unanswered" && s.reason !== "aborted");
+        const verified =
+          !!task &&
+          task.conversationId === root.id &&
+          task.kind === "pi.generation" &&
+          task.state.status === "terminal" &&
+          (task.state.outcome.status === "completed" ||
+            interrupted ||
+            failed) &&
+          runInputs.size > 0 &&
+          [...runInputs].every((id) => {
+            const input = knownSubmissions.get(id);
+            return input?.status === "done" || input?.status === "unanswered";
+          });
         dispatch({
           type: "completed",
+          verified,
           turnId: settledRun,
           ...(recoveredEnd === undefined
             ? {}
@@ -717,13 +743,34 @@ export async function openPiSession(
           (await tx.doc(PiMetadata)).title = title;
         }, ctx);
       },
-      async send(text, observed, images = [], clientId, envelopeContext) {
+      async inspectFollowUp(operationId) {
+        return serialize(async () => {
+          if (closed) throw new Error("Pi session is closed");
+          return inspectPiFollowUp(path, id, agent, operationId);
+        });
+      },
+      async send(
+        text,
+        observed,
+        images = [],
+        clientId,
+        envelopeContext,
+        startOnly = false,
+      ) {
         return serialize(async () => {
           if (closed) throw new DeliveryRejected("Pi session is closed");
           const nativeActive = (await harness!.snapshot(LiveDoc, root.id, ctx))
             ?.run?.taskId;
           const active =
             nativeActive === undefined ? undefined : String(nativeActive);
+          if (
+            startOnly &&
+            (active ||
+              (await harness!.snapshot(InboxDoc, root.id, ctx))?.items.length)
+          )
+            throw new DeliveryRejected(
+              "Pi conversation is busy; follow-up was not admitted",
+            );
           if (observed && observed !== active)
             throw new StaleTurn("Pi run has settled", active);
           if (!active) {
@@ -859,16 +906,28 @@ export async function openPiSession(
               },
               ctx,
             );
-          const submission = await root.submit(
-            {
-              type: "input",
-              requestId: operation,
-              content,
-              whenBusy: "steer",
-              entry: { kind: "grove.input", data: { operation, fingerprint } },
-            },
-            ctx,
-          );
+          let submission;
+          try {
+            submission = await root.submit(
+              {
+                type: "input",
+                requestId: operation,
+                content,
+                whenBusy: startOnly ? "reject" : "steer",
+                entry: {
+                  kind: "grove.input",
+                  data: { operation, fingerprint },
+                },
+              },
+              ctx,
+            );
+          } catch (error) {
+            if (startOnly && error instanceof ConversationBusy)
+              throw new DeliveryRejected(
+                "Pi conversation is busy; follow-up was not admitted",
+              );
+            throw error;
+          }
           // Use the committed native snapshot, independent of watch callback scheduling.
           pending.add(submission.id);
           return String(

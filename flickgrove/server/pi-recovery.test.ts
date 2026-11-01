@@ -17,6 +17,9 @@ import { ROOT_CONVERSATION_ID, type TaskId } from "@earendil-works/pi-durable";
 import { openPiSession, piSessionPath } from "./pi-session";
 import { readPiStorage, acquirePiWriter } from "./pi-storage";
 import { PiRuntime } from "./pi";
+import { inspectPiFollowUp } from "./pi-inspection";
+import { Workspace } from "./workspace";
+import { WorkspaceStore } from "./workspace-store";
 import type { RuntimeAgent, RuntimeEvent, RuntimeHandle } from "./runtime";
 
 const until = async (check: () => boolean | Promise<boolean>) => {
@@ -211,6 +214,24 @@ test("Durable accepted/queued work resumes without resubmission; scoped Stop wit
       "placed",
       "queued",
     ]);
+    const beforeInspection = requests;
+    expect(await handle.inspectFollowUp!("second")).toMatchObject({
+      accepted: true,
+      settled: false,
+    });
+    expect(await handle.inspectFollowUp!("missing")).toMatchObject({
+      accepted: false,
+      settled: false,
+    });
+    await expect(
+      inspectPiFollowUp(
+        piSessionPath(sessionDir, threadId),
+        threadId,
+        { ...agent, id: "foreign" },
+        "first",
+      ),
+    ).rejects.toThrow("identity");
+    expect(requests).toBe(beforeInspection);
     expect(
       await handle.send("same text", run, [], "first", "immutable-source"),
     ).toBe(run);
@@ -292,6 +313,18 @@ test("Durable accepted/queued work resumes without resubmission; scoped Stop wit
     const accepted = await records(threadId);
     expect(accepted).toHaveLength(2);
     expect(accepted.every((s) => s.status === "done")).toBe(true);
+    const beforeTerminalInspection = requests;
+    const beforeInspectionMtime = (
+      await stat(piSessionPath(sessionDir, threadId))
+    ).mtimeMs;
+    expect(await handle.inspectFollowUp!("second")).toMatchObject({
+      accepted: true,
+      settled: true,
+    });
+    expect(requests).toBe(beforeTerminalInspection);
+    expect((await stat(piSessionPath(sessionDir, threadId))).mtimeMs).toBe(
+      beforeInspectionMtime,
+    );
     expect(
       (await reader.historyMessages(threadId)).messages
         .filter((m) => m.role === "user")
@@ -434,6 +467,12 @@ test("Durable accepted/queued work resumes without resubmission; scoped Stop wit
         .filter((s) => s.requestId?.startsWith("stop-"))
         .every((s) => s.status === "unanswered"),
     );
+    const beforeStoppedInspection = requests;
+    expect(await handle.inspectFollowUp!("stop-queued")).toMatchObject({
+      accepted: true,
+      settled: false,
+    });
+    expect(requests).toBe(beforeStoppedInspection);
     expect((await records(other.threadId))[0]?.status).toBe("placed");
     const queued = (await records(threadId)).find(
       (s) => s.requestId === "stop-queued",
@@ -607,6 +646,14 @@ test("Durable accepted/queued work resumes without resubmission; scoped Stop wit
     await expect(
       readPiStorage(piSessionPath(sessionDir, crashIdentity.threadId)),
     ).rejects.toThrow("WAL files are unavailable");
+    await expect(
+      inspectPiFollowUp(
+        piSessionPath(sessionDir, crashIdentity.threadId),
+        crashIdentity.threadId,
+        crashAgent,
+        "crash-first",
+      ),
+    ).rejects.toThrow("WAL files are unavailable");
     hold = false;
     toolPlan = false;
     const crashedEvents: RuntimeEvent[] = [];
@@ -681,6 +728,100 @@ test("Durable accepted/queued work resumes without resubmission; scoped Stop wit
       }
     }
     await reader.close();
+    const orcAgent: RuntimeAgent = {
+      ...agent,
+      id: "inspect-orc",
+      role: "orc",
+      ownerId: undefined,
+    };
+    const orcEvents: RuntimeEvent[] = [];
+    const nativeOrc = await openPiSession(
+      orcAgent,
+      (event) => orcEvents.push(event),
+      options,
+    );
+    const orcThread = nativeOrc.threadId;
+    await nativeOrc.send(
+      "original inspection input",
+      undefined,
+      [],
+      "inspect-operation",
+    );
+    await until(() => orcEvents.some((event) => event.type === "completed"));
+    await nativeOrc.close();
+    const stateDir = join(home, "inspect-workspace");
+    await mkdir(stateDir);
+    const store = new WorkspaceStore(join(stateDir, "workspace.sqlite"));
+    store.track(
+      {
+        ...orcAgent,
+        threadId: orcThread,
+        state: "error",
+        turnEnded: false,
+        followUpPaused: true,
+        deliveries: [
+          {
+            id: "inspect-operation",
+            mode: "follow_up",
+            source: "user",
+            status: "uncertain",
+            text: "original inspection input",
+            questionIds: [],
+            at: 1,
+          },
+          {
+            id: "later",
+            mode: "follow_up",
+            source: "user",
+            status: "waiting",
+            text: "next input",
+            questionIds: [],
+            at: 2,
+          },
+        ],
+      },
+      true,
+    );
+    store.flush();
+    store.close();
+    const orcRuntime = new PiRuntime({
+      agentDir,
+      tool: async () => ({ ok: true }),
+    });
+    const callsBeforeRecovery = requests;
+    const workspace = new Workspace({
+      directory: stateDir,
+      runtime: orcRuntime,
+      projects: async () => [orcAgent.project],
+    });
+    try {
+      await until(
+        () =>
+          workspace.lookupFollowUp(orcAgent.id, "inspect-operation")?.status ===
+          "sent",
+      );
+      expect(requests).toBe(callsBeforeRecovery);
+      const beforeInspect = requests;
+      expect(
+        await workspace.inspectFollowUp(orcAgent.id, "inspect-operation"),
+      ).toMatchObject({
+        admission: "accepted",
+        canContinue: true,
+        reason: "ready",
+      });
+      expect(requests).toBe(beforeInspect);
+      await workspace.resumeFollowUps(orcAgent.id);
+      await until(
+        () => workspace.lookupFollowUp(orcAgent.id, "later")?.status === "sent",
+      );
+      const originalRecords = (await records(orcThread)).filter(
+        (record) => record.requestId === "inspect-operation",
+      );
+      expect(originalRecords).toHaveLength(1);
+    } finally {
+      workspace.dispose();
+      await orcRuntime.close();
+    }
   } finally {
     const cleanupCrashProcesses = async () => {
       try {

@@ -19,7 +19,7 @@
   import type { Answer, Agent, Detail, HistorySession, Model, Project, Settings, Skill, Snapshot } from "./contracts";
   import { api, editable, setClient } from "./api";
   import { RequestRejected } from "./chord-client";
-  import { lookupSchema, abandonCloseSchema, type Receipt } from "./chord-contract";
+  import { lookupSchema, abandonCloseSchema, deliverySchema, followUpInspectionSchema, type Receipt } from "./chord-contract";
   import { addOutgoing, observeOutgoing, outgoing, withOutgoing, acceptReceipt, unknownOutgoing, submissionResult, beginRetry, observeSendResult } from "./outgoing.svelte";
   import { imageSchema } from "./chord-contract";
   import { loadImages, operationKey, type ImageDraft } from "./image-drafts";
@@ -52,6 +52,7 @@
   let selectedId = $state<string | null>(savedSelection.sessions[savedSelection.host] ?? null);
   let navigationReady = $state(false); let connectionReady = $state(false);
   let detail = $state<Detail | null>(null); let skills = $state<Skill[]>([]);
+  let queueAuthority = $state<string | null>(null);
   let projects = $state<Project[]>([]); let projectsLoading = $state(true); let models = $state<Model[]>(preferences.models);
   let connected = $state(false); let loading = $state(true); let error = $state("");
   let now = $state(Date.now()); let sessionList: { visibleIds(): string[]; openVisible(id: string): void; switchVisible(event: KeyboardEvent): void; keydown(event: KeyboardEvent): Promise<void>; expandFocused(): void; reveal(id: string): Promise<void>; closeTarget(): string | null; selectAgentOrg(agent: Agent): void };
@@ -130,7 +131,7 @@
   $effect(() => {
     if (!navigationReady) return;
     const id = navigation.details.at(-1) ?? null;
-    if (id !== selectedId) { ++sequence; selectedId = id; detail = null; skills = []; error = ""; if (id) void restoreDetail(id); else { void client?.call("select", {ids:[]}).catch(() => {}); } }
+    if (id !== selectedId) { ++sequence; selectedId = id; detail = null; queueAuthority = null; skills = []; error = ""; if (id) void restoreDetail(id); else { void client?.call("select", {ids:[]}).catch(() => {}); } }
   });
   $effect(() => {
     const kind = navigation.surfaces.find(s => s === "new" || s === "settings" || s === "keys" || s === "abandon-close") ?? null;
@@ -140,7 +141,7 @@
     const seq = ++sequence;
     try {
       const result = await api<Detail>(`/agents/${id}`);
-      if (selectedId === id && seq === sequence) { observeOutgoing(result); detail = retainReading(detail, result); readingCache.saveDetail(detail); }
+      if (selectedId === id && seq === sequence) { observeOutgoing(result); detail = retainReading(detail, result); queueAuthority = id; readingCache.saveDetail(detail); }
     } catch (e) { if (selectedId === id && seq === sequence && connected) error = e instanceof Error ? e.message : m.load_failure(); }
   }
   function open(id: string, fromDetail = false) { openConversation(id, fromDetail, snapshot.agents.find(a => a.id === id)?.ownerId); }
@@ -356,6 +357,42 @@
     finally { dispatches=dispatches.filter(d=>d.token!==operationId); }
     return true;
   }
+  function queueConnection(id:string) {
+    if(!client || !connected || !hosts.some(h=>id.startsWith(h.id+":") && h.connected)) throw new Error("Connect to manage the queue.");
+    return client;
+  }
+  async function enqueueFollowUp(id:string, text:string, operationId:string, images:ImageDraft[]) {
+    let submitted=false;
+    try {
+      const connection=queueConnection(id);
+      let refs:import("./contracts").MessageImage[] | undefined;
+      if(images.length){
+        const form=new FormData();form.set("text",JSON.stringify(text));for(const image of images)form.append("images",image.file,image.file.name);
+        const response=await connection.media(id,`/api/images?agent=${encodeURIComponent(id)}&operation=${encodeURIComponent(operationId)}`,{method:"POST",body:form});
+        const upload=await response.json();
+        if(!response.ok || upload.agent!==id || upload.operation!==operationId)throw new Error(upload.error ?? "Image upload failed");
+        refs=upload.images.map((item:unknown)=>imageSchema.parse(item));
+      }
+      submitted=true;
+      await connection.call("enqueueFollowUp",{id,text,operationId,...(refs ? {images:refs} : {})});
+      return {status:"accepted" as const};
+    } catch(e) {
+      return {status:(!submitted || e instanceof RequestRejected ? "rejected" : "unknown") as "rejected" | "unknown",error:e instanceof Error ? e.message : m.load_failure()};
+    }
+  }
+  async function lookupFollowUp(id:string,operationId:string) {
+    const result=deliverySchema.nullable().parse(await queueConnection(id).call("lookupFollowUp",{id,operationId}));
+    if(result && (result.id!==operationId || result.mode!=="follow_up")) throw new Error("Queue operation identity changed");
+    return result;
+  }
+  async function inspectFollowUp(id:string,operationId:string) {
+    const result=followUpInspectionSchema.parse(await queueConnection(id).call("inspectFollowUp",{id,operationId}));
+    if(result.delivery.id!==operationId || result.delivery.mode!=="follow_up")throw new Error("Queue operation identity changed");
+    return result;
+  }
+  async function queueAction(id:string,member:"cancelFollowUp" | "resumeFollowUps",operationId?:string) {
+    await queueConnection(id).call(member,operationId ? {id,operationId} : {id});
+  }
   async function dispatch(id:string,text:string,operationId:string,images:ImageDraft[],retry?:import("./chord-contract").RetrySend) {
     const connection = client;
     let submitted=false, attemptId=outgoing.entries.find(o=>o.agentId===id && o.id===operationId)?.attemptId;
@@ -558,10 +595,11 @@
       const before=snapshot;
       const entryWasConnected=before.hosts?.find(h=>h.id===value.snapshot.entryId)?.connected;
       connected=value.snapshot.hosts?.some(h=>h.connected)??false;
+      if(selectedId && !value.snapshot.hosts?.some(h=>selectedId!.startsWith(h.id+":") && h.connected))queueAuthority=null;
       notifications(before,value.snapshot);
       adopt(value.snapshot,true);const entry=value.snapshot.hosts?.find(h=>h.id===value.snapshot.entryId);loading=!!entry&&!entry.connected&&!entry.error;
       const incoming=selectedId&&value.details[selectedId];
-      if(incoming && value.snapshot.agents.some(a=>a.id===incoming.id)){observeOutgoing(incoming);detail=retainReading(detail?.messages.length ? detail : readingCache.readDetail(incoming.id),incoming);readingCache.saveDetail(detail);}
+      if(incoming && value.snapshot.agents.some(a=>a.id===incoming.id)){observeOutgoing(incoming);detail=retainReading(detail?.messages.length ? detail : readingCache.readDetail(incoming.id),incoming);queueAuthority=incoming.id;readingCache.saveDetail(detail);}
       void reconcilePending();
       for (const intent of closeRecovery.entries) {
         const peer = intent.agentId.split(":")[0];
@@ -604,7 +642,7 @@
   </Sidebar.Root>
   {#if !shownDetail}<div class="detail-empty"><div class="empty-tools"><Sidebar.Trigger />{@render globalActions()}</div><div class="empty-message" role="status"><p>{selectedId ? m.loading() : m.select_conversation()}</p>{#if selectedId}<Button variant="ghost" size="sm" onclick={closeDetail}>{m.back_sessions()}</Button>{/if}</div></div>{/if}
   {#if error && !modal && !shownDetail}<div class="app-error" role="alert"><span>{error}</span><Button variant="ghost" size="icon-sm" aria-label={m.close()} onclick={() => error = ""}><X /></Button></div>{/if}
-  {#if shownDetail && selectedId}{#key selectedId}<AgentDetail {globalActions} detail={shownDetail!} ready={!!detail} tree={shownDetail!.role === "orc" ? target : owner} {owner} {skills} {now} connected={hostConnected} mediaConnected={connected && hostConnected} onstop={stop} onupdate={result => { if (selectedId === result.id) detail = result; snapshot = { ...snapshot, agents: snapshot.agents.map(a => a.id === result.id ? { ...a, model: result.model, effort: result.effort, serviceTier: result.serviceTier } : a) }; }} onrename={rename} onrefresh={load} onretryuser={retryUser} {retryErrors} dispatching={dispatches.filter(d=>d.key.startsWith(selectedId + "/") && dispatchActive(d)).map(d=>d.key.slice(selectedId!.length+1))} optimisticWorking={optimistic(selectedId)} actionError={error} closeError={closeError?.id === shownDetail.id ? closeError.reason : undefined} lastSeen={selectedHost?.lastSeen} workers={snapshot.agents.filter(w => w.ownerId === detail?.id)} onclose={closeDetail} onopen={id => open(id, true)} onsend={send} onanswer={answerBatch} onretry={retryDelivery} />{/key}{/if}
+  {#if shownDetail && selectedId}{#key selectedId}<AgentDetail {globalActions} detail={shownDetail!} ready={!!detail} queueReady={queueAuthority === selectedId && connected && hostConnected} onenqueue={enqueueFollowUp} oncheckqueue={lookupFollowUp} oninspectqueue={inspectFollowUp} onqueueaction={queueAction} tree={shownDetail!.role === "orc" ? target : owner} {owner} {skills} {now} connected={hostConnected} mediaConnected={connected && hostConnected} onstop={stop} onupdate={result => { if (selectedId === result.id) detail = result; snapshot = { ...snapshot, agents: snapshot.agents.map(a => a.id === result.id ? { ...a, model: result.model, effort: result.effort, serviceTier: result.serviceTier } : a) }; }} onrename={rename} onrefresh={load} onretryuser={retryUser} {retryErrors} dispatching={dispatches.filter(d=>d.key.startsWith(selectedId + "/") && dispatchActive(d)).map(d=>d.key.slice(selectedId!.length+1))} optimisticWorking={optimistic(selectedId)} actionError={error} closeError={closeError?.id === shownDetail.id ? closeError.reason : undefined} lastSeen={selectedHost?.lastSeen} workers={snapshot.agents.filter(w => w.ownerId === detail?.id)} onclose={closeDetail} onopen={id => open(id, true)} onsend={send} onanswer={answerBatch} onretry={retryDelivery} />{/key}{/if}
 </main>
 
 {#if closeRecovery.entries.some(i => modal !== "abandon-close" || abandon?.id !== i.agentId)}
@@ -660,7 +698,7 @@
       <Button variant="ghost" size="sm" disabled={modelRefreshBusy || !connected} onclick={refreshModels}>Refresh models</Button>
       <p class="settings-scope">{m.settings_scope()}</p><div class="modal-action">{#if install}<button class="install-link" onclick={() => install?.prompt()}>{m.install_app()}</button>{/if}<Button variant="default" size="sm" disabled={!settings || !settingsValid || saving} onclick={saveSettings}>{saving ? m.sending() : m.save_changes()}</Button></div>
     {:else if modal === "keys"}
-      <Dialog.Title>{m.shortcuts()}</Dialog.Title><p class="modal-help">{m.keyboard_help()}</p><dl class="shortcut-list">{#each [["⌘ / Ctrl + B", m.toggle_sidebar()], ["⌘ / Ctrl + 1–9", m.key_visible_number()], ["Option/Alt + J / K", m.key_visible_cycle()], ["↑ ↓ ← →", m.key_focus()], ["Enter", m.key_open()], ["E", m.key_expand()], ["N", m.key_new()], ["I", m.key_input()], ["Option/Alt + S", m.search_skills()], ["Option/Alt + X", m.close_tree()], ["Esc", m.key_escape()], ["Tab", m.key_completion()], ["Enter", m.key_send()], ["Shift + Enter", m.key_newline()]] as [key, label]}<div><dt><Kbd>{key}</Kbd></dt><dd>{label}</dd></div>{/each}</dl><p class="keyboard-scope">{m.keyboard_scope()}</p>
+      <Dialog.Title>{m.shortcuts()}</Dialog.Title><p class="modal-help">{m.keyboard_help()}</p><dl class="shortcut-list">{#each [["⌘ / Ctrl + B", m.toggle_sidebar()], ["⌘ / Ctrl + 1–9", m.key_visible_number()], ["Option/Alt + J / K", m.key_visible_cycle()], ["↑ ↓ ← →", m.key_focus()], ["Enter", m.key_open()], ["E", m.key_expand()], ["N", m.key_new()], ["I", m.key_input()], ["Option/Alt + S", m.search_skills()], ["Option/Alt + X", m.close_tree()], ["Esc", m.key_escape()], ["Tab", m.key_completion()], ["Tab", "Queue message while working"], ["Enter", m.key_send()], ["Shift + Enter", m.key_newline()]] as [key, label]}<div><dt><Kbd>{key}</Kbd></dt><dd>{label}</dd></div>{/each}</dl><p class="keyboard-scope">{m.keyboard_scope()}</p>
     {/if}
     {#if error}<p class="inline-error" role="alert">{error}</p>{/if}
   </Dialog.Content>

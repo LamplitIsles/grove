@@ -54,6 +54,24 @@ export async function invoke(app: HostService, member: Method, input: unknown) {
       const p = parse(member);
       return await app.send(p.id, p.text, p.operationId, p.images, p.retry);
     }
+    case "enqueueFollowUp": {
+      const p = parse(member);
+      return await app.enqueueFollowUp(p.id, p.text, p.operationId, p.images);
+    }
+    case "cancelFollowUp": {
+      const p = parse(member);
+      return await app.cancelFollowUp(p.id, p.operationId);
+    }
+    case "lookupFollowUp": {
+      const p = parse(member);
+      return app.lookupFollowUp(p.id, p.operationId);
+    }
+    case "inspectFollowUp": {
+      const p = parse(member);
+      return await app.inspectFollowUp(p.id, p.operationId);
+    }
+    case "resumeFollowUps":
+      return await app.resumeFollowUps(parse(member).id);
     case "retryDelivery": {
       const p = parse(member);
       return await app.retryDelivery(p.id, p.deliveryId);

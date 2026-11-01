@@ -224,6 +224,79 @@ test("two browser selections and rapid switching are independent; detail pushes 
   await l.call("select", { ids: [] });
   await until(() => Object.keys(left!.details).length === 0);
 });
+
+test("independent clients share the durable FIFO and observe pending counts without duplicate admission", async () => {
+  const f = fixture();
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  let left: View | undefined, right: View | undefined;
+  const l = await f.client((v) => (left = v));
+  const r = await f.client((v) => (right = v));
+  await Promise.all([
+    l.call("select", { ids: [id] }),
+    r.call("select", { ids: [id] }),
+  ]);
+  await l.call("send", { id, text: "initial", operationId: "initial" });
+  const initialTurn = f.app.detail(agent.id).turnId!;
+  await Promise.all([
+    l.call("enqueueFollowUp", { id, text: "from left", operationId: "left" }),
+    r.call("enqueueFollowUp", { id, text: "from right", operationId: "right" }),
+  ]);
+  const order = f.app.detail(agent.id).followUps!.map((d) => d.id);
+  expect(new Set(order)).toEqual(new Set(["left", "right"]));
+  await until(
+    () =>
+      left?.snapshot.agents.find((a) => a.id === id)?.followUpCount === 2 &&
+      right?.snapshot.agents.find((a) => a.id === id)?.followUpCount === 2,
+  );
+  expect(left?.details[id]?.followUpCount).toBe(2);
+  expect(right?.details[id]?.followUpCount).toBe(2);
+  const gate = Promise.withResolvers<string>();
+  f.runtime.sendOverride = async (_id, _text, _turn, startOnly) =>
+    startOnly ? gate.promise : "unexpected";
+  f.runtime.emit(agent.id, {
+    type: "completed",
+    turnId: initialTurn,
+    status: "completed",
+  });
+  await until(
+    () => f.app.lookupFollowUp(agent.id, order[0])?.status === "sending",
+  );
+  expect(f.app.detail(agent.id).followUpCount).toBe(2);
+  gate.resolve("first-follow-up-turn");
+  await until(
+    () => f.app.lookupFollowUp(agent.id, order[0])?.status === "sent",
+  );
+  await until(
+    () =>
+      left?.snapshot.agents.find((a) => a.id === id)?.followUpCount === 1 &&
+      right?.snapshot.agents.find((a) => a.id === id)?.followUpCount === 1,
+  );
+  f.runtime.sendOverride = undefined;
+  f.runtime.emit(agent.id, {
+    type: "completed",
+    turnId: "first-follow-up-turn",
+    status: "completed",
+  });
+  await until(
+    () => f.app.lookupFollowUp(agent.id, order[1])?.status === "sent",
+  );
+  await until(
+    () =>
+      left?.snapshot.agents.find((a) => a.id === id)?.followUpCount === 0 &&
+      right?.snapshot.agents.find((a) => a.id === id)?.followUpCount === 0,
+  );
+  await r.call("enqueueFollowUp", {
+    id,
+    text: "from left",
+    operationId: "left",
+  });
+  expect(f.runtime.inputs.map((input) => input.clientId)).toEqual([
+    "initial",
+    ...order,
+  ]);
+  expect(f.app.detail(agent.id).state).toBe("working");
+});
 test("public Chord provider reset over a real socket precedes the next delta and a fresh decoder rehydrates", async () => {
   const {
     RemoteServiceProvider,

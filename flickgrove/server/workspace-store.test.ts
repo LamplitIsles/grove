@@ -189,6 +189,9 @@ test("real Bun migrator converts all durable roles, envelopes and order atomical
     orcPromptSnapshot: "captured",
   });
   expect(loaded.deliveries).toEqual(parent.deliveries);
+  expect(db.sqlite.query("SELECT DISTINCT mode FROM deliveries").all()).toEqual(
+    [{ mode: "direct" }],
+  );
   expect(loaded.questions).toEqual(parent.questions);
   expect(db.byId("reviewer")).toMatchObject({
     role: "reviewer",
@@ -212,14 +215,14 @@ test("real Bun migrator converts all durable roles, envelopes and order atomical
   ).toBeNull();
   expect(
     db.sqlite.query("SELECT count(*) AS n FROM __drizzle_migrations").get(),
-  ).toEqual({ n: 3 });
+  ).toEqual({ n: 4 });
   const reopened = store(path);
   expect(reopened.byId("parent")?.deliveries).toEqual(parent.deliveries);
   expect(
     reopened.sqlite
       .query("SELECT count(*) AS n FROM __drizzle_migrations")
       .get(),
-  ).toEqual({ n: 3 });
+  ).toEqual({ n: 4 });
 });
 test("conversion failure rolls back schema, data and success log and refuses Workspace startup", () => {
   const { path, directory } = fixture();
@@ -764,7 +767,7 @@ for (const abandon of [false, true]) {
         project: "alpha",
         threadId: "cold-thread",
       }),
-    ).toMatchObject({ closed: true, agentId: "cold" });
+    ).toMatchObject({ closed: true, agentId: `${service.identity.id}:cold` });
   });
 }
 

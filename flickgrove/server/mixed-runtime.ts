@@ -115,6 +115,19 @@ export class MixedRuntime implements Runtime {
     const native = threadIdentity(threadId);
     return this.runtime(native.backend).historyMessages(native.id, cursor);
   }
+  inspectFollowUp(agent: RuntimeAgent, operationId: string) {
+    if (!agent.threadId) throw new Error("Original session unavailable");
+    const native = threadIdentity(agent.threadId);
+    if (native.backend !== (agent.backend ?? "codex"))
+      throw new Error("Session backend cannot change");
+    const inspect = this.runtime(native.backend).inspectFollowUp;
+    if (!inspect) throw new Error("Passive inspection unavailable");
+    return inspect.call(
+      this.runtime(native.backend),
+      { ...agent, threadId: native.id },
+      operationId,
+    );
+  }
   historyImage(threadId: string, imageId: string) {
     const native = threadIdentity(threadId);
     return (

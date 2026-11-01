@@ -88,12 +88,24 @@ export class FakeRuntime implements Runtime {
     turnId?: string;
     images?: string[];
     clientId?: string;
+    startOnly?: boolean;
   }[] = [];
   sendOverride?: (
     agentId: string,
     text: string,
     turnId?: string,
+    startOnly?: boolean,
   ) => Promise<string>;
+  inspectOverride?: (
+    agentId: string,
+    operationId: string,
+  ) => Promise<import("./runtime").NativeFollowUpInspection>;
+  inspectFollowUp(agent: RuntimeAgent, operationId: string) {
+    return (
+      this.inspectOverride?.(agent.id, operationId) ??
+      Promise.resolve({ accepted: false, settled: false })
+    );
+  }
   readonly interruptions: { agentId: string; turnId: string }[] = [];
   interruptOverride?: (id: string, turnId: string) => Promise<void>;
   async weekly(): Promise<WeeklyUsage> {
@@ -182,10 +194,22 @@ export class FakeRuntime implements Runtime {
         await this.renameOverride?.(id, title);
         this.names.set(id, title);
       },
-      send: async (text, turnId, images, clientId) => {
-        this.inputs.push({ agentId: agent.id, text, turnId, images, clientId });
+      inspectFollowUp: async (operationId) =>
+        this.inspectOverride?.(agent.id, operationId) ?? {
+          accepted: false,
+          settled: false,
+        },
+      send: async (text, turnId, images, clientId, _envelope, startOnly) => {
+        this.inputs.push({
+          agentId: agent.id,
+          text,
+          turnId,
+          images,
+          clientId,
+          ...(startOnly ? { startOnly } : {}),
+        });
         const result = this.sendOverride
-          ? await this.sendOverride(agent.id, text, turnId)
+          ? await this.sendOverride(agent.id, text, turnId, startOnly)
           : (turnId ?? `turn-${this.inputs.length}`);
         const message: Message = {
           id: `native-${clientId}`,

@@ -39,6 +39,7 @@ export type RuntimeEvent = { threadId?: string; replayed?: boolean } & (
       type: "completed";
       turnId: string;
       status: string;
+      verified?: boolean;
       recoveredActivityAt?: number;
       error?: string;
       errorKind?: "capacity" | "error";
@@ -72,6 +73,12 @@ export type ExecutionSettings = {
   effort: string;
   serviceTier: string;
 };
+// Positive evidence only: absence of a native record is never a rejection.
+export type NativeFollowUpInspection = {
+  accepted: boolean;
+  turnId?: string;
+  settled: boolean;
+};
 export interface RuntimeHandle {
   threadId: string;
   threadName: string | null;
@@ -84,12 +91,14 @@ export interface RuntimeHandle {
     settings: ExecutionSettings | { serviceTier: string },
   ): Promise<ExecutionSettings>;
   rename(title: string): Promise<void>;
+  inspectFollowUp?(operationId: string): Promise<NativeFollowUpInspection>;
   send(
     text: string,
     turnId?: string,
     images?: string[],
     clientId?: string,
     envelope?: string,
+    startOnly?: boolean,
   ): Promise<string>;
   interrupt(turnId: string): Promise<void>;
   title(input: string): Promise<string | undefined>;
@@ -99,6 +108,11 @@ export type WindowRead =
   | { operation: string; turnId?: string }
   | { cursor: string; direction: "older" | "newer" };
 export interface Runtime {
+  // Optional passive inspection for a disconnected Pi session; never starts a writer.
+  inspectFollowUp?(
+    agent: RuntimeAgent,
+    operationId: string,
+  ): Promise<NativeFollowUpInspection>;
   // Codex can confirm an unloaded thread without acquiring a writer handle.
   releaseThread?(threadId: string): Promise<void>;
   history(

@@ -136,6 +136,7 @@ export type OutputSpeed = {
   status: "loading" | "ready" | "unavailable";
 };
 export interface Delivery {
+  mode?: "direct" | "follow_up";
   attemptId?: string;
   recoveryRef?: boolean;
   images?: MessageImage[];
@@ -143,7 +144,14 @@ export interface Delivery {
   turnId?: string;
   id: string;
   text: string;
-  status: "queued" | "sending" | "sent" | "failed" | "uncertain";
+  status:
+    | "queued"
+    | "waiting"
+    | "cancelled"
+    | "sending"
+    | "sent"
+    | "failed"
+    | "uncertain";
   source: "user" | "worker" | "reviewer" | "researcher" | "question";
   reportingResearcherId?: string;
   researchQuestion?: string;
@@ -155,6 +163,9 @@ export interface Delivery {
   at: number;
 }
 export interface Agent {
+  followUpPaused?: boolean;
+  /** Follow-ups still waiting, in admission, unconfirmed, or failed. */
+  followUpCount?: number;
   /** Instance-local publication identities; absent after server restart. */
   userHandoff?: { id: string; summary: string };
   finalFailure?: { id: string };
@@ -200,6 +211,7 @@ export interface Agent {
 export interface Detail extends Agent {
   messages: Message[];
   deliveries: Delivery[];
+  followUps?: Delivery[];
 }
 export interface Host {
   id: string;

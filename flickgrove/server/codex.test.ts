@@ -1,10 +1,18 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile, symlink } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  writeFile,
+  symlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CodexRuntime } from "./codex";
 import { Workspace } from "./workspace";
+import { WorkspaceStore } from "./workspace-store";
 import type { RuntimeAgent, RuntimeEvent } from "./runtime";
 
 test("history uses indexed metadata for both archive states, reads paginated items, and respects writer-lock rejection", async () => {
@@ -902,3 +910,295 @@ test("new opens await native naming; failed and unknown saves never publish a ha
     }
   }
 }, 30000);
+
+test("follow-up waits for native turn completion before turn/start", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "grove-follow-up-wire-"));
+  const control = join(directory, ".fake-app-server-control.json");
+  await writeFile(control, JSON.stringify({ hold: true }));
+  const runtime = new CodexRuntime({
+    cwd: directory,
+    origin: () => "http://127.0.0.1:14318",
+    codexPath: fileURLToPath(
+      new URL("../tests/fake-codex.mjs", import.meta.url),
+    ),
+    env: {
+      PATH: process.env.PATH!,
+      HOME: join(directory, "home"),
+      XDG_CONFIG_HOME: join(directory, "config"),
+      XDG_DATA_HOME: join(directory, "data"),
+      CODEX_HOME: join(directory, "codex-home"),
+      FAKE_SERVER_ROOT: directory,
+    },
+  });
+  const app = new Workspace({
+    directory: join(directory, "state"),
+    runtime,
+    projects: async () => [
+      { alias: "fixture", name: "Fixture", path: directory },
+    ],
+  });
+  try {
+    const a = await app.createOrc("fixture");
+    await app.send(a.id, "first", "first");
+    await app.enqueueFollowUp(a.id, "next", "next");
+    await app.send(a.id, "steer", "steer");
+    const threadId = app.detail(a.id).threadId;
+    const before = (await requests(directory)).filter(
+      (r) => r.params?.threadId === threadId,
+    );
+    expect(before.filter((r) => r.method === "turn/start")).toHaveLength(1);
+    expect(before.filter((r) => r.method === "turn/steer")).toHaveLength(1);
+    expect(app.lookupFollowUp(a.id, "next")?.status).toBe("waiting");
+    await writeFile(control, JSON.stringify({ hold: false }));
+    for (
+      let i = 0;
+      i < 400 && app.lookupFollowUp(a.id, "next")?.status !== "sent";
+      i++
+    )
+      await Bun.sleep(5);
+    expect(app.lookupFollowUp(a.id, "next")?.status).toBe("sent");
+    const after = (await requests(directory)).filter(
+      (r) => r.params?.threadId === threadId,
+    );
+    expect(
+      after
+        .filter((r) => r.method === "turn/start")
+        .map((r) => r.params.input[0].text),
+    ).toEqual(["first", "next"]);
+    expect(after.filter((r) => r.method === "turn/steer")).toHaveLength(1);
+  } finally {
+    app.dispose();
+    await runtime.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 10000);
+
+test("native inspection pages by client ID and requires both terminal turn and idle thread", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "grove-inspect-wire-"));
+  const control = join(directory, ".fake-app-server-control.json");
+  await writeFile(control, JSON.stringify({ hold: true }));
+  const runtime = new CodexRuntime({
+    cwd: directory,
+    origin: () => "http://127.0.0.1:14318",
+    codexPath: fileURLToPath(
+      new URL("../tests/fake-codex.mjs", import.meta.url),
+    ),
+    env: {
+      PATH: process.env.PATH!,
+      HOME: join(directory, "home"),
+      XDG_CONFIG_HOME: join(directory, "config"),
+      XDG_DATA_HOME: join(directory, "data"),
+      CODEX_HOME: join(directory, "codex-home"),
+      FAKE_SERVER_ROOT: directory,
+    },
+  });
+  const agent: RuntimeAgent = {
+    id: "owned",
+    token: "fixture",
+    role: "orc",
+    project: { alias: "fixture", name: "Fixture", path: directory },
+    title: "Fixture",
+    model: "fixture-model",
+    effort: "medium",
+    serviceTier: "default",
+    state: "idle",
+    closed: false,
+    questions: [],
+    messages: [],
+    deliveries: [],
+  };
+  const events: RuntimeEvent[] = [];
+  try {
+    const handle = await runtime.open(agent, (event) => events.push(event));
+    const turnId = await handle.send("original", undefined, [], "operation");
+    const target = {
+      turnId,
+      item: {
+        type: "userMessage",
+        id: "native-input",
+        clientId: "operation",
+        content: [{ type: "text", text: "original", text_elements: [] }],
+      },
+    };
+    const filler = Array.from({ length: 105 }, (_, i) => ({
+      turnId,
+      item: {
+        type: "agentMessage",
+        id: `filler-${i}`,
+        text: "progress",
+        phase: "commentary",
+        delivery: null,
+        memoryCitation: null,
+      },
+    }));
+    await writeFile(
+      control,
+      JSON.stringify({ hold: true, historyItems: [target, ...filler] }),
+    );
+    const before = await requests(directory);
+    const active = await handle.inspectFollowUp!("operation");
+    expect(active).toMatchObject({ accepted: true, settled: false, turnId });
+    const inspected = await requests(directory);
+    expect(
+      inspected.filter((r) => r.method === "thread/items/list").length -
+        before.filter((r) => r.method === "thread/items/list").length,
+    ).toBe(2);
+    expect(inspected.filter((r) => r.method === "turn/start")).toHaveLength(1);
+    await writeFile(
+      control,
+      JSON.stringify({
+        hold: true,
+        historyItems: [target, ...filler],
+        turnListError: true,
+      }),
+    );
+    expect(await handle.inspectFollowUp!("operation")).toMatchObject({
+      accepted: true,
+      settled: false,
+      turnId,
+    });
+    const withoutIdentity = {
+      ...target,
+      item: { ...target.item, clientId: null },
+    };
+    await writeFile(
+      control,
+      JSON.stringify({
+        hold: true,
+        historyItems: [withoutIdentity, ...filler],
+      }),
+    );
+    expect(await handle.inspectFollowUp!("operation")).toMatchObject({
+      accepted: false,
+      settled: false,
+    });
+    await writeFile(
+      control,
+      JSON.stringify({ hold: true, historyItems: [target.item] }),
+    );
+    expect(await handle.inspectFollowUp!("operation")).toMatchObject({
+      accepted: true,
+      settled: false,
+    });
+    await writeFile(
+      control,
+      JSON.stringify({ hold: true, itemsUnsupported: true }),
+    );
+    await expect(handle.inspectFollowUp!("operation")).rejects.toThrow();
+    await writeFile(
+      control,
+      JSON.stringify({ hold: false, historyItems: [target, ...filler] }),
+    );
+    for (
+      let i = 0;
+      i < 400 &&
+      !events.some((e) => e.type === "completed" && e.turnId === turnId);
+      i++
+    )
+      await Bun.sleep(5);
+    expect(await handle.inspectFollowUp!("operation")).toMatchObject({
+      accepted: true,
+      settled: true,
+      turnId,
+    });
+    await writeFile(
+      control,
+      JSON.stringify({
+        hold: false,
+        historyItems: [target, ...filler],
+        historyThreads: [
+          {
+            thread: {
+              id: handle.threadId,
+              status: { type: "active", activeFlags: [] },
+            },
+          },
+        ],
+      }),
+    );
+    expect(await handle.inspectFollowUp!("operation")).toMatchObject({
+      accepted: true,
+      settled: false,
+      turnId,
+    });
+    const finalLog = await requests(directory);
+    expect(finalLog.filter((r) => r.method === "turn/start")).toHaveLength(1);
+    await handle.close();
+    await writeFile(
+      control,
+      JSON.stringify({ hold: false, historyItems: [target, ...filler] }),
+    );
+    const stateDir = join(directory, "state");
+    await mkdir(stateDir);
+    const store = new WorkspaceStore(join(stateDir, "workspace.sqlite"));
+    store.track(
+      {
+        ...agent,
+        threadId: handle.threadId,
+        state: "error",
+        turnEnded: false,
+        followUpPaused: true,
+        deliveries: [
+          {
+            id: "operation",
+            mode: "follow_up",
+            source: "user",
+            status: "uncertain",
+            text: "original",
+            questionIds: [],
+            at: 1,
+          },
+          {
+            id: "later",
+            mode: "follow_up",
+            source: "user",
+            status: "waiting",
+            text: "next",
+            questionIds: [],
+            at: 2,
+          },
+        ],
+      },
+      true,
+    );
+    store.flush();
+    store.close();
+    const app = new Workspace({
+      directory: stateDir,
+      runtime,
+      projects: async () => [agent.project],
+    });
+    try {
+      await app.reconcileSettings(agent.id);
+      const result = await app.inspectFollowUp(agent.id, "operation");
+      expect(result).toMatchObject({
+        admission: "accepted",
+        canContinue: true,
+        reason: "ready",
+      });
+      expect(
+        (await requests(directory)).filter((r) => r.method === "turn/start"),
+      ).toHaveLength(1);
+      await app.resumeFollowUps(agent.id);
+      for (
+        let i = 0;
+        i < 400 && app.lookupFollowUp(agent.id, "later")?.status !== "sent";
+        i++
+      )
+        await Bun.sleep(5);
+      expect(app.lookupFollowUp(agent.id, "later")?.status).toBe("sent");
+      const starts = (await requests(directory)).filter(
+        (r) => r.method === "turn/start",
+      );
+      expect(starts.map((r) => r.params.input[0].text)).toEqual([
+        "original",
+        "next",
+      ]);
+    } finally {
+      app.dispose();
+    }
+  } finally {
+    await runtime.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 10000);

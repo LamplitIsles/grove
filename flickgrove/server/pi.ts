@@ -35,6 +35,7 @@ import {
   entryMessages,
 } from "./pi-session";
 import { PiMetadata } from "./pi-documents";
+import { inspectPiFollowUp } from "./pi-inspection";
 import { readPiStorage } from "./pi-storage";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
@@ -48,6 +49,15 @@ export class PiRuntime implements Runtime {
   private readonly handles = new Set<RuntimeHandle>();
   private get sessionDir() {
     return join(this.options.agentDir, "grove-durable");
+  }
+  inspectFollowUp(agent: RuntimeAgent, operationId: string) {
+    if (!agent.threadId) throw new Error("Original Pi session unavailable");
+    return inspectPiFollowUp(
+      this.path(agent.threadId),
+      agent.threadId,
+      agent,
+      operationId,
+    );
   }
   constructor(
     private readonly options: {

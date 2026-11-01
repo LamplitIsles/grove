@@ -3,16 +3,16 @@
   import { navigation, setSurface } from "./navigation.svelte";
   import { Button } from '$lib/components/ui/button/index.js';
   import { Textarea } from '$lib/components/ui/textarea/index.js';
-  import { Plus, MessagesSquare, Hammer, Bug, ClipboardCheck, RotateCcw, Telescope, X, ArrowUp, Square, Sparkles } from '@lucide/svelte';
+  import { Plus, MessagesSquare, Hammer, Bug, ClipboardCheck, RotateCcw, Telescope, X, ArrowUp, Square, Sparkles, ListPlus } from '@lucide/svelte';
   import { storagePrefix, readingCache, connection } from './api';
   import { Mic, LoaderCircle } from '@lucide/svelte';
   import { canCaptureVoice, VoiceRecordingController, type VoiceRecordingStatus } from './voice-input';
   import { imagePreview, loadImages, saveImages, draftKey, operationKey, intakeError, IMAGE_ACCEPT, type ImageDraft } from './image-drafts';
   import { onMount, tick, untrack } from 'svelte';
-  import type { Skill } from './contracts';
+  import type { Delivery, Skill } from './contracts';
   import SkillSearch from './SkillSearch.svelte';
   import * as m from './paraglide/messages';
-  let { agentId, project, centralSkills = false, skills, connected, suspended = false, working = false, stopping = false, onstop, onsend }: { agentId: string; project: string; centralSkills?: boolean; skills: Skill[]; connected: boolean; suspended?: boolean; working?: boolean; stopping?: boolean; onstop?: () => Promise<boolean>; onsend: (agentId: string, text: string, requestId: string, images?: ImageDraft[]) => Promise<boolean> } = $props();
+  let { agentId, project, centralSkills = false, skills, connected, suspended = false, working = false, stopping = false, followUps = [], paused = false, queueReady = false, onenqueue, oncheckqueue, oninspectqueue, onqueueaction, onstop, onsend }: { agentId: string; project: string; centralSkills?: boolean; skills: Skill[]; connected: boolean; suspended?: boolean; working?: boolean; stopping?: boolean; followUps?: Delivery[]; paused?: boolean; queueReady?: boolean; onenqueue: (id:string,text:string,operationId:string,images:ImageDraft[]) => Promise<{status:"accepted" | "rejected" | "unknown";error?:string}>; oncheckqueue: (id:string,operationId:string) => Promise<Delivery | null>; oninspectqueue: (id:string,operationId:string) => Promise<import("./chord-contract").FollowUpInspection>; onqueueaction: (id:string,member:"cancelFollowUp" | "resumeFollowUps",operationId?:string) => Promise<void>; onstop?: () => Promise<boolean>; onsend: (agentId: string, text: string, requestId: string, images?: ImageDraft[]) => Promise<boolean> } = $props();
   let draftReadable = true;
   function readDraft(fallback = '') {
     try { return localStorage.getItem(`${storagePrefix}/composer/${agentId}`) ?? ''; }
@@ -24,6 +24,27 @@
   let images = $state<ImageDraft[]>([]); let previews = $state<string[]>([]); let imageError=$state(""); let preparing=$state(false); let ready=$state(false); let imageStorage=$state(true); let picker: HTMLInputElement; let active=true;
   // Image intake may run while typing; submission still locks its frozen draft.
   let submitting = $state(false);
+  type PendingQueue = { id:string; text:string; imageIds:string[]; imageRecoveryId?:string };
+  const pendingPrefix = untrack(() => `${storagePrefix}/follow-up/${encodeURIComponent(agentId)}/`);
+  const pendingKey = (id:string) => `${pendingPrefix}${encodeURIComponent(id)}`;
+  function readPending():PendingQueue[] {
+    try { return Object.keys(localStorage).filter(key=>key.startsWith(pendingPrefix)).flatMap(key=>{
+      try { const value=JSON.parse(localStorage.getItem(key) ?? "null"); return value && typeof value.id === "string" && key===pendingKey(value.id) && typeof value.text === "string" && Array.isArray(value.imageIds) && value.imageIds.every((id:unknown)=>typeof id === "string") ? [value] : []; }
+      catch { return []; }
+    }); } catch { return []; }
+  }
+  let pendingQueue = $state<PendingQueue[]>(untrack(readPending));
+  let queueError = $state(""); let queueBusy = $state(false);
+  const queueing = $derived(queueBusy && submitting);
+  function matchesDraft(pending:PendingQueue) {
+    return pending.text === text.trim() && JSON.stringify(pending.imageIds) === JSON.stringify(images.map(image=>image.id));
+  }
+  // Missing images may be an in-flight recovery. Keep the original text gated
+  // when the remaining images are a subset of the pending operation's images.
+  const unresolvedDraft = $derived(pendingQueue.some(pending=>pending.text===text.trim() && images.every(image=>pending.imageIds.includes(image.id))));
+  let queueInfo = $state("");
+  let inspections = $state<Record<string,import("./chord-contract").FollowUpInspection>>({});
+  const queueBlocked = $derived(followUps.some(item => item.status === "failed" || item.status === "sending" || ((item.status === "uncertain" || item.status === "sent") && !inspections[item.id]?.canContinue)));
   let revision=0;
   let voiceStatus = $state<VoiceRecordingStatus>("idle");
   let voiceAvailable = $state(false); let voiceReason = $state("Checking voice availability…");
@@ -78,14 +99,60 @@
       else if (ordinarySelection) { const saved = ordinarySelection; void tick().then(() => input?.setSelectionRange(saved.start,saved.end)); }
     });
   });
+  let draftLoad=0;
   async function refreshDraft(applyRecovery=false) {
+    const owner=agentId;
+    const load=++draftLoad;ready=false;
+    const current=()=>active && agentId===owner && load===draftLoad;
     if(applyRecovery)cancelVoice();
     if(applyRecovery)text=readDraft(text);
-    try { const stored=await loadImages(draftKey(agentId)); if(active) { images=stored?.images ?? []; imageStorage=true; } }
-    catch(e) { if(active){imageStorage=false;imageError=`Image storage unavailable. Text messages still work. ${(e as Error).message}`;} }
-    finally {if(active)ready=true;}
+    try {
+      // Finish any accepted image edits before taking a recovery snapshot.
+      await intake.catch(()=>{});
+      if(!current())return;
+      let restored=(await loadImages(draftKey(owner)))?.images ?? [];
+      if(!current())return;
+      const recoveries=readPending().filter(item=>item.imageRecoveryId);
+      // A page may disappear after the image transaction commits but before
+      // draft reconciliation completes. The operation copy remains durable.
+      for(const pending of recoveries) {
+        if(!current())return;
+        if(!pending.imageIds.every(id=>restored.some(image=>image.id===id))) {
+          const operation=await loadImages(operationKey(owner,pending.id));
+          if(!current())return;
+          if(!operation || !pending.imageIds.every(id=>operation.images.some(image=>image.id===id)))throw new Error("Could not restore the queued draft images.");
+          restored=await saveImages(draftKey(owner),stored=>{
+            const latest=readPending().find(item=>item.id===pending.id);
+            if(!current() || latest?.imageRecoveryId!==pending.imageRecoveryId)return stored;
+            return [...stored,...operation.images.filter(image=>!stored.some(item=>item.id===image.id))];
+          });
+          if(!current())return;
+        }
+        const latest=readPending().find(item=>item.id===pending.id);
+        if(current() && latest && latest.imageRecoveryId===pending.imageRecoveryId) {
+          const {imageRecoveryId: _recovered,...remaining}=latest;
+          readingCache.writeDevice(pendingKey(pending.id),JSON.stringify(remaining));
+        }
+      }
+      if(active && agentId===owner && load===draftLoad) { images=restored; imageStorage=true; }
+    }
+    catch(e) { if(active && agentId===owner && load===draftLoad){imageStorage=false;imageError=`Image storage unavailable. Text messages still work. ${(e as Error).message}`;} }
+    finally {if(active && agentId===owner && load===draftLoad)ready=true;}
   }
-  onMount(()=>{void refreshDraft(); const recover=(e:Event)=>{if((e as CustomEvent).detail===agentId)void refreshDraft(true);};window.addEventListener("grove-image-recovery",recover);return()=>{active=false;window.removeEventListener("grove-image-recovery",recover);};});
+  onMount(()=>{
+    const recover=(e:Event)=>{if((e as CustomEvent).detail===agentId)void refreshDraft(true);};
+    const rejected=(e:Event)=>{
+      const result=(e as CustomEvent<{agentId:string;operationId:string;error:string}>).detail;
+      if(result.agentId===agentId && pendingQueue.some(item=>item.id===result.operationId)) {
+        pendingQueue=pendingQueue.filter(item=>item.id!==result.operationId);queueError=result.error;
+      }
+    };
+    window.addEventListener("grove-image-recovery",recover);
+    window.addEventListener("grove-queue-rejected",rejected);
+    pendingQueue=readPending();
+    void refreshDraft();
+    return()=>{active=false;window.removeEventListener("grove-image-recovery",recover);window.removeEventListener("grove-queue-rejected",rejected);};
+  });
   $effect(()=>{
     const snapshot=images; const urls:string[]=[];let disposed=false;
     void Promise.all(snapshot.map(i=>imagePreview(i.file))).then(blobs=>{
@@ -94,7 +161,7 @@
     return()=>{disposed=true;urls.forEach(url=>URL.revokeObjectURL(url));};
   });
   let intake=Promise.resolve();
-  function addFiles(files:File[]) { if(voiceBusy)return Promise.resolve(); const key=draftKey(agentId); const task=intake.catch(()=>{}).then(()=>performAdd(files,key));intake=task;return task; }
+  function addFiles(files:File[]) { if(voiceBusy)return Promise.resolve(); if(!ready){imageError="Wait for images to finish loading, then try again.";return Promise.resolve();} const key=draftKey(agentId); const task=intake.catch(()=>{}).then(()=>performAdd(files,key));intake=task;return task; }
   async function performAdd(files: File[], key: string) {
     if(voiceBusy || !files.length)return;
     imageError=intakeError(images,files);if(imageError)return;
@@ -106,7 +173,7 @@
     }catch(e){imageError=(e as Error).message;}finally{if(active)preparing=false;}
   }
   function removeImage(id:string) {
-    if(voiceBusy)return;
+    if(voiceBusy || !ready)return;
     intake=intake.catch(()=>{}).then(async()=>{preparing=true;try{const next=await saveImages(draftKey(agentId),current=>current.filter(i=>i.id!==id));if(active){images=next;revision++;}}catch(e){imageError=(e as Error).message;}finally{preparing=false;}});
   }
   function paste(e:ClipboardEvent) { if(voiceBusy){e.preventDefault();return;} const files=Array.from(e.clipboardData?.items ?? []).filter(i=>i.kind==='file' && i.type.startsWith('image/')).map(i=>i.getAsFile()).filter((i):i is File=>!!i);if(files.length){e.preventDefault();void addFiles(files);} }
@@ -131,7 +198,7 @@
     void insertSkill({name, description:""});
   }
   async function send() {
-    if(suspended || voiceBusy || composing || (!text.trim() && !images.length) || !connected || stopping || preparing || !ready) return;
+    if(suspended || voiceBusy || composing || unresolvedDraft || (!text.trim() && !images.length) || !connected || stopping || preparing || !ready) return;
     if(images.length){imageError=intakeError([],images.map(i=>i.file));if(imageError)return;}
     const value=text.trim(); const frozen=$state.snapshot(images);const version=revision;const id=crypto.randomUUID();
     input?.blur();
@@ -154,6 +221,86 @@
       void onsend(agentId,value,id,frozen);
     } catch(e){imageError=(e as Error).message;}finally{if(active){submitting=false;preparing=false;}}
   }
+  async function clearPending(pending:PendingQueue,accepted:boolean,owner:string,rejection?:string) {
+    const current=()=>active && agentId===owner;
+    const textKey=`${storagePrefix}/composer/${owner}`;
+    // An unmounted composer cannot reconcile its draft; retain the operation
+    // identity for the next visit instead of leaving accepted content unsent.
+    if(accepted && !current())return;
+    if(accepted && matchesDraft(pending) && (localStorage.getItem(textKey) ?? '').trim()!==pending.text)return;
+    if(accepted && current() && matchesDraft(pending) && (localStorage.getItem(textKey) ?? '').trim()===pending.text) {
+      let imagesMatch=true;
+      let removed:ImageDraft[]=[];
+      if(pending.imageIds.length){
+        await saveImages(draftKey(owner),stored=>{
+          imagesMatch=current() && matchesDraft(pending) && (localStorage.getItem(textKey) ?? '').trim()===pending.text && JSON.stringify(stored.map(i=>i.id))===JSON.stringify(pending.imageIds);
+          if(imagesMatch){
+            readingCache.writeDevice(pendingKey(pending.id),JSON.stringify({...pending,imageRecoveryId:crypto.randomUUID()}));
+            removed=stored;
+          }
+          return imagesMatch ? [] : stored;
+        });
+      }
+      else if(imageStorage)imagesMatch=!((await loadImages(draftKey(owner)))?.images.length);
+      const unchanged=current() && matchesDraft(pending) && (localStorage.getItem(textKey) ?? '').trim()===pending.text;
+      if(removed.length && !unchanged)await saveImages(draftKey(owner),stored=>[...stored,...removed.filter(image=>!stored.some(item=>item.id===image.id))]);
+      if(!current())return;
+      if(imagesMatch && unchanged){
+        readingCache.writeDevice(textKey,'');
+        text='';images=[];revision++;
+      }else if(active && matchesDraft(pending))await refreshDraft(true);
+      if(!current() || matchesDraft(pending))return;
+    }
+    localStorage.removeItem(pendingKey(pending.id));pendingQueue=pendingQueue.filter(item=>item.id!==pending.id);
+    if(!accepted && !current())window.dispatchEvent(new CustomEvent("grove-queue-rejected",{detail:{agentId:owner,operationId:pending.id,error:rejection ?? "Could not queue message."}}));
+    if(pending.imageIds.length)await saveImages(operationKey(owner,pending.id),[]);
+  }
+  async function queue() {
+    if(!working || !queueReady || suspended || voiceBusy || composing || (!text.trim() && !images.length) || !connected || stopping || preparing || !ready || pendingQueue.length || queueBusy)return;
+    if(images.length){imageError=intakeError([],images.map(i=>i.file));if(imageError)return;}
+    const owner=agentId;const frozen=$state.snapshot(images);const pending={id:crypto.randomUUID(),text:text.trim(),imageIds:frozen.map(i=>i.id)};
+    queueBusy=true;submitting=true;queueError="";
+    try {
+      if(frozen.length)await saveImages(operationKey(owner,pending.id),frozen,pending.text);
+      readingCache.writeDevice(pendingKey(pending.id),JSON.stringify(pending));pendingQueue=[...pendingQueue,pending];
+      const result=await onenqueue(owner,pending.text,pending.id,frozen);
+      if(result.status === "accepted")await clearPending(pending,true,owner);
+      else if(result.status === "rejected"){const reason=result.error ?? "Could not queue message.";await clearPending(pending,false,owner,reason);queueError=reason;}
+      else queueError="Queue status is unknown. Check before trying again.";
+    } catch(e) {queueError=(e as Error).message;}
+    finally {queueBusy=false;submitting=false;}
+  }
+  async function checkQueue(pending:PendingQueue) {
+    if(queueBusy || !ready)return;queueBusy=true;queueError="";
+    const owner=agentId;
+    try {
+      const result=await oncheckqueue(owner,pending.id);
+      if(!result){queueError="Not confirmed yet. Check again before trying another queue request.";return;}
+      if(result.status === "cancelled"){const reason="This message was cancelled; your draft is still here.";await clearPending(pending,false,owner,reason);queueError=reason;}
+      else await clearPending(pending,true,owner);
+    } catch(e){queueError=(e as Error).message;}finally{queueBusy=false;}
+  }
+  async function manageQueue(member:"cancelFollowUp" | "resumeFollowUps",operationId?:string) {
+    if(queueBusy || !queueReady)return;queueBusy=true;queueError="";queueInfo="";
+    try{await onqueueaction(agentId,member,operationId);}catch(e){queueError=(e as Error).message;}finally{queueBusy=false;}
+  }
+  async function inspectQueue(item:Delivery) {
+    if(queueBusy || !queueReady)return;queueBusy=true;queueError="";queueInfo="";
+    try {
+      const result=await oninspectqueue(agentId,item.id);
+      inspections={...inspections,[item.id]:result};
+      const reasons:Record<typeof result.reason,string>={
+        ready:"Message received and the turn has finished. You can continue the queue.",
+        admission_unknown:"Could not confirm whether this message was received. Check again later.",
+        turn_unconfirmed:"Message received; its turn has not been confirmed finished. Check again later.",
+        session_busy:"The conversation is still busy. Check again after it settles.",
+        other_unresolved:"Resolve the other pending messages before continuing.",
+        unavailable:"Could not check the original conversation. Try again when it is available.",
+        changed:"The conversation changed during the check. Check again.",
+      };
+      queueInfo=reasons[result.reason];
+    }catch(e){queueError=(e as Error).message;}finally{queueBusy=false;}
+  }
   function openSkills() {
     if(voiceBusy || navigation.surfaces.length || !input || composing || stopping || preparing || !connected) return false;
     insertion={start:input.selectionStart,end:input.selectionEnd}; setSurface("skill", true); return true;
@@ -166,6 +313,8 @@
   async function keydown(e:KeyboardEvent) {
     // WebKit may end composition before the confirming Enter keydown.
     if(composing || e.isComposing || e.keyCode === 229 || e.ctrlKey || e.metaKey || e.altKey) return;
+    // The window reserves Tab from focus traversal; the composer owns its action.
+    if(e.key === 'Tab' && !e.shiftKey && !navigation.surfaces.length) { e.preventDefault(); e.stopPropagation(); await queue(); return; }
     if(e.defaultPrevented) return;
     if(e.key === "Escape" && !e.shiftKey && !navigation.surfaces.length) { e.preventDefault(); e.stopPropagation(); input?.blur(); return; }
     if(e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); return; }
@@ -175,10 +324,22 @@
 <svelte:window onkeydown={skillShortcut} oncompositionstart={() => { composing = true; }} oncompositionend={() => { composing = false; }} />
 <div class="composer-wrap">
   <SkillSearch bind:open={() => skillOpen, value => setSurface("skill", value)} {skills} {project} central={centralSkills} onselect={skill => void insertSkill(skill)} onclose={() => void restoreInput()} />
+  {#if followUps.length || pendingQueue.length}
+    <section class="follow-up-queue" aria-label="Queued messages">
+      <div class="follow-up-heading"><span>Queued{!queueReady ? " · reconnect to update" : paused ? " · paused" : ""}</span>{#if paused && queueReady}<Button variant="ghost" size="sm" disabled={queueBusy || working || stopping || queueBlocked} onclick={()=>manageQueue("resumeFollowUps")}>Continue</Button>{/if}</div>
+      {#if queueInfo}<p class="follow-up-info" role="status">{queueInfo}</p>{/if}
+      {#each followUps as item (item.id)}
+        <div class="follow-up-item"><div class="follow-up-content"><div class="follow-up-text">{item.text || (item.images?.length ? "Image message" : "Message")}</div><span>{item.status === "waiting" ? "Waiting" : item.status === "sending" ? "Sending…" : item.status === "uncertain" ? "Delivery unconfirmed" : item.status === "sent" ? "Received · completion unconfirmed" : item.status === "failed" ? "Could not send" : item.status}{item.images?.length ? ` · ${item.images.length} image${item.images.length===1 ? "" : "s"}` : ""}</span>{#if item.error}<span class="inline-error">{item.error}</span>{/if}</div>{#if item.status === "uncertain" || item.status === "sent"}<Button variant="ghost" size="sm" disabled={!queueReady || queueBusy} onclick={()=>inspectQueue(item)}>Check</Button>{:else if item.status === "waiting" || item.status === "failed"}<Button variant="ghost" size="icon-sm" aria-label="Remove queued message" title="Remove queued message" disabled={!queueReady || queueBusy} onclick={()=>manageQueue("cancelFollowUp",item.id)}><X /></Button>{/if}</div>
+      {/each}
+      {#each pendingQueue as pending (pending.id)}<div class="follow-up-item"><div class="follow-up-content"><div class="follow-up-text">{pending.text || "Image message"}</div><span>{queueing ? "Queueing…" : "Queue status not confirmed"}</span></div>{#if !queueing}<Button variant="ghost" size="sm" disabled={!connected || queueBusy || !ready} onclick={()=>checkQueue(pending)}>Check</Button>{/if}</div>{/each}
+    </section>
+  {/if}
   <form class="composer" ondragover={e=>{if(e.dataTransfer?.types.includes("Files"))e.preventDefault();}} ondrop={e=>{e.preventDefault();void addFiles(Array.from(e.dataTransfer?.files ?? []));}} onsubmit={e => {e.preventDefault();void send();}}>
     <input class="image-picker" bind:this={picker} type="file" accept={IMAGE_ACCEPT} multiple aria-label="Choose message images" onchange={e=>{void addFiles(Array.from(e.currentTarget.files ?? []));e.currentTarget.value='';}} />
-    {#if images.length}<div class="image-drafts">{#each images as image,index (image.id)}<div class="image-draft"><img src={previews[index]} alt={image.file.name} /><Button variant="secondary" size="icon-sm" disabled={voiceBusy} aria-label={`Remove image ${index+1}`} onclick={()=>removeImage(image.id)}><X /></Button></div>{/each}</div>{/if}
+    {#if images.length}<div class="image-drafts">{#each images as image,index (image.id)}<div class="image-draft"><img src={previews[index]} alt={image.file.name} /><Button variant="secondary" size="icon-sm" disabled={voiceBusy || !ready} aria-label={`Remove image ${index+1}`} onclick={()=>removeImage(image.id)}><X /></Button></div>{/each}</div>{/if}
     {#if imageError}<p class="inline-error" role="alert">{imageError}</p>{/if}
+    {#if queueError}<p class="inline-error" role="alert">{queueError}</p>{/if}
+    {#if unresolvedDraft && !queueing}<p class="inline-error" role="status">Check the queued message before sending this draft.</p>{/if}
     {#if preparing}<p role="status">Preparing images…</p>{/if}
     <Textarea onpaste={paste} bind:ref={input} bind:value={text} aria-label={m.message_orc()} placeholder={m.message_placeholder()} readonly={voiceBusy} disabled={stopping || submitting} rows={2} oncompositionstart={() => { composing = true; }} oncompositionend={() => { composing = false; }} onkeydown={keydown} />
     {#if voiceError}<p class="inline-error" role="alert">{voiceError}</p>{/if}
@@ -197,7 +358,8 @@
       </div>
       <div class="composer-actions">
         {#if working || stopping}<Button variant="secondary" class="round-action" size="icon-sm" title={m.stop_orc()} aria-label={m.stop_orc()} disabled={!connected || stopping} onclick={onstop}><Square /></Button>{/if}
-        <Button class="round-action" size="icon-sm" aria-label={m.send_message()} title={m.send_message()} disabled={voiceBusy || (!text.trim() && !images.length) || !connected || stopping || preparing || !ready} type="submit"><ArrowUp /></Button>
+        {#if working}<Button variant="ghost" size="sm" aria-label="Queue for next turn" title="Queue for next turn · Tab" disabled={!queueReady || queueBusy || !!pendingQueue.length || voiceBusy || (!text.trim() && !images.length) || !connected || stopping || preparing || !ready} onclick={queue}><ListPlus />Queue</Button>{/if}
+        <Button class="round-action" size="icon-sm" aria-label={m.send_message()} title={m.send_message()} disabled={voiceBusy || unresolvedDraft || (!text.trim() && !images.length) || !connected || stopping || preparing || !ready} type="submit"><ArrowUp /></Button>
       </div>
     </div>
     <div class="workflow-tools" aria-label="Built-in Skills">

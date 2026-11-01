@@ -88,6 +88,28 @@ export const inputs = {
     .object({ id, operationId: z.string().min(1).max(120) })
     .strict(),
   lookup: z.object({ id, operationId: z.string().min(1).max(120) }),
+  enqueueFollowUp: z
+    .object({
+      id,
+      text: z.string().trim().max(100_000),
+      images: z.array(imageSchema).max(5).optional(),
+      operationId: z.string().min(1).max(120),
+    })
+    .strict()
+    .refine(
+      (p) => p.text.length || p.images?.length,
+      "Write a message or choose an image",
+    ),
+  cancelFollowUp: z
+    .object({ id, operationId: z.string().min(1).max(120) })
+    .strict(),
+  lookupFollowUp: z
+    .object({ id, operationId: z.string().min(1).max(120) })
+    .strict(),
+  inspectFollowUp: z
+    .object({ id, operationId: z.string().min(1).max(120) })
+    .strict(),
+  resumeFollowUps: z.object({ id }).strict(),
   answerBatch: z.object({
     id,
     answers: z.array(answerSchema).min(1),
@@ -188,6 +210,8 @@ const agent = z.object({
   questions: z.array(question),
   unansweredCount: z.number().optional(),
   recoveryCount: z.number().optional(),
+  followUpPaused: z.boolean().optional(),
+  followUpCount: z.number().int().nonnegative().optional(),
   threadId: id.optional(),
   turnId: id.optional(),
   execution: z
@@ -207,11 +231,20 @@ const agent = z.object({
     .optional(),
 });
 export const deliverySchema = z.object({
+  mode: z.enum(["direct", "follow_up"]).optional(),
   attemptId: id.optional(),
   recoveryRef: z.boolean().optional(),
   id,
   text: z.string(),
-  status: z.enum(["queued", "sending", "sent", "failed", "uncertain"]),
+  status: z.enum([
+    "queued",
+    "waiting",
+    "cancelled",
+    "sending",
+    "sent",
+    "failed",
+    "uncertain",
+  ]),
   images: z.array(imageSchema).optional(),
   source: z.enum(["user", "worker", "reviewer", "researcher", "question"]),
   questionIds: z.array(id),
@@ -225,7 +258,23 @@ export const deliverySchema = z.object({
   error: z.string().optional(),
   turnId: id.optional(),
 });
+export const followUpInspectionSchema = z.object({
+  admission: z.enum(["accepted", "unknown"]),
+  canContinue: z.boolean(),
+  reason: z.enum([
+    "ready",
+    "admission_unknown",
+    "turn_unconfirmed",
+    "session_busy",
+    "other_unresolved",
+    "unavailable",
+    "changed",
+  ]),
+  delivery: deliverySchema,
+});
+export type FollowUpInspection = z.infer<typeof followUpInspectionSchema>;
 export const detailSchema = agent.extend({
+  followUps: z.array(deliverySchema).optional(),
   messages: z.array(
     z.object({
       id,
