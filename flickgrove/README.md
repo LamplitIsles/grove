@@ -1,16 +1,14 @@
-# FlickGrove
+# FlickGrove product reference
 
-A persistent Orc/Worker/Reviewer/Researcher workspace. One instance owns its session trees and native agent processes. Codex projects execute on that instance's machine or a configured SSH Mac; the Mac runs an executor and project tools. Closing the browser leaves execution running.
+A persistent Orc/Worker/Reviewer/Researcher workspace. One instance owns its session trees and native agent processes. Codex projects execute on that instance's machine or a configured SSH execution environment. Closing the browser leaves execution running. For prerequisites and the local first-user setup, start with the [repository README](../README.md).
 
 ```sh
 bun install
 bun run --cwd flickgrove build
-bun run --cwd flickgrove start --name "Neil’s Mac"
-# The same command runs a Peer on NUC; there is no --hub role.
-bun run --cwd flickgrove start --name NUC
+bun run --cwd flickgrove start
 ```
 
-The default address is **http://127.0.0.1:4318**. Codex authentication and App Server stay on the instance machine. Each project device needs its own `og` project registry and existing forge authentication. Pi runs through the pinned local SDK installed by `bun install`, without upgrading a global Pi installation, and supports projects on the instance machine only. Codex Orc and Worker threads use the full-access policy in their selected environment; Codex Reviewer and Researcher threads use the native read-only sandbox on creation and restoration, including settings readback and close retry. Fixed role instructions assign frontend UI, database schema and migrations, one-off ops scripts, and prompts/agent instructions to Orc, and other implementation to Worker; each owner verifies and repairs its work. Reviewers do not execute verification. Responsibility instructions and native filesystem sandbox are separate from Grove's role-authorized MCP tools and server guards. Grove never rewrites the user's Codex configuration.
+The default address is **http://127.0.0.1:4318**, and default state is `~/.local/share/flickgrove`. First use requires a bootstrap code and passkey as described below. Codex authentication and App Server stay on the instance machine. Each project device needs its own `og` project registry; forge operations also need appropriate access. Pi runs through the pinned local SDK installed by `bun install`, without upgrading a global Pi installation, and supports projects on the instance machine only. Codex Orc and Worker threads use the full-access policy in their selected environment; Codex Reviewer and Researcher threads use the native read-only sandbox on creation and restoration, including settings readback and close retry. Fixed role instructions assign frontend UI, database schema and migrations, one-off ops scripts, and prompts/agent instructions to Orc, and other implementation to Worker; each owner verifies and repairs its work. Reviewers do not execute verification. Responsibility instructions and native filesystem sandbox are separate from Grove's role-authorized MCP tools and server guards. Grove never rewrites the user's Codex configuration.
 
 ## Users and passkeys
 
@@ -29,7 +27,7 @@ bun run --cwd flickgrove start --origin https://grove.example --state /path/to/s
 bun run --cwd flickgrove start --origin https://grove.example --state /path/to/state --auth recovery --user USER_ID
 ```
 
-A successful recovery replaces that user's passkeys and sessions and closes their existing connections; failed or expired attempts leave existing access intact. Other users are unaffected. Use an existing signed-in session to add a passkey without replacing the others. Keep the state directory private: it contains the workspace SQLite database, authentication records and `auth-secret`, along with existing media and agent state. Back up the database and secret together; losing the secret invalidates existing browser sessions. The service makes the state directory private and restricts the database and secret files.
+A successful recovery revokes the target user's credentials and sessions present in the recovery transaction and closes their existing connections; failed or expired attempts leave existing access intact. An authenticated add-passkey request that has already passed session checks can finish after recovery commits, leaving a credential that can still authenticate. Other users are unaffected. Use an existing signed-in session to add a passkey without replacing the others. Keep the state directory private: it contains the workspace SQLite database, authentication records and `auth-secret`, along with existing media and agent state. Back up the database and secret together; losing the secret invalidates existing browser sessions. The service makes the state directory private and restricts the database and secret files.
 
 The browser session and same-origin checks protect HTTP reads, images, voice and WebSocket operations. The local agent MCP bridge continues to use its separate per-agent bearer token and does not represent a human. A message author comes from the verified browser session attached to the original persisted operation; old and external messages without a matching identity have no author. Participant activity is recorded per user and tree only after native admission, independent of agent activity. Unknown delivery outcomes retain the original operation identity and are never automatically resent.
 
