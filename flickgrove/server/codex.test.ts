@@ -15,6 +15,101 @@ import { Workspace } from "./workspace";
 import { WorkspaceStore } from "./workspace-store";
 import type { RuntimeAgent, RuntimeEvent } from "./runtime";
 
+test("fake app-server receives per-input untrusted context on start and steer", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "grove-context-wire-"));
+  const runtime = new CodexRuntime({
+    cwd: directory,
+    origin: () => "http://127.0.0.1:9",
+    codexPath: fileURLToPath(
+      new URL("../tests/fake-codex.mjs", import.meta.url),
+    ),
+    env: {
+      ...Object.fromEntries(
+        Object.keys(process.env).map((key) => [key, undefined]),
+      ),
+      PATH: process.env.PATH,
+      HOME: join(directory, "home"),
+      CODEX_HOME: join(directory, "codex"),
+      TMPDIR: directory,
+      XDG_CONFIG_HOME: join(directory, "config"),
+      XDG_CACHE_HOME: join(directory, "cache"),
+      XDG_DATA_HOME: join(directory, "data"),
+      FAKE_SERVER_ROOT: directory,
+    },
+  });
+  try {
+    await writeFile(
+      join(directory, ".fake-app-server-control.json"),
+      JSON.stringify({ hold: true }),
+    );
+    const agent: RuntimeAgent = {
+      id: "fixture",
+      token: "fixture",
+      role: "orc",
+      project: { alias: "fixture", name: "Fixture", path: directory },
+      title: "Fixture",
+      model: "fixture-model",
+      effort: "medium",
+      serviceTier: "default",
+      state: "idle",
+      closed: false,
+      questions: [],
+      messages: [],
+      deliveries: [],
+    };
+    const handle = await runtime.open(agent, () => {});
+    const turn = await handle.send(
+      "first",
+      undefined,
+      [],
+      "first",
+      undefined,
+      false,
+      "Alice metadata",
+    );
+    await handle.send(
+      "second",
+      turn,
+      [],
+      "second",
+      undefined,
+      false,
+      "Bob metadata",
+    );
+    const requests = (
+      await readFile(join(directory, ".fake-app-server-requests.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const turns = requests.filter(
+      (request) =>
+        request.method === "turn/start" || request.method === "turn/steer",
+    );
+    expect(turns.map((request) => request.method)).toEqual([
+      "turn/start",
+      "turn/steer",
+    ]);
+    expect(
+      turns.map((request) => Object.values(request.params.additionalContext)),
+    ).toEqual([
+      [{ kind: "untrusted", value: "Alice metadata" }],
+      [{ kind: "untrusted", value: "Bob metadata" }],
+    ]);
+    expect(turns.map((request) => request.params.input[0].text)).toEqual([
+      "first",
+      "second",
+    ]);
+    await handle.close();
+  } finally {
+    try {
+      await runtime.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
 test("history uses indexed metadata for both archive states, reads paginated items, and respects writer-lock rejection", async () => {
   const directory = await mkdtemp(join(tmpdir(), "grove-history-wire-"));
   const controlPath = join(directory, ".fake-app-server-control.json");

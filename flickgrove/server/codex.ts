@@ -1067,7 +1067,15 @@ export class CodexRuntime implements Runtime {
           settled: current.thread.status.type === "idle",
         };
       },
-      send: async (text, activeTurn, images = [], clientUserMessageId) => {
+      send: async (
+        text,
+        activeTurn,
+        images = [],
+        clientUserMessageId,
+        _envelope,
+        _startOnly,
+        humanContext,
+      ) => {
         try {
           await checkTarget();
           await client.call("environment/info", {
@@ -1086,6 +1094,16 @@ export class CodexRuntime implements Runtime {
           ...(text ? [{ type: "text" as const, text, text_elements: [] }] : []),
           ...images.map((path) => ({ type: "localImage" as const, path })),
         ];
+        // Codex deduplicates equal values for a source key. A fresh anonymous
+        // key keeps even identical metadata attached to each new input.
+        const additionalContext = humanContext
+          ? {
+              [`grove.message.${crypto.randomUUID()}`]: {
+                kind: "untrusted" as const,
+                value: humanContext,
+              },
+            }
+          : undefined;
         try {
           if (activeTurn)
             return (
@@ -1094,6 +1112,7 @@ export class CodexRuntime implements Runtime {
                 clientUserMessageId,
                 expectedTurnId: activeTurn,
                 input,
+                additionalContext,
               })
             ).turnId;
           return (
@@ -1102,6 +1121,7 @@ export class CodexRuntime implements Runtime {
               clientUserMessageId,
               environments,
               input,
+              additionalContext,
             })
           ).turn.id;
         } catch (error) {

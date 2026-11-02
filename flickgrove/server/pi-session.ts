@@ -92,10 +92,28 @@ export function entryText(entry: EntryRecord) {
   );
 }
 export function entryMessages(entry: EntryRecord) {
+  const data = entry.data as
+    | { content?: UserMessage["content"]; humanContextPart?: boolean }
+    | undefined;
   if (entry.kind === "grove.withdrawn") {
-    const data = entry.data as { content: UserMessage["content"] };
-    return [{ role: "user" as const, content: data.content, timestamp: 0 }];
+    const content = data!.content!;
+    return [
+      {
+        role: "user" as const,
+        content:
+          data?.humanContextPart && Array.isArray(content)
+            ? content.slice(0, -1)
+            : content,
+        timestamp: 0,
+      },
+    ];
   }
+  if (entry.kind === "grove.input" && data?.humanContextPart)
+    return (entry.model ?? []).map((message) =>
+      message.role === "user" && Array.isArray(message.content)
+        ? { ...message, content: message.content.slice(0, -1) }
+        : message,
+    );
   return entry.model ?? [];
 }
 const questionsSchema = z.object({
@@ -756,6 +774,7 @@ export async function openPiSession(
         clientId,
         envelopeContext,
         startOnly = false,
+        humanContext,
       ) {
         return serialize(async () => {
           if (closed) throw new DeliveryRejected("Pi session is closed");
@@ -894,6 +913,9 @@ export async function openPiSession(
               );
             }
           }
+          // The explicit entry marker lets Grove omit this final part from
+          // display while Durable keeps it with the original native input.
+          if (humanContext) content.push({ type: "text", text: humanContext });
           await root.commit(
             (tx) => tx.doc(PiOperation, operation, fingerprint),
             ctx,
@@ -916,7 +938,11 @@ export async function openPiSession(
                 whenBusy: startOnly ? "reject" : "steer",
                 entry: {
                   kind: "grove.input",
-                  data: { operation, fingerprint },
+                  data: {
+                    operation,
+                    fingerprint,
+                    ...(humanContext ? { humanContextPart: true } : {}),
+                  },
                 },
               },
               ctx,
@@ -968,6 +994,13 @@ export async function openPiSession(
                     operation: record.requestId,
                     submissionId: record.id,
                     content: item.content,
+                    ...((
+                      item.entry?.data as
+                        | { humanContextPart?: boolean }
+                        | undefined
+                    )?.humanContextPart
+                      ? { humanContextPart: true }
+                      : {}),
                   },
                 });
                 capture.entryId = entry.id;

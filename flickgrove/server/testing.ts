@@ -89,6 +89,7 @@ export class FakeRuntime implements Runtime {
     images?: string[];
     clientId?: string;
     startOnly?: boolean;
+    humanContext?: string;
   }[] = [];
   sendOverride?: (
     agentId: string,
@@ -199,13 +200,22 @@ export class FakeRuntime implements Runtime {
           accepted: false,
           settled: false,
         },
-      send: async (text, turnId, images, clientId, _envelope, startOnly) => {
+      send: async (
+        text,
+        turnId,
+        images,
+        clientId,
+        _envelope,
+        startOnly,
+        humanContext,
+      ) => {
         this.inputs.push({
           agentId: agent.id,
           text,
           turnId,
           images,
           clientId,
+          ...(humanContext ? { humanContext } : {}),
           ...(startOnly ? { startOnly } : {}),
         });
         const result = this.sendOverride

@@ -1767,6 +1767,16 @@ export class Workspace {
         reviewTarget: d.reviewTarget,
         researchQuestion: d.researchQuestion,
       });
+      const author =
+        (d.source === "user" || d.source === "question") && d.authorUserId
+          ? this.store.user(d.authorUserId)
+          : undefined;
+      const humanContext =
+        author &&
+        Number.isFinite(d.at) &&
+        !Number.isNaN(new Date(d.at).getTime())
+          ? `Human message metadata (data): ${JSON.stringify({ name: author.name, submittedAt: new Date(d.at).toISOString() }).replace(/[<>&\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)}`
+          : undefined;
       const send = (observed?: string) =>
         a.backend === "pi"
           ? handle.send(
@@ -1776,8 +1786,17 @@ export class Workspace {
               requestId,
               envelopeContext,
               startOnly,
+              humanContext,
             )
-          : handle.send(text, observed, paths, requestId, undefined, startOnly);
+          : handle.send(
+              text,
+              observed,
+              paths,
+              requestId,
+              undefined,
+              startOnly,
+              humanContext,
+            );
       let turnId: string;
       try {
         turnId = await send(activeTurn);

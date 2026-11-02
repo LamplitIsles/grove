@@ -99,6 +99,7 @@ export interface RuntimeHandle {
     clientId?: string,
     envelope?: string,
     startOnly?: boolean,
+    humanContext?: string,
   ): Promise<string>;
   interrupt(turnId: string): Promise<void>;
   title(input: string): Promise<string | undefined>;
