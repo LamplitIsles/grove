@@ -613,6 +613,7 @@ export class CodexRuntime implements Runtime {
       ...ogConfig,
       "mcp_servers.flickgrove": {
         environment_id: "local",
+        cwd: this.options.cwd,
         command: process.execPath,
         args: [fileURLToPath(new URL("./mcp.ts", import.meta.url))],
         env: {
