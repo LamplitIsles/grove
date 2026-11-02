@@ -78,6 +78,8 @@ export type NativeFollowUpInspection = {
   accepted: boolean;
   turnId?: string;
   settled: boolean;
+  // Positive evidence that this operation is the latest successfully completed turn.
+  completed?: boolean;
 };
 export interface RuntimeHandle {
   threadId: string;

@@ -12,7 +12,7 @@
   import type { Delivery, Skill } from './contracts';
   import SkillSearch from './SkillSearch.svelte';
   import * as m from './paraglide/messages';
-  let { agentId, project, centralSkills = false, skills, connected, suspended = false, working = false, stopping = false, followUps = [], paused = false, queueReady = false, onenqueue, oncheckqueue, oninspectqueue, onqueueaction, onstop, onsend }: { agentId: string; project: string; centralSkills?: boolean; skills: Skill[]; connected: boolean; suspended?: boolean; working?: boolean; stopping?: boolean; followUps?: Delivery[]; paused?: boolean; queueReady?: boolean; onenqueue: (id:string,text:string,operationId:string,images:ImageDraft[]) => Promise<{status:"accepted" | "rejected" | "unknown";error?:string}>; oncheckqueue: (id:string,operationId:string) => Promise<Delivery | null>; oninspectqueue: (id:string,operationId:string) => Promise<import("./chord-contract").FollowUpInspection>; onqueueaction: (id:string,member:"cancelFollowUp" | "resumeFollowUps",operationId?:string) => Promise<void>; onstop?: () => Promise<boolean>; onsend: (agentId: string, text: string, requestId: string, images?: ImageDraft[]) => Promise<boolean> } = $props();
+  let { agentId, project, centralSkills = false, skills, connected, suspended = false, working = false, stopping = false, followUps = [], paused = false, queueReady = false, onenqueue, oncheckqueue, onqueueaction, onstop, onsend }: { agentId: string; project: string; centralSkills?: boolean; skills: Skill[]; connected: boolean; suspended?: boolean; working?: boolean; stopping?: boolean; followUps?: Delivery[]; paused?: boolean; queueReady?: boolean; onenqueue: (id:string,text:string,operationId:string,images:ImageDraft[]) => Promise<{status:"accepted" | "rejected" | "unknown";error?:string}>; oncheckqueue: (id:string,operationId:string) => Promise<Delivery | null>; onqueueaction: (id:string,member:"cancelFollowUp" | "resumeFollowUps",operationId?:string) => Promise<void>; onstop?: () => Promise<boolean>; onsend: (agentId: string, text: string, requestId: string, images?: ImageDraft[]) => Promise<boolean> } = $props();
   let draftReadable = true;
   function readDraft(fallback = '') {
     try { return localStorage.getItem(`${storagePrefix}/composer/${agentId}`) ?? ''; }
@@ -24,7 +24,7 @@
   let images = $state<ImageDraft[]>([]); let previews = $state<string[]>([]); let imageError=$state(""); let preparing=$state(false); let ready=$state(false); let imageStorage=$state(true); let picker: HTMLInputElement; let active=true;
   // Image intake may run while typing; submission still locks its frozen draft.
   let submitting = $state(false);
-  type PendingQueue = { id:string; text:string; imageIds:string[]; imageRecoveryId?:string };
+  type PendingQueue = { id:string; text:string; imageIds:string[]; imageRecoveryId?:string; error?:string };
   const pendingPrefix = untrack(() => `${storagePrefix}/follow-up/${encodeURIComponent(agentId)}/`);
   const pendingKey = (id:string) => `${pendingPrefix}${encodeURIComponent(id)}`;
   function readPending():PendingQueue[] {
@@ -41,10 +41,8 @@
   }
   // Missing images may be an in-flight recovery. Keep the original text gated
   // when the remaining images are a subset of the pending operation's images.
-  const unresolvedDraft = $derived(pendingQueue.some(pending=>pending.text===text.trim() && images.every(image=>pending.imageIds.includes(image.id))));
-  let queueInfo = $state("");
-  let inspections = $state<Record<string,import("./chord-contract").FollowUpInspection>>({});
-  const queueBlocked = $derived(followUps.some(item => item.status === "failed" || item.status === "sending" || ((item.status === "uncertain" || item.status === "sent") && !inspections[item.id]?.canContinue)));
+  const unresolvedDraft = $derived(pendingQueue.some(pending=>!pending.error && pending.text===text.trim() && images.every(image=>pending.imageIds.includes(image.id))));
+  const queueBlocked = $derived(followUps.some(item => ["failed", "sending", "uncertain", "sent"].includes(item.status)));
   let revision=0;
   let voiceStatus = $state<VoiceRecordingStatus>("idle");
   let voiceAvailable = $state(false); let voiceReason = $state("Checking voice availability…"); let voiceSettingsRevision = $state(0);
@@ -147,7 +145,7 @@
     const rejected=(e:Event)=>{
       const result=(e as CustomEvent<{agentId:string;operationId:string;error:string}>).detail;
       if(result.agentId===agentId && pendingQueue.some(item=>item.id===result.operationId)) {
-        pendingQueue=pendingQueue.filter(item=>item.id!==result.operationId);queueError=result.error;
+        pendingQueue=readPending();
       }
     };
     window.addEventListener("grove-image-recovery",recover);
@@ -224,14 +222,14 @@
       void onsend(agentId,value,id,frozen);
     } catch(e){imageError=(e as Error).message;}finally{if(active){submitting=false;preparing=false;}}
   }
-  async function clearPending(pending:PendingQueue,accepted:boolean,owner:string,rejection?:string) {
+  async function clearPending(pending:PendingQueue,owner:string) {
     const current=()=>active && agentId===owner;
     const textKey=`${storagePrefix}/composer/${owner}`;
     // An unmounted composer cannot reconcile its draft; retain the operation
     // identity for the next visit instead of leaving accepted content unsent.
-    if(accepted && !current())return;
-    if(accepted && matchesDraft(pending) && (localStorage.getItem(textKey) ?? '').trim()!==pending.text)return;
-    if(accepted && current() && matchesDraft(pending) && (localStorage.getItem(textKey) ?? '').trim()===pending.text) {
+    if(!current())return;
+    if(matchesDraft(pending) && (localStorage.getItem(textKey) ?? '').trim()!==pending.text)return;
+    if(current() && matchesDraft(pending) && (localStorage.getItem(textKey) ?? '').trim()===pending.text) {
       let imagesMatch=true;
       let removed:ImageDraft[]=[];
       if(pending.imageIds.length){
@@ -255,11 +253,29 @@
       if(!current() || matchesDraft(pending))return;
     }
     localStorage.removeItem(pendingKey(pending.id));pendingQueue=pendingQueue.filter(item=>item.id!==pending.id);
-    if(!accepted && !current())window.dispatchEvent(new CustomEvent("grove-queue-rejected",{detail:{agentId:owner,operationId:pending.id,error:rejection ?? "Could not queue message."}}));
     if(pending.imageIds.length)await saveImages(operationKey(owner,pending.id),[]);
   }
+  const clearingPending = new Map<string,Promise<void>>();
+  function acceptPending(pending:PendingQueue, owner:string) {
+    const existing=clearingPending.get(pending.id);
+    if(existing)return existing;
+    const task=clearPending(pending,owner).finally(()=>clearingPending.delete(pending.id));
+    clearingPending.set(pending.id,task);
+    return task;
+  }
+  function failPending(pending:PendingQueue, error:string) {
+    if(clearingPending.has(pending.id) || !localStorage.getItem(pendingKey(pending.id)))return;
+    const failed={...pending,error};
+    readingCache.writeDevice(pendingKey(pending.id),JSON.stringify(failed));
+    if(active) pendingQueue=readPending();
+  }
+  async function discardFailed(pending:PendingQueue) {
+    localStorage.removeItem(pendingKey(pending.id));
+    pendingQueue=readPending();
+    if(pending.imageIds.length)await saveImages(operationKey(agentId,pending.id),[]);
+  }
   async function queue() {
-    if(!working || !queueReady || suspended || voiceBusy || composing || (!text.trim() && !images.length) || !connected || stopping || preparing || !ready || pendingQueue.length || queueBusy)return;
+    if(!working || !queueReady || suspended || voiceBusy || composing || (!text.trim() && !images.length) || !connected || stopping || preparing || !ready || pendingQueue.some(item=>!item.error) || queueBusy)return;
     if(images.length){imageError=intakeError([],images.map(i=>i.file));if(imageError)return;}
     const owner=agentId;const frozen=$state.snapshot(images);const pending={id:crypto.randomUUID(),text:text.trim(),imageIds:frozen.map(i=>i.id)};
     queueBusy=true;submitting=true;queueError="";
@@ -267,42 +283,35 @@
       if(frozen.length)await saveImages(operationKey(owner,pending.id),frozen,pending.text);
       readingCache.writeDevice(pendingKey(pending.id),JSON.stringify(pending));pendingQueue=[...pendingQueue,pending];
       const result=await onenqueue(owner,pending.text,pending.id,frozen);
-      if(result.status === "accepted")await clearPending(pending,true,owner);
-      else if(result.status === "rejected"){const reason=result.error ?? "Could not queue message.";await clearPending(pending,false,owner,reason);queueError=reason;}
-      else queueError="Queue status is unknown. Check before trying again.";
+      if(result.status === "accepted")await acceptPending(pending,owner);
+      else if(result.status === "rejected"){const reason=result.error ?? "Could not queue message.";failPending(pending,reason);if(!active)window.dispatchEvent(new CustomEvent("grove-queue-rejected",{detail:{agentId:owner,operationId:pending.id,error:reason}}));}
     } catch(e) {queueError=(e as Error).message;}
     finally {queueBusy=false;submitting=false;}
   }
   async function checkQueue(pending:PendingQueue) {
-    if(queueBusy || !ready)return;queueBusy=true;queueError="";
+    if(!ready)return;
     const owner=agentId;
     try {
       const result=await oncheckqueue(owner,pending.id);
-      if(!result){queueError="Not confirmed yet. Check again before trying another queue request.";return;}
-      if(result.status === "cancelled"){const reason="This message was cancelled; your draft is still here.";await clearPending(pending,false,owner,reason);queueError=reason;}
-      else await clearPending(pending,true,owner);
-    } catch(e){queueError=(e as Error).message;}finally{queueBusy=false;}
+      if(!result)return;
+      if(result.status === "cancelled")failPending(pending,m.queue_cancelled_draft());
+      else await acceptPending(pending,owner);
+    } catch { /* Retry the original lookup after the connection recovers. */ }
   }
+  $effect(()=>{
+    const pending=pendingQueue.find(item=>!item.error);
+    if(!pending || !connected || !queueReady || !ready)return;
+    let cancelled=false;let delay=1000;let timer:ReturnType<typeof setTimeout>;
+    const poll=async()=>{
+      await checkQueue(pending);
+      if(!cancelled){delay=Math.min(delay*2,30000);timer=setTimeout(poll,delay);}
+    };
+    timer=setTimeout(poll,delay);
+    return()=>{cancelled=true;clearTimeout(timer);};
+  });
   async function manageQueue(member:"cancelFollowUp" | "resumeFollowUps",operationId?:string) {
-    if(queueBusy || !queueReady)return;queueBusy=true;queueError="";queueInfo="";
+    if(queueBusy || !queueReady)return;queueBusy=true;queueError="";
     try{await onqueueaction(agentId,member,operationId);}catch(e){queueError=(e as Error).message;}finally{queueBusy=false;}
-  }
-  async function inspectQueue(item:Delivery) {
-    if(queueBusy || !queueReady)return;queueBusy=true;queueError="";queueInfo="";
-    try {
-      const result=await oninspectqueue(agentId,item.id);
-      inspections={...inspections,[item.id]:result};
-      const reasons:Record<typeof result.reason,string>={
-        ready:"Message received and the turn has finished. You can continue the queue.",
-        admission_unknown:"Could not confirm whether this message was received. Check again later.",
-        turn_unconfirmed:"Message received; its turn has not been confirmed finished. Check again later.",
-        session_busy:"The conversation is still busy. Check again after it settles.",
-        other_unresolved:"Resolve the other pending messages before continuing.",
-        unavailable:"Could not check the original conversation. Try again when it is available.",
-        changed:"The conversation changed during the check. Check again.",
-      };
-      queueInfo=reasons[result.reason];
-    }catch(e){queueError=(e as Error).message;}finally{queueBusy=false;}
   }
   function openSkills() {
     if(voiceBusy || navigation.surfaces.length || !input || composing || stopping || preparing || !connected) return false;
@@ -330,11 +339,10 @@
   {#if followUps.length || pendingQueue.length}
     <section class="follow-up-queue" aria-label="Queued messages">
       <div class="follow-up-heading"><span>Queued{!queueReady ? " · reconnect to update" : paused ? " · paused" : ""}</span>{#if paused && queueReady}<Button variant="ghost" size="sm" disabled={queueBusy || working || stopping || queueBlocked} onclick={()=>manageQueue("resumeFollowUps")}>Continue</Button>{/if}</div>
-      {#if queueInfo}<p class="follow-up-info" role="status">{queueInfo}</p>{/if}
       {#each followUps as item (item.id)}
-        <div class="follow-up-item"><div class="follow-up-content"><div class="follow-up-text">{item.text || (item.images?.length ? "Image message" : "Message")}</div><span>{item.status === "waiting" ? "Waiting" : item.status === "sending" ? "Sending…" : item.status === "uncertain" ? "Delivery unconfirmed" : item.status === "sent" ? "Received · completion unconfirmed" : item.status === "failed" ? "Could not send" : item.status}{item.images?.length ? ` · ${item.images.length} image${item.images.length===1 ? "" : "s"}` : ""}</span>{#if item.error}<span class="inline-error">{item.error}</span>{/if}</div>{#if item.status === "uncertain" || item.status === "sent"}<Button variant="ghost" size="sm" disabled={!queueReady || queueBusy} onclick={()=>inspectQueue(item)}>Check</Button>{:else if item.status === "waiting" || item.status === "failed"}<Button variant="ghost" size="icon-sm" aria-label="Remove queued message" title="Remove queued message" disabled={!queueReady || queueBusy} onclick={()=>manageQueue("cancelFollowUp",item.id)}><X /></Button>{/if}</div>
+        <div class="follow-up-item"><div class="follow-up-content"><div class="follow-up-text">{item.text || (item.images?.length ? "Image message" : "Message")}</div>{#if item.status === "failed" && item.error}<span class="inline-error">{item.error}</span>{/if}</div><div class="follow-up-actions">{#if item.images?.length}<span>{item.images.length} image{item.images.length===1 ? "" : "s"}</span>{/if}{#if item.status === "sending" || item.status === "uncertain"}<span>{m.sending()}</span>{:else if item.status === "sent"}<span>{m.queue_processing()}</span>{:else if item.status === "failed"}<span class="inline-error">{m.queue_failed()}</span>{/if}{#if item.status === "waiting" || item.status === "failed"}<Button variant="ghost" size="icon-sm" aria-label="Remove queued message" title="Remove queued message" disabled={!queueReady || queueBusy} onclick={()=>manageQueue("cancelFollowUp",item.id)}><X /></Button>{/if}</div></div>
       {/each}
-      {#each pendingQueue as pending (pending.id)}<div class="follow-up-item"><div class="follow-up-content"><div class="follow-up-text">{pending.text || "Image message"}</div><span>{queueing ? "Queueing…" : "Queue status not confirmed"}</span></div>{#if !queueing}<Button variant="ghost" size="sm" disabled={!connected || queueBusy || !ready} onclick={()=>checkQueue(pending)}>Check</Button>{/if}</div>{/each}
+      {#each pendingQueue.filter(pending=>!followUps.some(item=>item.id===pending.id)) as pending (pending.id)}<div class="follow-up-item"><div class="follow-up-content"><div class="follow-up-text">{pending.text || "Image message"}</div>{#if pending.error}<span class="inline-error">{pending.error}</span>{/if}</div><div class="follow-up-actions">{#if pending.imageIds.length}<span>{pending.imageIds.length} image{pending.imageIds.length===1 ? "" : "s"}</span>{/if}{#if pending.error}<span class="inline-error">{m.queue_failed()}</span><Button variant="ghost" size="icon-sm" aria-label={m.queue_remove_failed()} title={m.queue_remove_failed()} onclick={()=>void discardFailed(pending)}><X /></Button>{:else if !queueing}<span>{m.queue_processing()}</span>{/if}</div></div>{/each}
     </section>
   {/if}
   <form class="composer" ondragover={e=>{if(e.dataTransfer?.types.includes("Files"))e.preventDefault();}} ondrop={e=>{e.preventDefault();void addFiles(Array.from(e.dataTransfer?.files ?? []));}} onsubmit={e => {e.preventDefault();void send();}}>
@@ -342,7 +350,6 @@
     {#if images.length}<div class="image-drafts">{#each images as image,index (image.id)}<div class="image-draft"><img src={previews[index]} alt={image.file.name} /><Button variant="secondary" size="icon-sm" disabled={voiceBusy || !ready} aria-label={`Remove image ${index+1}`} onclick={()=>removeImage(image.id)}><X /></Button></div>{/each}</div>{/if}
     {#if imageError}<p class="inline-error" role="alert">{imageError}</p>{/if}
     {#if queueError}<p class="inline-error" role="alert">{queueError}</p>{/if}
-    {#if unresolvedDraft && !queueing}<p class="inline-error" role="status">Check the queued message before sending this draft.</p>{/if}
     {#if preparing}<p role="status">Preparing images…</p>{/if}
     <Textarea onpaste={paste} bind:ref={input} bind:value={text} aria-label={m.message_orc()} placeholder={m.message_placeholder()} readonly={voiceBusy} disabled={stopping || submitting} rows={2} oncompositionstart={() => { composing = true; }} oncompositionend={() => { composing = false; }} onkeydown={keydown} />
     {#if voiceError}<p class="inline-error" role="alert">{voiceError}</p>{/if}
@@ -361,7 +368,7 @@
       </div>
       <div class="composer-actions">
         {#if working || stopping}<Button variant="secondary" class="round-action" size="icon-sm" title={m.stop_orc()} aria-label={m.stop_orc()} disabled={!connected || stopping} onclick={onstop}><Square /></Button>{/if}
-        {#if working}<Button variant="ghost" size="sm" aria-label="Queue for next turn" title="Queue for next turn · Tab" disabled={!queueReady || queueBusy || !!pendingQueue.length || voiceBusy || (!text.trim() && !images.length) || !connected || stopping || preparing || !ready} onclick={queue}><ListPlus />Queue</Button>{/if}
+        {#if working}<Button variant="ghost" size="sm" aria-label="Queue for next turn" title="Queue for next turn · Tab" disabled={!queueReady || queueBusy || pendingQueue.some(item=>!item.error) || voiceBusy || (!text.trim() && !images.length) || !connected || stopping || preparing || !ready} onclick={queue}><ListPlus />Queue</Button>{/if}
         <Button class="round-action" size="icon-sm" aria-label={m.send_message()} title={m.send_message()} disabled={voiceBusy || unresolvedDraft || (!text.trim() && !images.length) || !connected || stopping || preparing || !ready} type="submit"><ArrowUp /></Button>
       </div>
     </div>

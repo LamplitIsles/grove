@@ -58,6 +58,470 @@ async function until(check: () => boolean) {
   throw new Error("Timed out waiting for follow-up");
 }
 
+test("subscribed conversations retain inspected follow-up text and images when the native item arrives late", async () => {
+  const f = fixture();
+  const service = new HostService(f.app, {
+    directory: f.directory,
+    origin: () => "http://fixture",
+  });
+  const a = await f.app.createOrc("alpha");
+  const qualified = `${service.identity.id}:${a.id}`;
+  await f.app.send(a.id, "first", "first");
+  const first = f.app.detail(a.id).turnId!;
+  const bytes = await sharp({
+    create: { width: 2, height: 2, channels: 3, background: "red" },
+  })
+    .png()
+    .toBuffer();
+  const images = await f.app.images.upload(a.id, "original", "original text", [
+    new File([bytes], "picture.png", { type: "image/png" }),
+  ]);
+  const observed: Promise<Awaited<ReturnType<typeof service.detail>>>[][] = [
+    [],
+    [],
+  ];
+  const subscriptions = observed.map((views) =>
+    service.subscribe(() => {
+      views.push(service.detail(qualified));
+    }),
+  );
+  try {
+    await Promise.all(
+      observed.map(async (views) => {
+        views.push(service.detail(qualified));
+        await views[0];
+      }),
+    );
+    await f.app.enqueueFollowUp(a.id, "original text", "original", images);
+    f.runtime.sendOverride = async () => {
+      throw new Error("admission unknown");
+    };
+    f.runtime.inspectOverride = async (_id, operationId) => {
+      expect(operationId).toBe("original");
+      return {
+        accepted: true,
+        settled: true,
+        completed: true,
+        turnId: "native-original",
+      };
+    };
+    f.runtime.emit(a.id, {
+      type: "completed",
+      turnId: first,
+      status: "completed",
+    });
+    await until(
+      () => f.app.lookupFollowUp(a.id, "original")?.status === "uncertain",
+    );
+    for (const views of observed) {
+      const detail = await views.at(-1)!;
+      expect(
+        detail.followUps?.find((item) => item.id === "original")?.status,
+      ).toBe("uncertain");
+      expect(
+        detail.messages.some((message) => message.clientId === "original"),
+      ).toBe(false);
+    }
+    expect(
+      f.runtime.inputs.filter((input) => input.clientId === "original"),
+    ).toHaveLength(1);
+    await until(
+      () => f.app.lookupFollowUp(a.id, "original")?.status === "sent",
+    );
+    for (const views of observed) {
+      const detail = await views.at(-1)!;
+      expect(detail.followUps?.some((item) => item.id === "original")).toBe(
+        false,
+      );
+      const messages = detail.messages.filter(
+        (message) => message.clientId === "original",
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        text: "original text",
+        images: [{ id: images[0].id }],
+      });
+    }
+    await service.synchronizeDetail(qualified);
+    for (const views of observed) {
+      const detail = await views.at(-1)!;
+      const messages = detail.messages.filter(
+        (message) => message.clientId === "original",
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        text: "original text",
+        images: [{ id: images[0].id }],
+      });
+    }
+    f.runtime.emit(a.id, {
+      type: "item",
+      turnId: "native-original",
+      item: {
+        type: "userMessage",
+        id: "native-item",
+        clientId: "original",
+        text: "original text",
+      },
+    });
+    for (const views of observed) {
+      const detail = await views.at(-1)!;
+      const messages = detail.messages.filter(
+        (message) => message.clientId === "original",
+      );
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        id: "native-item",
+        text: "original text",
+        images: [{ id: images[0].id }],
+      });
+    }
+    expect(
+      f.runtime.inputs.filter((input) => input.clientId === "original"),
+    ).toHaveLength(1);
+  } finally {
+    subscriptions.forEach((unsubscribe) => unsubscribe());
+    service.dispose();
+  }
+});
+
+test("automatic inspection backs off, confirms the original operation and resumes safe FIFO", async () => {
+  const f = fixture();
+  const a = await f.app.createOrc("alpha");
+  await f.app.send(a.id, "first", "first");
+  const first = f.app.detail(a.id).turnId!;
+  await f.app.enqueueFollowUp(a.id, "uncertain", "original");
+  await f.app.enqueueFollowUp(a.id, "later", "later");
+  f.runtime.sendOverride = async () => {
+    throw new Error("unknown");
+  };
+  const checks: string[] = [];
+  f.runtime.inspectOverride = async (_id, operationId) => {
+    checks.push(operationId);
+    return checks.length === 1
+      ? { accepted: false, settled: false }
+      : {
+          accepted: true,
+          settled: true,
+          completed: true,
+          turnId: "native-original",
+        };
+  };
+  f.runtime.emit(a.id, {
+    type: "completed",
+    turnId: first,
+    status: "completed",
+  });
+  await until(
+    () => f.app.lookupFollowUp(a.id, "original")?.status === "uncertain",
+  );
+  f.runtime.sendOverride = undefined;
+  await until(() => checks.length === 1);
+  expect(f.app.lookupFollowUp(a.id, "original")?.status).toBe("uncertain");
+  await Bun.sleep(500);
+  expect(checks).toEqual(["original"]);
+  for (
+    let i = 0;
+    i < 300 && f.app.lookupFollowUp(a.id, "later")?.status !== "sent";
+    i++
+  )
+    await Bun.sleep(10);
+  expect(checks).toEqual(["original", "original"]);
+  expect(f.app.lookupFollowUp(a.id, "original")?.status).toBe("sent");
+  expect(f.app.lookupFollowUp(a.id, "later")?.status).toBe("sent");
+  expect(
+    f.runtime.inputs.filter((x) => x.clientId === "original"),
+  ).toHaveLength(1);
+});
+
+test("restart reconciles the original operation but retains a pause without in-process proof", async () => {
+  const f = fixture("pi");
+  const a = await f.app.createOrc("alpha");
+  await f.app.send(a.id, "first", "first");
+  const first = f.app.detail(a.id).turnId!;
+  await f.app.enqueueFollowUp(a.id, "unknown", "original");
+  await f.app.enqueueFollowUp(a.id, "later", "later");
+  f.runtime.sendOverride = async () => {
+    throw new Error("unknown");
+  };
+  f.runtime.emit(a.id, {
+    type: "completed",
+    turnId: first,
+    status: "completed",
+  });
+  await until(
+    () => f.app.lookupFollowUp(a.id, "original")?.status === "uncertain",
+  );
+  f.restart();
+  f.runtime.sendOverride = undefined;
+  f.runtime.inspectOverride = async (_id, operationId) => {
+    expect(operationId).toBe("original");
+    return {
+      accepted: true,
+      settled: true,
+      completed: true,
+      turnId: "native-original",
+    };
+  };
+  await until(() => f.app.lookupFollowUp(a.id, "original")?.status === "sent");
+  expect(f.app.detail(a.id).followUpPaused).toBe(true);
+  expect(f.app.lookupFollowUp(a.id, "later")?.status).toBe("waiting");
+  await f.app.resumeFollowUps(a.id);
+  await until(() => f.app.lookupFollowUp(a.id, "later")?.status === "sent");
+  expect(
+    f.runtime.inputs.filter((x) => x.clientId === "original"),
+  ).toHaveLength(1);
+});
+
+test("Stop during inspection preserves the paused queue even after native confirmation", async () => {
+  const f = fixture();
+  const a = await f.app.createOrc("alpha");
+  await f.app.send(a.id, "first", "first");
+  const first = f.app.detail(a.id).turnId!;
+  await f.app.enqueueFollowUp(a.id, "unknown", "original");
+  await f.app.enqueueFollowUp(a.id, "later", "later");
+  f.runtime.sendOverride = async () => {
+    f.runtime.emit(a.id, { type: "working", turnId: "native-original" });
+    throw new Error("unknown");
+  };
+  let release!: () => void;
+  let entered = false;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  f.runtime.inspectOverride = async () => {
+    entered = true;
+    await gate;
+    return {
+      accepted: true,
+      settled: true,
+      completed: true,
+      turnId: "native-original",
+    };
+  };
+  f.runtime.emit(a.id, {
+    type: "completed",
+    turnId: first,
+    status: "completed",
+  });
+  await until(() => entered);
+  await f.app.stop(a.id, "native-original");
+  f.runtime.emit(a.id, {
+    type: "completed",
+    turnId: "native-original",
+    status: "interrupted",
+  });
+  release();
+  await Bun.sleep(50);
+  expect(f.app.detail(a.id).followUpPaused).toBe(true);
+  expect(f.app.lookupFollowUp(a.id, "later")?.status).toBe("waiting");
+  expect(
+    f.runtime.inputs.filter((x) => x.clientId === "original"),
+  ).toHaveLength(1);
+});
+
+test("terminal native failure confirms admission but does not automatically continue", async () => {
+  const f = fixture();
+  const a = await f.app.createOrc("alpha");
+  await f.app.send(a.id, "first", "first");
+  const first = f.app.detail(a.id).turnId!;
+  await f.app.enqueueFollowUp(a.id, "unknown", "original");
+  await f.app.enqueueFollowUp(a.id, "later", "later");
+  f.runtime.sendOverride = async () => {
+    throw new Error("unknown");
+  };
+  f.runtime.inspectOverride = async () => ({
+    accepted: true,
+    settled: true,
+    completed: false,
+    turnId: "native-original",
+  });
+  f.runtime.emit(a.id, {
+    type: "completed",
+    turnId: first,
+    status: "completed",
+  });
+  await until(() => f.app.lookupFollowUp(a.id, "original")?.status === "sent");
+  expect(f.app.detail(a.id).followUpPaused).toBe(true);
+  expect(f.app.lookupFollowUp(a.id, "later")?.status).toBe("waiting");
+  expect(
+    f.runtime.inputs.filter((x) => x.clientId === "original"),
+  ).toHaveLength(1);
+});
+
+test("admission without a settled turn stays visible and protects the remaining queue", async () => {
+  const f = fixture();
+  const a = await f.app.createOrc("alpha");
+  await f.app.send(a.id, "first", "first");
+  const first = f.app.detail(a.id).turnId!;
+  await f.app.enqueueFollowUp(a.id, "unknown", "original");
+  await f.app.enqueueFollowUp(a.id, "later", "later");
+  f.runtime.sendOverride = async () => {
+    throw new Error("unknown");
+  };
+  f.runtime.inspectOverride = async () => ({
+    accepted: true,
+    settled: false,
+    turnId: "native-original",
+  });
+  f.runtime.emit(a.id, {
+    type: "completed",
+    turnId: first,
+    status: "completed",
+  });
+  await until(() => f.app.lookupFollowUp(a.id, "original")?.status === "sent");
+  expect(
+    f.app.detail(a.id).followUps?.find((d) => d.id === "original")?.status,
+  ).toBe("sent");
+  expect(f.app.lookupFollowUp(a.id, "later")?.status).toBe("waiting");
+  await expect(f.app.resumeFollowUps(a.id)).rejects.toThrow();
+  await expect(f.app.cancelFollowUp(a.id, "original")).rejects.toThrow();
+  expect(
+    f.runtime.inputs.filter((x) => x.clientId === "original"),
+  ).toHaveLength(1);
+});
+
+test("a new enqueue queued during claim revokes automatic continuation", async () => {
+  const f = fixture();
+  const a = await f.app.createOrc("alpha");
+  await f.app.send(a.id, "first", "first");
+  const first = f.app.detail(a.id).turnId!;
+  await f.app.enqueueFollowUp(a.id, "unknown", "original");
+  f.runtime.sendOverride = async () => {
+    throw new Error("unknown");
+  };
+  f.runtime.emit(a.id, {
+    type: "completed",
+    turnId: first,
+    status: "completed",
+  });
+  await f.app.enqueueFollowUp(a.id, "new", "new");
+  expect(f.app.lookupFollowUp(a.id, "original")?.status).toBe("uncertain");
+  f.runtime.inspectOverride = async () => ({
+    accepted: true,
+    settled: true,
+    completed: true,
+    turnId: "native-original",
+  });
+  await until(() => f.app.lookupFollowUp(a.id, "original")?.status === "sent");
+  expect(f.app.detail(a.id).followUpPaused).toBe(true);
+  expect(f.app.lookupFollowUp(a.id, "new")?.status).toBe("waiting");
+});
+
+test("Codex waits for an existing handle without opening or resending the unknown operation", async () => {
+  const f = fixture();
+  const a = await f.app.createOrc("alpha");
+  await f.app.send(a.id, "first", "first");
+  const first = f.app.detail(a.id).turnId!;
+  await f.app.enqueueFollowUp(a.id, "unknown", "original");
+  await f.app.enqueueFollowUp(a.id, "later", "later");
+  f.runtime.sendOverride = async () => {
+    throw new Error("unknown");
+  };
+  f.runtime.emit(a.id, {
+    type: "completed",
+    turnId: first,
+    status: "completed",
+  });
+  await until(
+    () => f.app.lookupFollowUp(a.id, "original")?.status === "uncertain",
+  );
+  let opens = 0;
+  const open = f.runtime.open.bind(f.runtime);
+  f.runtime.open = async (...args) => {
+    opens++;
+    return open(...args);
+  };
+  f.runtime.emit(a.id, { type: "disconnected", error: "offline" });
+  let checks = 0;
+  f.runtime.inspectOverride = async (_id, operationId) => {
+    checks++;
+    expect(operationId).toBe("original");
+    return {
+      accepted: true,
+      settled: true,
+      completed: true,
+      turnId: "native-original",
+    };
+  };
+  await Bun.sleep(1200);
+  expect(opens).toBe(0);
+  expect(checks).toBe(0);
+  expect(f.app.lookupFollowUp(a.id, "original")?.status).toBe("uncertain");
+  f.runtime.sendOverride = undefined;
+  await f.app.send(a.id, "explicit new message", "new-message");
+  const newTurn = f.app.detail(a.id).turnId!;
+  f.runtime.emit(a.id, {
+    type: "completed",
+    turnId: newTurn,
+    status: "completed",
+  });
+  for (
+    let i = 0;
+    i < 300 && f.app.lookupFollowUp(a.id, "original")?.status !== "sent";
+    i++
+  )
+    await Bun.sleep(10);
+  expect(opens).toBe(1);
+  expect(checks).toBe(1);
+  expect(f.app.lookupFollowUp(a.id, "original")?.status).toBe("sent");
+  expect(f.app.lookupFollowUp(a.id, "later")?.status).toBe("waiting");
+  expect(f.app.detail(a.id).followUpPaused).toBe(true);
+  expect(
+    f.runtime.inputs.filter((x) => x.clientId === "original"),
+  ).toHaveLength(1);
+});
+
+test("Pi inspects without a handle or reopening execution and retains the paused queue", async () => {
+  const f = fixture("pi");
+  const a = await f.app.createOrc("alpha");
+  await f.app.send(a.id, "first", "first");
+  const first = f.app.detail(a.id).turnId!;
+  await f.app.enqueueFollowUp(a.id, "unknown", "original");
+  await f.app.enqueueFollowUp(a.id, "later", "later");
+  f.runtime.sendOverride = async () => {
+    throw new Error("unknown");
+  };
+  f.runtime.emit(a.id, {
+    type: "completed",
+    turnId: first,
+    status: "completed",
+  });
+  await until(
+    () => f.app.lookupFollowUp(a.id, "original")?.status === "uncertain",
+  );
+  let opens = 0;
+  let passiveChecks = 0;
+  const open = f.runtime.open.bind(f.runtime);
+  const inspect = f.runtime.inspectFollowUp.bind(f.runtime);
+  f.runtime.open = async (...args) => {
+    opens++;
+    return open(...args);
+  };
+  f.runtime.inspectFollowUp = (...args) => {
+    passiveChecks++;
+    return inspect(...args);
+  };
+  f.runtime.inspectOverride = async (_id, operationId) => {
+    expect(operationId).toBe("original");
+    return {
+      accepted: true,
+      settled: true,
+      completed: true,
+      turnId: "native-original",
+    };
+  };
+  f.runtime.emit(a.id, { type: "disconnected", error: "offline" });
+  await until(() => f.app.lookupFollowUp(a.id, "original")?.status === "sent");
+  expect(passiveChecks).toBe(1);
+  expect(opens).toBe(0);
+  expect(f.app.detail(a.id).followUpPaused).toBe(true);
+  expect(f.app.lookupFollowUp(a.id, "later")?.status).toBe("waiting");
+  expect(
+    f.runtime.inputs.filter((x) => x.clientId === "original"),
+  ).toHaveLength(1);
+});
+
 for (const backend of ["codex", "pi"] as const) {
   test(`${backend}: FIFO waits for completed turns while steer remains immediate`, async () => {
     const { app, runtime } = fixture(backend);

@@ -64,17 +64,29 @@ for (const width of [1440, 390]) {
 }
 
 async function holdQueueResponse(page: Page) {
-  let callId: string | undefined;
   let held: (() => void) | undefined;
+  let pauseLookups = false;
+  let lookupCount = 0;
+  const heldLookups: (() => void)[] = [];
   await page.routeWebSocket("**/api/socket", (socket) => {
+    let callId: string | undefined;
+    const lookupIds = new Set<string>();
     const server = socket.connectToServer();
     socket.onMessage((message) => {
       const frame = JSON.parse(String(message));
       if (frame.call?.member === "enqueueFollowUp") callId = frame.id;
+      if (frame.call?.member === "lookupFollowUp") {
+        lookupIds.add(frame.id);
+        lookupCount++;
+      }
       server.send(message);
     });
     server.onMessage((message) => {
       const frame = JSON.parse(String(message));
+      if (frame.type === "result" && lookupIds.has(frame.id) && pauseLookups) {
+        heldLookups.push(() => socket.send(message));
+        return;
+      }
       if (frame.type === "result" && frame.id === callId) {
         held = () => socket.send(message);
         return;
@@ -82,7 +94,18 @@ async function holdQueueResponse(page: Page) {
       socket.send(message);
     });
   });
-  return { held: () => !!held, release: () => held?.() };
+  return {
+    held: () => !!held,
+    lookupCount: () => lookupCount,
+    release: () => held?.(),
+    pauseLookups: () => {
+      pauseLookups = true;
+    },
+    releaseLookups: () => {
+      pauseLookups = false;
+      for (const release of heldLookups.splice(0)) release();
+    },
+  };
 }
 
 test("normal queue admission does not briefly ask to check the message", async ({
@@ -104,7 +127,10 @@ test("normal queue admission does not briefly ask to check the message", async (
   await expect(
     page.getByText("Check the queued message before sending this draft."),
   ).toHaveCount(0);
-  await expect(page.getByText("Queueing…", { exact: true })).toBeVisible();
+  await expect(page.getByText("Queueing…", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("region", { name: "Queued messages" }),
+  ).toContainText("Normal follow-up");
   await expect(
     page.getByRole("button", { name: "Check", exact: true }),
   ).toHaveCount(0);
@@ -201,10 +227,18 @@ test("a rejected queue request clears its pending state after switching back", a
   await expect.poll(() => !!reject).toBe(true);
   await session("Reader performance").click();
   await session("Streaming voice input").click();
-  await expect(page.getByText("Queue status not confirmed")).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Queued messages" }),
+  ).toContainText("Retain rejected draft");
   reject!();
-  await expect(page.getByText("Queue status not confirmed")).toHaveCount(0);
-  await expect(page.getByText("Queue rejected")).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "Queued messages" }),
+  ).toContainText("Failed");
+  await expect(
+    page
+      .getByRole("region", { name: "Queued messages" })
+      .getByText("Queue rejected"),
+  ).toBeVisible();
   await expect(input).toHaveValue("Retain rejected draft");
   await expect(page.locator(".image-draft")).toHaveCount(1);
   await expect(
@@ -213,6 +247,10 @@ test("a rejected queue request clears its pending state after switching back", a
   await page.reload();
   await expect(input).toHaveValue("Retain rejected draft");
   await expect(page.locator(".image-draft")).toHaveCount(1);
+  const failed = page.getByRole("region", { name: "Queued messages" });
+  await expect(failed).toContainText("Failed");
+  await failed.getByRole("button", { name: "Remove failed message" }).click();
+  await expect(failed).toHaveCount(0);
 });
 
 test("switching sessions before queue acknowledgement preserves original identity", async ({
@@ -256,21 +294,12 @@ test("switching sessions before queue acknowledgement preserves original identit
     .first()
     .click();
   const queue = page.getByRole("region", { name: "Queued messages" });
-  await expect(queue).toContainText("Queue status not confirmed");
-  await expect(page.locator(".image-draft")).toHaveCount(1);
-  await expect(
-    page.getByRole("button", { name: "Send message", exact: true }),
-  ).toBeDisabled();
-  await expect(
-    page.getByText("Check the queued message before sending this draft."),
-  ).toBeVisible();
-  await queue.getByRole("button", { name: "Check", exact: true }).click();
   await expect(input).toHaveValue("");
   await expect(page.locator(".image-draft")).toHaveCount(0);
   await expect(queue).toContainText("Queued before switching");
 });
 
-test("unknown admission blocks the same draft but permits a new steer", async ({
+test("a delayed queue acknowledgement is reconciled without another enqueue", async ({
   page,
   request,
 }) => {
@@ -288,35 +317,61 @@ test("unknown admission blocks the same draft but permits a new steer", async ({
   await expect.poll(gate.held).toBe(true);
   await request.post("/fixture/change", { data: { outage: true } });
   await request.post("/fixture/change", { data: { outage: false } });
+  const queue = page.getByRole("region", { name: "Queued messages" });
+  await expect(queue).not.toContainText("reconnect to update");
   await expect(
-    page.getByRole("region", { name: "Queued messages" }),
-  ).not.toContainText("reconnect to update");
-  await expect(
-    page.getByRole("button", { name: "Send message", exact: true }),
-  ).toBeDisabled();
-  await expect(
-    page.getByRole("region", { name: "Queued messages" }),
-  ).toContainText("Queue status not confirmed");
-  await expect(
-    page.getByText("Check the queued message before sending this draft."),
-  ).toBeVisible();
-  await input.press("Enter");
-  let info = await (await request.get("/fixture/info")).json();
+    queue.locator(".follow-up-item").filter({ hasText: "Delivery to check" }),
+  ).toHaveCount(1);
+  await expect.poll(gate.lookupCount, { timeout: 15000 }).toBeGreaterThan(0);
+  await expect(input).toHaveValue("", { timeout: 15000 });
+  const info = await (await request.get("/fixture/info")).json();
+  const detail = await (
+    await request.get(
+      `/fixture/agents/${encodeURIComponent(`${info.hub}:orc`)}`,
+    )
+  ).json();
   expect(
-    info.inputs.filter(
+    detail.followUps.filter(
       (item: { text: string }) => item.text === "Delivery to check",
     ),
-  ).toHaveLength(0);
-  await input.fill("Different new steer");
-  await input.press("Enter");
-  await expect
-    .poll(async () => {
-      info = await (await request.get("/fixture/info")).json();
-      return info.inputs.filter(
-        (item: { text: string }) => item.text === "Different new steer",
-      ).length;
+  ).toHaveLength(1);
+});
+
+test("image follow-up is recovered after switching sessions", async ({
+  page,
+  request,
+}) => {
+  await request.post("/fixture/reset", { data: { mode: "working" } });
+  const gate = await holdQueueResponse(page);
+  await page.goto("/");
+  const session = (name: string) =>
+    page.locator(".session-open").filter({ hasText: name }).first();
+  await session("Streaming voice input").click();
+  await page.getByLabel("Choose message images").setInputFiles({
+    name: "draft.png",
+    mimeType: "image/png",
+    buffer: await sharp({
+      create: { width: 10, height: 10, channels: 3, background: "#6488a5" },
     })
-    .toBe(1);
+      .png()
+      .toBuffer(),
+  });
+  const input = page.getByRole("textbox", { name: "Message Orc", exact: true });
+  await input.fill("Pending with attachment");
+  await input.press("Tab");
+  await expect.poll(gate.held).toBe(true);
+  await session("Reader performance").click();
+  gate.release();
+  await session("Streaming voice input").click();
+  const queue = page.getByRole("region", { name: "Queued messages" });
+  await expect(
+    queue
+      .locator(".follow-up-item")
+      .filter({ hasText: "Pending with attachment" }),
+  ).toHaveCount(1);
+  await expect(queue).toContainText("1 image");
+  await expect(input).toHaveValue("");
+  await expect(page.locator(".image-draft")).toHaveCount(0);
 });
 
 for (const interruption of ["edit", "switch", "reload"] as const) {
@@ -326,6 +381,7 @@ for (const interruption of ["edit", "switch", "reload"] as const) {
   }) => {
     await request.post("/fixture/reset", { data: { mode: "working" } });
     const gate = await holdQueueResponse(page);
+    gate.pauseLookups();
     await page.goto("/");
     const session = (name: string) =>
       page.locator(".session-open").filter({ hasText: name }).first();
@@ -355,7 +411,7 @@ for (const interruption of ["edit", "switch", "reload"] as const) {
     await session("Streaming voice input").click();
     await expect(
       page.getByRole("region", { name: "Queued messages" }),
-    ).toContainText("Queue status not confirmed");
+    ).toContainText("Pending with attachment");
     await page.evaluate(() => {
       const state = window as typeof window & {
         holdCompletion?: boolean;
@@ -379,10 +435,7 @@ for (const interruption of ["edit", "switch", "reload"] as const) {
       });
       state.holdCompletion = true;
     });
-    await page
-      .getByRole("region", { name: "Queued messages" })
-      .getByRole("button", { name: "Check", exact: true })
-      .click();
+    gate.releaseLookups();
     await expect
       .poll(() =>
         page.evaluate(
@@ -393,12 +446,13 @@ for (const interruption of ["edit", "switch", "reload"] as const) {
       )
       .toBe(true);
     if (interruption === "reload") {
+      gate.pauseLookups();
       await page.reload();
       await expect(page.locator(".image-draft")).toHaveCount(1);
       await expect(input).toHaveValue("Pending with attachment");
       await expect(
         page.getByRole("region", { name: "Queued messages" }),
-      ).toContainText("Queue status not confirmed");
+      ).toContainText("Pending with attachment");
       await page.getByRole("button", { name: "Remove image 1" }).click();
       await expect(page.locator(".image-draft")).toHaveCount(0);
       await page.reload();
@@ -409,7 +463,7 @@ for (const interruption of ["edit", "switch", "reload"] as const) {
       await expect(input).toHaveValue("Pending with attachment");
       await expect(
         page.getByRole("region", { name: "Queued messages" }),
-      ).toContainText("Queue status not confirmed");
+      ).toContainText("Pending with attachment");
       return;
     }
     if (interruption === "edit") await input.fill("Edited with attachment");
@@ -461,7 +515,7 @@ for (const interruption of ["edit", "switch", "reload"] as const) {
     if (interruption === "switch")
       await expect(
         page.getByRole("region", { name: "Queued messages" }),
-      ).toContainText("Queue status not confirmed");
+      ).toContainText("Pending with attachment");
   });
 }
 
@@ -491,6 +545,20 @@ for (const width of [1440, 390]) {
     await input.press("Tab");
     const queue = page.getByRole("region", { name: "Queued messages" });
     await expect(queue).toContainText("First follow-up");
+    const first = queue
+      .locator(".follow-up-item")
+      .filter({ hasText: "First follow-up" });
+    await expect(first).not.toContainText("Waiting");
+    await expect(
+      first.getByRole("button", { name: "Remove queued message" }),
+    ).toBeVisible();
+    const textBox = await first.locator(".follow-up-text").boundingBox();
+    const removeBox = await first
+      .getByRole("button", { name: "Remove queued message" })
+      .boundingBox();
+    expect(
+      textBox && removeBox && textBox.x + textBox.width <= removeBox.x,
+    ).toBeTruthy();
     await expect(input).toHaveValue("");
     if (process.env.GROVE_TEST_SCREENSHOTS)
       await page.screenshot({
@@ -506,15 +574,28 @@ for (const width of [1440, 390]) {
     ).toBeDisabled();
     await request.post("/fixture/change", { data: { outage: false } });
     await expect(queue).not.toContainText("reconnect to update");
-    await input.fill("Cancel this follow-up");
+    const longText = "A long queued message ".repeat(12) + "end";
+    await input.fill(longText);
     await page.getByRole("button", { name: "Queue for next turn" }).click();
-    await expect(queue).toContainText("Cancel this follow-up");
-    await queue
+    await expect(queue).toContainText(longText);
+    const longItem = queue
       .locator(".follow-up-item")
-      .filter({ hasText: "Cancel this follow-up" })
-      .getByRole("button", { name: "Remove queued message" })
-      .click();
-    await expect(queue).not.toContainText("Cancel this follow-up");
+      .filter({ hasText: longText });
+    const longRemove = longItem.getByRole("button", {
+      name: "Remove queued message",
+    });
+    await expect(longRemove).toBeVisible();
+    const longBox = await longItem.locator(".follow-up-text").boundingBox();
+    const longRemoveBox = await longRemove.boundingBox();
+    expect(
+      longBox && longRemoveBox && longBox.x + longBox.width <= longRemoveBox.x,
+    ).toBeTruthy();
+    expect(longBox && longBox.height > 20).toBeTruthy();
+    await longItem.screenshot({
+      path: test.info().outputPath(`long-queue-${width}.png`),
+    });
+    await longRemove.click();
+    await expect(queue).not.toContainText(longText);
     const before = await (await request.get("/fixture/info")).json();
     expect(
       before.inputs.some(
@@ -578,13 +659,6 @@ test("an unconfirmed queue request can be checked after reload without sending a
     { agent, operation },
   );
   await page.reload();
-  await expect(
-    page.getByRole("button", { name: "Check", exact: true }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Check", exact: true }).click();
-  await expect(
-    page.getByRole("button", { name: "Check", exact: true }),
-  ).toHaveCount(0);
   await expect(input).toHaveValue("");
   const after = await (
     await request.get(`/fixture/agents/${encodeURIComponent(agent)}`)
@@ -698,10 +772,11 @@ test("text follow-up still works when image storage is unavailable", async ({
   await expect(input).toHaveValue("");
 });
 
-test("inspect distinguishes receipt from completion before resuming the queue", async ({
+test("automatic inspection waits for completion before resuming the queue", async ({
   page,
   request,
 }) => {
+  test.setTimeout(45000);
   await request.post("/fixture/reset", { data: { mode: "working" } });
   await page.goto("/");
   await page
@@ -720,32 +795,33 @@ test("inspect distinguishes receipt from completion before resuming the queue", 
   await request.post("/fixture/change", {
     data: { sendMode: "uncertain", complete: "completed" },
   });
-  await expect(queue).toContainText("Delivery unconfirmed");
-  await expect(queue.getByRole("button", { name: "Continue" })).toBeDisabled();
-  await queue.getByRole("button", { name: "Check", exact: true }).click();
-  await expect(queue).toContainText(
-    "Could not confirm whether this message was received",
+  await expect(queue).toContainText("Sending…");
+  await expect(page.locator(".detail-heading .detail-status")).toContainText(
+    "Queue paused",
   );
+  await expect(queue).not.toContainText("Synthetic native outcome unknown");
+  await expect(queue.getByRole("button", { name: "Continue" })).toBeDisabled();
   await request.post("/fixture/change", {
     data: {
       inspection: { accepted: true, settled: false, turnId: "recovered-turn" },
     },
   });
-  await queue.getByRole("button", { name: "Check", exact: true }).click();
-  await expect(queue).toContainText("Received · completion unconfirmed");
-  await expect(queue).toContainText("its turn has not been confirmed finished");
+  await expect(queue).toContainText("Processing…", { timeout: 15000 });
+  await expect(page.locator(".detail-heading .detail-status")).toContainText(
+    "Queue paused",
+  );
   await expect(queue.getByRole("button", { name: "Continue" })).toBeDisabled();
   await request.post("/fixture/change", {
     data: {
-      inspection: { accepted: true, settled: true, turnId: "recovered-turn" },
+      inspection: {
+        accepted: true,
+        settled: true,
+        completed: true,
+        turnId: "recovered-turn",
+      },
       sendMode: "accepted",
     },
   });
-  await queue.getByRole("button", { name: "Check", exact: true }).click();
-  await expect(queue).toContainText(
-    "Message received and the turn has finished",
-  );
-  await queue.getByRole("button", { name: "Continue" }).click();
   await expect
     .poll(async () => {
       const info = await (await request.get("/fixture/info")).json();
@@ -760,4 +836,86 @@ test("inspect distinguishes receipt from completion before resuming the queue", 
       (item: { text: string }) => item.text === "Uncertain follow-up",
     ),
   ).toHaveLength(1);
+});
+
+test("a settled follow-up that needs Continue keeps a neutral paused heading", async ({
+  page,
+  request,
+}) => {
+  await request.post("/fixture/reset", { data: { mode: "working" } });
+  await page.goto("/");
+  await page
+    .locator(".session-open")
+    .filter({ hasText: "Streaming voice input" })
+    .first()
+    .click();
+  const input = page.getByRole("textbox", { name: "Message Orc", exact: true });
+  await input.fill("Unconfirmed original");
+  await input.press("Tab");
+  await input.fill("Waiting next");
+  await input.press("Tab");
+  const queue = page.getByRole("region", { name: "Queued messages" });
+  await expect(queue).toContainText("Waiting next");
+  await request.post("/fixture/change", {
+    data: { sendMode: "uncertain", complete: "completed" },
+  });
+  await expect(queue).toContainText("Sending…");
+  await request.post("/fixture/change", {
+    data: {
+      inspection: {
+        accepted: true,
+        settled: true,
+        completed: false,
+        turnId: "recovered-turn",
+      },
+    },
+  });
+  await expect(queue).not.toContainText("Unconfirmed original", {
+    timeout: 15000,
+  });
+  await expect(queue).toContainText("Waiting next");
+  await expect(page.locator(".detail-heading .detail-status")).toContainText(
+    "Queue paused",
+  );
+  await expect(queue.getByRole("button", { name: "Continue" })).toBeEnabled();
+});
+
+test("a separate execution error remains visible while a queued message is unconfirmed", async ({
+  page,
+  request,
+}) => {
+  await request.post("/fixture/reset", { data: { mode: "working" } });
+  await page.goto("/");
+  await page
+    .locator(".session-open")
+    .filter({ hasText: "Streaming voice input" })
+    .first()
+    .click();
+  await page
+    .getByRole("textbox", { name: "Message Orc", exact: true })
+    .fill("Unconfirmed message");
+  await page
+    .getByRole("textbox", { name: "Message Orc", exact: true })
+    .press("Tab");
+  await request.post("/fixture/change", {
+    data: { sendMode: "uncertain", complete: "completed" },
+  });
+  await expect(
+    page.getByRole("region", { name: "Queued messages" }),
+  ).toContainText("Sending…");
+  await request.post("/fixture/change", {
+    data: {
+      execution: {
+        event: {
+          type: "error",
+          willRetry: false,
+          errorKind: "error",
+          error: "Synthetic execution failure",
+        },
+      },
+    },
+  });
+  await expect(
+    page.locator(".detail-heading .execution-feedback"),
+  ).toContainText("Execution error");
 });

@@ -24,7 +24,7 @@
   import type { Answer, Agent, Detail, HistorySession, Human, Model, Project, Settings, Skill, Snapshot } from "./contracts";
   import { api, editable, setClient } from "./api";
   import { RequestRejected, RequestTimeout } from "./chord-client";
-  import { lookupSchema, abandonCloseSchema, deliverySchema, followUpInspectionSchema, type Receipt } from "./chord-contract";
+  import { lookupSchema, abandonCloseSchema, deliverySchema, type Receipt } from "./chord-contract";
   import { addOutgoing, observeOutgoing, outgoing, withOutgoing, acceptReceipt, unknownOutgoing, submissionResult, beginRetry, observeSendResult } from "./outgoing.svelte";
   import { imageSchema } from "./chord-contract";
   import { loadImages, operationKey, type ImageDraft } from "./image-drafts";
@@ -415,11 +415,6 @@
     if(result && (result.id!==operationId || result.mode!=="follow_up")) throw new Error("Queue operation identity changed");
     return result;
   }
-  async function inspectFollowUp(id:string,operationId:string) {
-    const result=followUpInspectionSchema.parse(await queueConnection(id).call("inspectFollowUp",{id,operationId}));
-    if(result.delivery.id!==operationId || result.delivery.mode!=="follow_up")throw new Error("Queue operation identity changed");
-    return result;
-  }
   async function queueAction(id:string,member:"cancelFollowUp" | "resumeFollowUps",operationId?:string) {
     await queueConnection(id).call(member,operationId ? {id,operationId} : {id});
   }
@@ -674,7 +669,7 @@
   </Sidebar.Root>
   {#if !shownDetail}<div class="detail-empty"><div class="empty-tools"><Sidebar.Trigger />{@render globalActions()}</div><div class="empty-message" role="status"><p>{selectedId ? m.loading() : m.select_conversation()}</p>{#if selectedId}<Button variant="ghost" size="sm" onclick={closeDetail}>{m.back_sessions()}</Button>{/if}</div></div>{/if}
   {#if error && !modal && !shownDetail}<div class="app-error" role="alert"><span>{error}</span><Button variant="ghost" size="icon-sm" aria-label={m.close()} onclick={() => error = ""}><X /></Button></div>{/if}
-  {#if shownDetail && selectedId}{#key selectedId}<AgentDetail {globalActions} {showAuthors} {users} detail={shownDetail!} ready={!!detail} queueReady={queueAuthority === selectedId && connected && hostConnected} onenqueue={enqueueFollowUp} oncheckqueue={lookupFollowUp} oninspectqueue={inspectFollowUp} onqueueaction={queueAction} tree={shownDetail!.role === "orc" ? target : owner} {owner} {skills} {now} connected={hostConnected} mediaConnected={connected && hostConnected} onstop={stop} onupdate={result => { if (selectedId === result.id) detail = result; snapshot = { ...snapshot, agents: snapshot.agents.map(a => a.id === result.id ? { ...a, model: result.model, effort: result.effort, serviceTier: result.serviceTier } : a) }; }} onrename={rename} onrefresh={load} onretryuser={retryUser} {retryErrors} dispatching={dispatches.filter(d=>d.key.startsWith(selectedId + "/") && dispatchActive(d)).map(d=>d.key.slice(selectedId!.length+1))} optimisticWorking={optimistic(selectedId)} actionError={error} closeError={closeError?.id === shownDetail.id ? closeError.reason : undefined} lastSeen={selectedHost?.lastSeen} workers={snapshot.agents.filter(w => w.ownerId === detail?.id)} onclose={closeDetail} onopen={id => open(id, true)} onsend={send} onanswer={answerBatch} onretry={retryDelivery} />{/key}{/if}
+  {#if shownDetail && selectedId}{#key selectedId}<AgentDetail {globalActions} {showAuthors} {users} detail={shownDetail!} ready={!!detail} queueReady={queueAuthority === selectedId && connected && hostConnected} onenqueue={enqueueFollowUp} oncheckqueue={lookupFollowUp} onqueueaction={queueAction} tree={shownDetail!.role === "orc" ? target : owner} {owner} {skills} {now} connected={hostConnected} mediaConnected={connected && hostConnected} onstop={stop} onupdate={result => { if (selectedId === result.id) detail = result; snapshot = { ...snapshot, agents: snapshot.agents.map(a => a.id === result.id ? { ...a, model: result.model, effort: result.effort, serviceTier: result.serviceTier } : a) }; }} onrename={rename} onrefresh={load} onretryuser={retryUser} {retryErrors} dispatching={dispatches.filter(d=>d.key.startsWith(selectedId + "/") && dispatchActive(d)).map(d=>d.key.slice(selectedId!.length+1))} optimisticWorking={optimistic(selectedId)} actionError={error} closeError={closeError?.id === shownDetail.id ? closeError.reason : undefined} lastSeen={selectedHost?.lastSeen} workers={snapshot.agents.filter(w => w.ownerId === detail?.id)} onclose={closeDetail} onopen={id => open(id, true)} onsend={send} onanswer={answerBatch} onretry={retryDelivery} />{/key}{/if}
 </main>
 
 {#if closeRecovery.entries.some(i => modal !== "abandon-close" || abandon?.id !== i.agentId)}

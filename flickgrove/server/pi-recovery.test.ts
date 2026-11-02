@@ -320,6 +320,7 @@ test("Durable accepted/queued work resumes without resubmission; scoped Stop wit
     expect(await handle.inspectFollowUp!("second")).toMatchObject({
       accepted: true,
       settled: true,
+      completed: true,
     });
     expect(requests).toBe(beforeTerminalInspection);
     expect((await stat(piSessionPath(sessionDir, threadId))).mtimeMs).toBe(
@@ -397,6 +398,9 @@ test("Durable accepted/queued work resumes without resubmission; scoped Stop wit
       outcome: { status: "failed" },
     });
     expect(failedTask?.endedAt).toEqual(expect.any(Number));
+    expect((await handle.inspectFollowUp!("fail-first")).completed).not.toBe(
+      true,
+    );
     await handle.close();
     const failedReplay: RuntimeEvent[] = [];
     handle = await openPiSession(

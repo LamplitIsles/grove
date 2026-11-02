@@ -125,7 +125,12 @@ export async function inspectPiFollowUp(
         inbox.items.length
       )
         return { ...accepted, turnId: String(task.id) };
-      return { accepted: true, turnId: String(task.id), settled: true };
+      return {
+        accepted: true,
+        turnId: String(task.id),
+        settled: true,
+        completed: receipt.status === "done",
+      };
     } catch {
       // A later task/snapshot read cannot erase an already verified receipt.
       return accepted;

@@ -138,6 +138,16 @@ export class Workspace {
   }
   private readonly completedTurns = new Set<string>();
   private readonly nativeEventVersions = new WeakMap<RuntimeAgent, number>();
+  // Volatile proof that this process, not a prior Stop, paused this queue.
+  private readonly automaticFollowUps = new Map<string, string>();
+  private readonly followUpChecks = new Map<
+    string,
+    {
+      operationId: string;
+      delay: number;
+      timer?: ReturnType<typeof setTimeout>;
+    }
+  >();
   // IDs only: retain live publication identity until this active turn ends, even
   // after the bounded reading window has evicted the corresponding bodies.
   private readonly completedItems = new Map<
@@ -281,6 +291,7 @@ export class Workspace {
     );
     this.state.revision++;
     for (const listener of this.subscribers) listener();
+    this.scheduleFollowUpChecks();
   }
   subscribe(listener: () => void) {
     this.subscribers.add(listener);
@@ -538,6 +549,8 @@ export class Workspace {
         a.messages.push(message);
       } else return;
     } else if (event.type === "completed") {
+      if (event.status !== "completed" || event.verified === false)
+        this.automaticFollowUps.delete(a.id);
       this.completedTurns.add(`${a.id}/${event.turnId}`);
       if (a.turnId === event.turnId) {
         if (!event.replayed) this.activity(a);
@@ -591,6 +604,7 @@ export class Workspace {
         a.workingSince = undefined;
       }
     } else if (event.type === "error") {
+      this.automaticFollowUps.delete(a.id);
       this.cancelHandoff(a.ownerId ?? a.id);
       if (
         event.willRetry &&
@@ -813,6 +827,22 @@ export class Workspace {
       const nativeClients = new Set(page.messages.map((m) => m.clientId));
       for (const m of page.messages)
         this.confirmNative(a, m.clientId, m.turnId);
+      // Native history can lag a confirmed receipt. Keep the retained
+      // follow-up projection until the original native item is readable.
+      const retained = a.messages.filter(
+        (m) =>
+          m.provisional &&
+          m.clientId &&
+          initial.has(m.id) &&
+          !nativeClients.has(m.clientId) &&
+          !page.messages.some((item) => item.id === m.id) &&
+          a.deliveries.some(
+            (d) =>
+              d.id === m.clientId &&
+              d.mode === "follow_up" &&
+              d.status === "sent",
+          ),
+      );
       const additions = arriving.filter(
         (m) =>
           !initial.has(m.id) &&
@@ -820,7 +850,10 @@ export class Workspace {
           !nativeClients.has(m.id),
       );
       this.rememberCompletedItems(a, page.messages);
-      a.messages = recentWindow([...page.messages, ...additions], []);
+      a.messages = recentWindow(
+        [...page.messages, ...retained, ...additions],
+        [],
+      );
       a.historyCursor = page.nextCursor ?? undefined;
       a.readingRevision = (a.readingRevision ?? 0) + 1;
       this.save();
@@ -1130,6 +1163,7 @@ export class Workspace {
       );
     const handle = this.handles.get(id);
     if (!handle) throw new Error("Turn connection unavailable");
+    this.automaticFollowUps.delete(id);
     this.cancelHandoff(a.id);
     if (
       a.deliveries.some((d) => d.mode === "follow_up" && d.status === "waiting")
@@ -2018,7 +2052,9 @@ export class Workspace {
     images?: MessageImage[],
     authorUserId?: string,
   ) {
+    this.automaticFollowUps.delete(id);
     return this.serialize(id, async () => {
+      this.automaticFollowUps.delete(id);
       const a = this.agent(id);
       if (a.role !== "orc" || a.closed || a.closeRequest)
         throw new Error("Choose an open Orc conversation");
@@ -2082,6 +2118,13 @@ export class Workspace {
     id: string,
     operationId: string,
   ): Promise<import("../src/chord-contract").FollowUpInspection> {
+    return this.inspectFollowUpForReconciliation(id, operationId, false);
+  }
+  private inspectFollowUpForReconciliation(
+    id: string,
+    operationId: string,
+    automatic: boolean,
+  ): Promise<import("../src/chord-contract").FollowUpInspection> {
     return this.serialize(id, async () => {
       const a = this.agent(id);
       if (this.disposed || a.role !== "orc")
@@ -2138,6 +2181,19 @@ export class Workspace {
           d.status === "sent" ? "turn_unconfirmed" : "admission_unknown",
         );
       this.confirmNative(a, operationId, native.turnId);
+      // Inspection can prove admission even when the native item notification
+      // was missed. Project the retained envelope until that item arrives.
+      if (!a.messages.some((message) => message.clientId === operationId))
+        a.messages.push({
+          id: operationId,
+          clientId: operationId,
+          provisional: true,
+          role: "user",
+          text: d.text,
+          turnId: native.turnId,
+          at: d.at,
+          ...(d.images?.length ? { images: d.images } : {}),
+        });
       if (!native.settled || !native.turnId) {
         this.save();
         return result("turn_unconfirmed");
@@ -2174,7 +2230,24 @@ export class Workspace {
         a.workingSince = undefined;
       }
       this.completedTurns.add(`${id}/${native.turnId}`);
+      if (
+        automatic &&
+        native.completed === true &&
+        this.automaticFollowUps.get(id) === operationId &&
+        !a.stop &&
+        this.handles.has(id) &&
+        a.followUpPaused
+      ) {
+        this.automaticFollowUps.delete(id);
+        a.followUpPaused = false;
+        a.state = "idle";
+        a.error = undefined;
+        a.execution = undefined;
+      }
+      if (automatic && this.automaticFollowUps.get(id) === operationId)
+        this.automaticFollowUps.delete(id);
       this.save();
+      if (automatic && !a.followUpPaused) this.scheduleFollowUps(id);
       return result("ready", true);
     });
   }
@@ -2199,7 +2272,9 @@ export class Workspace {
     });
   }
   resumeFollowUps(id: string) {
+    this.automaticFollowUps.delete(id);
     return this.serialize(id, async () => {
+      this.automaticFollowUps.delete(id);
       const a = this.agent(id);
       const safeBoundary = () =>
         !(
@@ -2285,6 +2360,7 @@ export class Workspace {
         (d) => d.mode === "follow_up" && d.status === "waiting",
       );
       if (!d) return;
+      this.automaticFollowUps.set(id, d.id);
       // Claim and persist before crossing either provider's admission seam.
       d.status = "sending";
       this.save();
@@ -2298,7 +2374,77 @@ export class Workspace {
         d.images,
         true,
       );
+      if (!a.followUpPaused || !["uncertain", "sent"].includes(d.status))
+        this.automaticFollowUps.delete(id);
     }).catch(() => {});
+  }
+  private scheduleFollowUpChecks() {
+    if (this.disposed || this.writeFailure) return;
+    for (const [id, check] of this.followUpChecks) {
+      if (this.state.agents.some((a) => a.id === id)) continue;
+      if (check.timer) clearTimeout(check.timer);
+      this.followUpChecks.delete(id);
+      this.automaticFollowUps.delete(id);
+    }
+    for (const a of this.state.agents) {
+      const candidate =
+        a.role === "orc" &&
+        !a.closed &&
+        a.threadId &&
+        (a.deliveries.find(
+          (d) => d.mode === "follow_up" && d.status === "uncertain",
+        ) ??
+          followUpInspectionCandidate(a));
+      const existing = this.followUpChecks.get(a.id);
+      if (!candidate) {
+        if (existing?.timer) clearTimeout(existing.timer);
+        this.followUpChecks.delete(a.id);
+        continue;
+      }
+      if (existing?.operationId === candidate.id) continue;
+      if (existing?.timer) clearTimeout(existing.timer);
+      const check = {
+        operationId: candidate.id,
+        delay: 1000,
+        timer: undefined as ReturnType<typeof setTimeout> | undefined,
+      };
+      this.followUpChecks.set(a.id, check);
+      this.armFollowUpCheck(a.id, check);
+    }
+  }
+  private armFollowUpCheck(
+    id: string,
+    check: {
+      operationId: string;
+      delay: number;
+      timer?: ReturnType<typeof setTimeout>;
+    },
+  ) {
+    check.timer = setTimeout(async () => {
+      check.timer = undefined;
+      try {
+        if (this.followUpChecks.get(id) === check)
+          await this.inspectFollowUpForReconciliation(
+            id,
+            check.operationId,
+            true,
+          );
+      } catch {
+        // Unavailable or changed observations remain unknown.
+      } finally {
+        if (this.followUpChecks.get(id) === check && !this.disposed) {
+          this.followUpChecks.delete(id);
+          this.scheduleFollowUpChecks();
+          const next = this.followUpChecks.get(id);
+          if (next?.operationId === check.operationId) {
+            if (next.timer) clearTimeout(next.timer);
+            next.delay = Math.min(check.delay * 2, 30000);
+            this.armFollowUpCheck(id, next);
+          }
+        }
+      }
+    }, check.delay);
+    check.timer.unref();
   }
   send(
     id: string,
@@ -2308,7 +2454,9 @@ export class Workspace {
     retry?: import("../src/chord-contract").RetrySend,
     authorUserId?: string,
   ): Promise<import("../src/chord-contract").SendResult> {
+    this.automaticFollowUps.delete(id);
     return this.serialize(id, async () => {
+      this.automaticFollowUps.delete(id);
       const a = this.agent(id);
       if (a.role !== "orc") throw new Error("Send instructions through Orc");
       const previous = a.deliveries.find((d) => d.id === requestId);
@@ -3192,6 +3340,10 @@ export class Workspace {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    for (const check of this.followUpChecks.values())
+      if (check.timer) clearTimeout(check.timer);
+    this.followUpChecks.clear();
+    this.automaticFollowUps.clear();
     this.branches.dispose();
     this.subscribers.clear();
     this.completedItems.clear();

@@ -546,13 +546,6 @@ pre {
 .follow-up-item {
   border-top: 1px solid var(--border);
 }
-.follow-up-info {
-  border-top: 1px solid var(--border);
-  color: var(--muted-foreground);
-  font-size: 12px;
-  margin: 0;
-  padding: 8px 12px;
-}
 .follow-up-content {
   min-width: 0;
   flex: 1;
@@ -560,6 +553,14 @@ pre {
 }
 .follow-up-content > span {
   display: block;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.follow-up-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
   color: var(--muted-foreground);
   font-size: 12px;
 }

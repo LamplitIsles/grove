@@ -1194,6 +1194,7 @@ test("native inspection pages by client ID and requires both terminal turn and i
     expect(await handle.inspectFollowUp!("operation")).toMatchObject({
       accepted: true,
       settled: true,
+      completed: true,
       turnId,
     });
     await writeFile(

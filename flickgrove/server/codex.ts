@@ -1005,7 +1005,9 @@ export class CodexRuntime implements Runtime {
         cursor = null;
         seen.clear();
         let originalTerminal = false;
+        let originalCompleted = false;
         let latestTerminal = false;
+        let latestId: string | undefined;
         try {
           for (let pages = 0; pages < 100; pages++) {
             const page: v2.ThreadTurnsListResponse = await client.call(
@@ -1018,14 +1020,17 @@ export class CodexRuntime implements Runtime {
                 itemsView: "summary",
               },
             );
-            if (pages === 0)
+            if (pages === 0) {
+              latestId = page.data[0]?.id;
               latestTerminal =
                 !!page.data[0] &&
                 ["completed", "failed", "interrupted"].includes(
                   page.data[0].status,
                 );
+            }
             const original = page.data.find((turn) => turn.id === turnId);
             if (original) {
+              originalCompleted = original.status === "completed";
               originalTerminal = [
                 "completed",
                 "failed",
@@ -1065,6 +1070,7 @@ export class CodexRuntime implements Runtime {
           accepted: true,
           turnId,
           settled: current.thread.status.type === "idle",
+          completed: originalCompleted && latestId === turnId,
         };
       },
       send: async (
