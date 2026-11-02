@@ -7,6 +7,7 @@ export type Surface =
   | "history"
   | "history-preview"
   | "settings"
+  | "restart-grove"
   | "sign-out"
   | "session-settings"
   | "keys"

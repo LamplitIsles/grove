@@ -19,6 +19,9 @@ import { servePeer } from "./http";
 import { WorkspaceStore } from "./workspace-store";
 import { GroveAuth } from "./auth";
 import { chmodSync, mkdirSync } from "node:fs";
+import { instanceVersion } from "./instance-version";
+import { instanceManager } from "./instance-manager";
+import { InstanceControls } from "./instance-controls";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),
@@ -101,6 +104,14 @@ const service = new HostService(app, {
 });
 const httpOptions = {
   auth,
+  instance: new InstanceControls(
+    app,
+    instanceVersion(
+      fileURLToPath(new URL("..", import.meta.url)),
+      fileURLToPath(new URL("../dist", import.meta.url)),
+    ),
+    instanceManager(),
+  ),
   voice: { configPath },
   origin: () => origin,
   localOrigin: () => localOrigin,

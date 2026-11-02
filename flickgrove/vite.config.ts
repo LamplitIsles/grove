@@ -6,7 +6,9 @@ import { defineConfig } from "vite";
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import tailwind from "@tailwindcss/vite";
 import { paraglideVitePlugin } from "@inlang/paraglide-js";
+import { sourceVersion } from "./server/instance-version";
 let outputDirectory = resolve("dist");
+let buildVersion: ReturnType<typeof sourceVersion> = null;
 export default defineConfig({
   resolve: {
     alias: { $lib: fileURLToPath(new URL("./src/lib", import.meta.url)) },
@@ -25,6 +27,11 @@ export default defineConfig({
       configResolved(config) {
         outputDirectory = resolve(config.root, config.build.outDir);
       },
+      buildStart() {
+        buildVersion = sourceVersion(
+          fileURLToPath(new URL(".", import.meta.url)),
+        );
+      },
       closeBundle() {
         const assets = readdirSync(resolve(outputDirectory, "assets")).map(
           (file) => `/assets/${file}`,
@@ -37,6 +44,10 @@ export default defineConfig({
           .replace("flickgrove-v1", `flickgrove-${version}`)
           .replace("/* BUILD_ASSETS */ []", JSON.stringify(assets));
         writeFileSync(resolve(outputDirectory, "sw.js"), source);
+        writeFileSync(
+          resolve(outputDirectory, "version.json"),
+          JSON.stringify(buildVersion),
+        );
       },
     },
   ],

@@ -88,6 +88,7 @@ export interface RuntimeHandle {
   model?: string;
   effort?: string;
   serviceTier?: string;
+  reloadMcp?(): Promise<{ issues: string[] }>;
   readSettings(): Promise<ExecutionSettings>;
   updateSettings(
     settings: ExecutionSettings | { serviceTier: string },
@@ -111,6 +112,7 @@ export type WindowRead =
   | { operation: string; turnId?: string }
   | { cursor: string; direction: "older" | "newer" };
 export interface Runtime {
+  reloadMcp?(): Promise<void>;
   // Optional passive inspection for a disconnected Pi session; never starts a writer.
   inspectFollowUp?(
     agent: RuntimeAgent,

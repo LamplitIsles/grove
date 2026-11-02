@@ -32,6 +32,7 @@ async function fixture(backend: "codex" | "pi" = "codex") {
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    branches: { read: async () => null },
   });
   cleanups.push(
     () => rmSync(directory, { recursive: true, force: true }),

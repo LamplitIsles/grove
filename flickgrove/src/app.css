@@ -2165,6 +2165,79 @@ button.question-option {
   gap: 0.125rem;
   color: var(--muted-foreground);
 }
+.instance-version {
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  margin-right: 0.25rem;
+}
+.instance-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+.instance-settings > p {
+  margin-top: 1rem;
+  color: var(--muted-foreground);
+  font-size: 0.8125rem;
+}
+.instance-settings > p.inline-error {
+  color: var(--destructive);
+}
+.instance-blockers {
+  margin-top: 0.75rem;
+}
+.instance-blockers ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.instance-blockers li {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.instance-blocker-title summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-width: 0;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  list-style: none;
+}
+.instance-blocker-title summary::-webkit-details-marker {
+  display: none;
+}
+.instance-blocker-title strong {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.instance-blocker-title[open] strong {
+  overflow: visible;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.instance-blocker-title svg {
+  flex: none;
+}
+.instance-blocker-title[open] svg {
+  transform: rotate(180deg);
+}
+.instance-blocker-title span {
+  flex: none;
+  color: var(--muted-foreground);
+}
+.instance-blocker-reasons {
+  margin-top: 0.2rem;
+  color: var(--muted-foreground);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
 .account-name {
   flex: 1;
   min-width: 0;

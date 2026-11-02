@@ -28,6 +28,9 @@ import type {
   HistorySession,
   Message,
   ReviewTarget,
+  InstanceSessionReason,
+  InstanceGlobalReason,
+  InstanceStatus,
 } from "../src/contracts";
 import type {
   Runtime,
@@ -74,7 +77,149 @@ type State = {
   agents: RuntimeAgent[];
   revision: number;
 };
+type InstanceSessionBlocker = InstanceStatus["sessions"][number];
 export class Workspace {
+  private instanceAction = false;
+  private creating = 0;
+  private assertInstanceAvailable() {
+    if (this.instanceAction)
+      throw new Error("Instance maintenance is in progress");
+  }
+  instanceBusy(): boolean {
+    return this.instanceActivity().busy;
+  }
+  instanceActivity() {
+    const sessions: InstanceSessionBlocker[] = [];
+    const instanceReasons: InstanceGlobalReason[] = [];
+    if (this.instanceAction) instanceReasons.push("maintenance");
+    if (this.creating) instanceReasons.push("creating");
+    if (this.disposed) instanceReasons.push("disposed");
+    if (this.writeFailure) instanceReasons.push("write_failure");
+    const openIds = new Set(
+      this.state.agents.filter((a) => !a.closed).map((a) => a.id),
+    );
+    if ([...this.opening.keys()].some((id) => !openIds.has(id)))
+      instanceReasons.push("opening");
+    if ([...this.queues.keys()].some((id) => !openIds.has(id)))
+      instanceReasons.push("queue");
+    if ([...this.treeActions].some((id) => !openIds.has(id)))
+      instanceReasons.push("tree_action");
+    if ([...this.closingTrees].some((id) => !openIds.has(id)))
+      instanceReasons.push("tree_closing");
+    if ([...this.closingChildren].some((id) => !openIds.has(id)))
+      instanceReasons.push("child_closing");
+    for (const a of this.state.agents) {
+      if (a.closed) continue;
+      const reasons = new Set<InstanceSessionReason>();
+      // Codex members only receive native terminal notifications; a Pi
+      // member's error must remain blocking even when turnEnded was set.
+      if (
+        a.state !== "idle" &&
+        !(
+          a.state === "error" &&
+          a.turnEnded === true &&
+          (a.role === "orc" || (a.backend ?? "codex") === "codex")
+        )
+      ) {
+        reasons.add(
+          a.state === "working"
+            ? "working"
+            : a.state === "stopping"
+              ? "stopping"
+              : "session_error",
+        );
+      }
+      if (a.turnEnded === false) reasons.add("unverified");
+      if (a.turnId) reasons.add("turn");
+      if (a.stop?.status === "pending" || a.stop?.status === "unknown") {
+        reasons.add(
+          a.stop.status === "pending" ? "stop_pending" : "stop_unknown",
+        );
+      }
+      if (a.execution?.retrying) reasons.add("retrying");
+      if (a.closeRequest) reasons.add("close_requested");
+      if (followUpInspectionCandidate(a)) reasons.add("follow_up_inspection");
+      for (const q of a.questions)
+        if (q.state !== "answered") reasons.add("question");
+      for (const d of a.deliveries)
+        if (
+          pendingFollowUp(d) ||
+          ["waiting", "queued", "sending", "uncertain"].includes(d.status) ||
+          (d.status === "failed" &&
+            d.source !== "user" &&
+            d.source !== "question")
+        ) {
+          if (d.status === "waiting") reasons.add("delivery_waiting");
+          else if (d.status === "queued") reasons.add("delivery_queued");
+          else if (d.status === "sending") reasons.add("delivery_sending");
+          else if (d.status === "uncertain") reasons.add("delivery_uncertain");
+          else if (d.status === "failed") reasons.add("delivery_failed");
+        }
+      if (this.opening.has(a.id)) reasons.add("opening");
+      if (this.queues.has(a.id)) reasons.add("queue");
+      if (this.treeActions.has(a.id)) reasons.add("tree_action");
+      if (this.closingTrees.has(a.id)) reasons.add("tree_closing");
+      if (this.closingChildren.has(a.id)) reasons.add("child_closing");
+      if (reasons.size)
+        sessions.push({
+          id: a.id,
+          title: a.title,
+          role: a.role,
+          reasons: [...reasons],
+        });
+    }
+    return {
+      busy: sessions.length > 0 || instanceReasons.length > 0,
+      sessions,
+      instanceReasons,
+    };
+  }
+  async reloadMcp(): Promise<import("../src/contracts").InstanceReloadResult> {
+    if (this.instanceBusy())
+      throw new Error("Instance has active or pending work");
+    this.instanceAction = true;
+    try {
+      const results: import("../src/contracts").InstanceReloadResult["results"] =
+        [];
+      try {
+        if (!this.options.runtime.reloadMcp) throw new Error("Unavailable");
+        await this.options.runtime.reloadMcp();
+        results.push({ backend: "codex", status: "requested" });
+      } catch {
+        results.push({ backend: "codex", status: "partial_or_unknown" });
+      }
+      for (const [id, handle] of this.handles) {
+        const agent = this.state.agents.find((a) => a.id === id);
+        if (!agent || agent.closed || agent.backend !== "pi") continue;
+        try {
+          if (!handle.reloadMcp) throw new Error();
+          const result = await handle.reloadMcp();
+          results.push({
+            backend: "pi",
+            session: id,
+            status: result.issues.length ? "partial" : "applied",
+          });
+        } catch {
+          results.push({ backend: "pi", session: id, status: "failed" });
+        }
+      }
+      for (const a of this.state.agents) {
+        if (!a.closed && a.backend === "pi" && !this.handles.has(a.id))
+          results.push({ backend: "pi", session: a.id, status: "deferred" });
+      }
+      return { results };
+    } finally {
+      this.instanceAction = false;
+    }
+  }
+  beginRestart() {
+    if (this.instanceBusy())
+      throw new Error("Instance has active or pending work");
+    this.instanceAction = true;
+  }
+  cancelRestart() {
+    this.instanceAction = false;
+  }
   private readonly branches: DirectoryBranches;
   readonly images: ImageStore;
   readonly store: WorkspaceStore;
@@ -1073,6 +1218,7 @@ export class Workspace {
     });
   }
   async updateTreeFast(id: string, fast: boolean, retry = false) {
+    this.assertInstanceAvailable();
     const root = this.root(this.agent(id));
     if (this.closingTrees.has(root.id)) throw new Error("Tree is closing");
     if (this.treeActions.has(root.id))
@@ -1151,6 +1297,7 @@ export class Workspace {
     }
   }
   async stop(id: string, turnId: string) {
+    this.assertInstanceAvailable();
     const a = this.agent(id);
     if (
       a.role !== "orc" ||
@@ -1572,45 +1719,51 @@ export class Workspace {
     return { orc: capture(value.orc), worker: capture(value.worker) };
   }
   async createOrc(alias: string, settings?: Settings) {
-    const reference = parseProjectReference(alias);
-    const project = (await this.projects(reference.environment)).find(
-      (p) => p.alias === reference.alias,
-    );
-    if (!project) throw new Error("Registered project not found");
-    if (settings) {
-      await this.assertProject(project, settings.orc.backend);
-      await this.assertProject(project, settings.worker.backend);
-    }
-    const captured = await this.executionSettings(settings);
-    await this.assertProject(project, captured.orc.backend);
-    await this.assertProject(project, captured.worker.backend);
-    const a: RuntimeAgent = {
-      id: crypto.randomUUID(),
-      token: crypto.randomUUID(),
-      role: "orc",
-      project,
-      title: "New session",
-      ...captured.orc,
-      treeFast: settings?.fast ?? false,
-      workerDefaults: captured.worker,
-      orcPromptSnapshot: await this.options.orcPrompt?.(),
-      state: "idle",
-      closed: false,
-      questions: [],
-      messages: [],
-      deliveries: [],
-    };
-    this.store.track(a, true);
-    this.state.agents.push(a);
-    this.save();
+    this.assertInstanceAvailable();
+    this.creating++;
     try {
-      await this.handle(a);
-    } catch (error) {
-      a.closed = true;
+      const reference = parseProjectReference(alias);
+      const project = (await this.projects(reference.environment)).find(
+        (p) => p.alias === reference.alias,
+      );
+      if (!project) throw new Error("Registered project not found");
+      if (settings) {
+        await this.assertProject(project, settings.orc.backend);
+        await this.assertProject(project, settings.worker.backend);
+      }
+      const captured = await this.executionSettings(settings);
+      await this.assertProject(project, captured.orc.backend);
+      await this.assertProject(project, captured.worker.backend);
+      const a: RuntimeAgent = {
+        id: crypto.randomUUID(),
+        token: crypto.randomUUID(),
+        role: "orc",
+        project,
+        title: "New session",
+        ...captured.orc,
+        treeFast: settings?.fast ?? false,
+        workerDefaults: captured.worker,
+        orcPromptSnapshot: await this.options.orcPrompt?.(),
+        state: "idle",
+        closed: false,
+        questions: [],
+        messages: [],
+        deliveries: [],
+      };
+      this.store.track(a, true);
+      this.state.agents.push(a);
       this.save();
-      throw error;
+      try {
+        await this.handle(a);
+      } catch (error) {
+        a.closed = true;
+        this.save();
+        throw error;
+      }
+      return this.publicAgent(a);
+    } finally {
+      this.creating--;
     }
-    return this.publicAgent(a);
   }
   private async handle(a: RuntimeAgent, refreshTitle = true) {
     await this.assertProject(a.project, a.backend);
@@ -1663,6 +1816,8 @@ export class Workspace {
     return handle;
   }
   private serialize<T>(id: string, work: () => Promise<T>): Promise<T> {
+    if (this.instanceAction)
+      return Promise.reject(new Error("Instance maintenance is in progress"));
     const a = this.state.agents.find((a) => a.id === id) ?? this.store.byId(id);
     if (a && this.closingTrees.has(a.ownerId ?? a.id))
       return Promise.reject(new Error("Tree is closing"));
@@ -2588,6 +2743,7 @@ export class Workspace {
     return ids;
   }
   async closeTree(id: string, abandonUnknownOperationIds?: string[]) {
+    this.assertInstanceAvailable();
     if (abandonUnknownOperationIds !== undefined)
       return this.closeAbandoningUnknown(id, abandonUnknownOperationIds);
     const a = this.agent(id);
@@ -2775,6 +2931,7 @@ export class Workspace {
     return w;
   }
   async tool(token: string, name: string, args: unknown): Promise<unknown> {
+    this.assertInstanceAvailable();
     const a = this.authenticated(token);
     if (!(roleTools[a.role] as readonly string[]).includes(name))
       throw new Error("Tool is not available to this role");

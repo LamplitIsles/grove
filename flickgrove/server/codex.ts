@@ -114,6 +114,12 @@ export class CodexRuntime implements Runtime {
     },
   ) {}
 
+  async reloadMcp() {
+    // Do not spawn an app-server solely to reload an empty set of sessions.
+    if (this.managed)
+      await (await this.managed).call("config/mcpServer/reload", undefined);
+  }
+
   // The promise is assigned before connecting so concurrent agents and catalog
   // reads share one Grove-owned process. It never attaches to a system daemon.
   private getCatalog(): Promise<CodexAppServerClient> {

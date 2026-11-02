@@ -228,6 +228,18 @@ test("official codemode executes official MCP direct/deferred/codemode tools and
     },
   );
   try {
+    const originalMcp = await readFile(join(agentDir, "mcp.json"), "utf8");
+    await writeFile(join(agentDir, "mcp.json"), "invalid");
+    await expect(handle.reloadMcp!()).rejects.toThrow();
+    await writeFile(
+      join(agentDir, "mcp.json"),
+      JSON.stringify({
+        mcpServers: { missing: { command: join(home, "missing-fixture-mcp") } },
+      }),
+    );
+    expect((await handle.reloadMcp!()).issues).toHaveLength(1);
+    await writeFile(join(agentDir, "mcp.json"), originalMcp);
+    expect(await handle.reloadMcp!()).toEqual({ issues: [] });
     await handle.send("Exercise configured tools", undefined, [], "operation");
     await firstStarted;
     await expect(
@@ -272,7 +284,7 @@ test("official codemode executes official MCP direct/deferred/codemode tools and
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    expect(lines.filter((x) => x.event === "start")).toHaveLength(4);
+    expect(lines.filter((x) => x.event === "start")).toHaveLength(8);
     expect(lines.filter((x) => x.event === "echo")).toHaveLength(3);
     expect(
       events.some((e) => e.type === "item" && e.item.clientId === "operation"),

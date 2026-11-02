@@ -251,3 +251,64 @@ export interface Skill {
   description: string;
   shortDescription?: string;
 }
+export type InstanceSessionReason =
+  | "working"
+  | "stopping"
+  | "session_error"
+  | "unverified"
+  | "turn"
+  | "stop_pending"
+  | "stop_unknown"
+  | "retrying"
+  | "close_requested"
+  | "follow_up_inspection"
+  | "question"
+  | "delivery_waiting"
+  | "delivery_queued"
+  | "delivery_sending"
+  | "delivery_uncertain"
+  | "delivery_failed"
+  | "opening"
+  | "queue"
+  | "tree_action"
+  | "tree_closing"
+  | "child_closing";
+export type InstanceGlobalReason =
+  | "maintenance"
+  | "creating"
+  | "disposed"
+  | "write_failure"
+  | Extract<
+      InstanceSessionReason,
+      "opening" | "queue" | "tree_action" | "tree_closing" | "child_closing"
+    >;
+export type InstanceBlockerReason =
+  | InstanceSessionReason
+  | InstanceGlobalReason;
+export type InstanceStatus = {
+  id: string;
+  version: string | null;
+  busy: boolean;
+  restartAvailable: boolean;
+  sessions: Array<{
+    id: string;
+    title: string;
+    role: Agent["role"];
+    reasons: InstanceSessionReason[];
+  }>;
+  instanceReasons: InstanceGlobalReason[];
+};
+export type InstanceReloadResult = {
+  results: Array<{
+    backend: "codex" | "pi";
+    session?: string;
+    status:
+      | "requested"
+      | "applied"
+      | "partial"
+      | "partial_or_unknown"
+      | "failed"
+      | "deferred";
+  }>;
+};
+export type InstanceRestartResult = { status: "unavailable" | "unknown" };

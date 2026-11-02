@@ -21,7 +21,7 @@
   import { buttonVariants } from "$lib/components/ui/button/button.svelte";
   import { projectReference, mergeProjectCatalogue } from "./project-identity";
   import type { ProjectEnvironment } from "./contracts";
-  import type { Answer, Agent, Detail, HistorySession, Human, Model, Project, Settings, Skill, Snapshot } from "./contracts";
+  import type { Answer, Agent, Detail, HistorySession, Human, InstanceReloadResult, InstanceRestartResult, InstanceStatus, Model, Project, Settings, Skill, Snapshot } from "./contracts";
   import { api, editable, setClient } from "./api";
   import { RequestRejected, RequestTimeout } from "./chord-client";
   import { lookupSchema, abandonCloseSchema, deliverySchema, type Receipt } from "./chord-contract";
@@ -37,6 +37,7 @@
   import SessionList from "./SessionList.svelte";
   import AccountSettings from "./AccountSettings.svelte";
   import VoiceSettings from "./VoiceSettings.svelte";
+  import InstanceBlockers from "./InstanceBlockers.svelte";
   import { historyCache } from "./history-cache";
   import AgentDetail from "./AgentDetail.svelte";
   import SessionHistory from "./SessionHistory.svelte";
@@ -46,7 +47,53 @@
   let users = $state<Human[] | undefined>();
   const showAuthors = $derived((users?.length ?? 0) > 1);
   const currentUser = $derived(users?.find(person => person.id === user.id) ?? user);
-  let settingsPage = $state<"account" | "users" | "models" | "voice">("account");
+  let settingsPage = $state<"account" | "users" | "models" | "voice" | "grove">("account");
+  let instance = $state<InstanceStatus | null>(null), instanceError = $state(""), instanceNotice = $state(""), instanceStatusError = $state(""), instanceAction = $state(false);
+  let instanceBusyError = false;
+  let restartPending = $state<string | null>(null), instanceSequence = 0;
+  const restartKey = "flickgrove.restart.pending";
+  function rememberRestart(id: string | null) {
+    restartPending = id;
+    try { if (id) sessionStorage.setItem(restartKey, id); else sessionStorage.removeItem(restartKey); } catch { /* Keep the in-memory state. */ }
+  }
+  async function refreshInstance() {
+    const sequence = ++instanceSequence;
+    try {
+      const response = await fetch("/api/instance", {cache:"no-store"});
+      if (!response.ok) throw new Error();
+      const next = await response.json() as InstanceStatus;
+      if (sequence !== instanceSequence) return;
+      instance = next; instanceStatusError = "";
+      if (!next.busy && instanceBusyError) { instanceBusyError = false; instanceError = ""; }
+      if (restartPending && next.id !== restartPending) { rememberRestart(null); toast.success(m.restart_completed()); }
+    } catch { if (sequence === instanceSequence) instanceStatusError = m.instance_load_failed(); }
+  }
+  async function reloadMcp() {
+    if (instanceAction || restartPending) return;
+    instanceAction = true; instanceError = ""; instanceBusyError = false; instanceNotice = "";
+    try {
+      const response = await fetch("/api/instance/mcp/reload", {method:"POST"});
+      if (response.status === 400) { instanceBusyError = true; instanceError = m.restart_wait_idle(); return; }
+      if (!response.ok) throw new Error();
+      const result = await response.json() as InstanceReloadResult;
+      if (result.results.some(item => item.status === "deferred")) instanceNotice = m.mcp_reload_deferred();
+      if (result.results.some(item => ["partial", "partial_or_unknown", "failed"].includes(item.status))) instanceError = m.mcp_reload_partial();
+      else toast.success(m.mcp_reload_requested());
+    } catch { instanceError = m.mcp_reload_failed(); }
+    finally { instanceAction = false; void refreshInstance(); }
+  }
+  async function restartGrove() {
+    if (!instance || instanceAction || restartPending) return;
+    const original = instance.id;
+    rememberRestart(original); instanceAction = true; instanceError = ""; instanceBusyError = false;
+    void back();
+    try {
+      const response = await fetch("/api/instance/restart", {method:"POST"});
+      if (response.status >= 400 && response.status < 500) { rememberRestart(null); instanceBusyError = response.status === 400; instanceError = instanceBusyError ? m.restart_wait_idle() : m.instance_load_failed(); }
+      else if (response.ok && (await response.json() as InstanceRestartResult).status === "unavailable") { rememberRestart(null); instanceError = m.restart_unavailable(); }
+    } catch { /* A disconnected response cannot prove whether restart was requested. */ }
+    finally { instanceAction = false; void refreshInstance(); }
+  }
   let modelRole = $state<"orc" | "worker">("orc");
   let modelHelpOpen = $state(false);
   const projectListId = $props.id();
@@ -262,7 +309,7 @@
       abandon = { id: intent.agentId, title: snapshot.agents.find(a => a.id === intent.agentId)?.title ?? "Orc", unknownOperationIds: intent.unknownOperationIds };
       closeUnknown = true;
     }
-    if (kind === "settings") settingsPage = "account";
+    if (kind === "settings") { settingsPage = "account"; void refreshInstance(); }
     if (kind === "sign-out") logoutError = "";
     if (kind === "new") { search = ""; void loadProjects(); }
     if (kind === "settings" || kind === "new") {
@@ -605,6 +652,7 @@
     else if (event.key === "?") { event.preventDefault(); void show("keys"); }
   }
   onMount(() => {
+    try { restartPending = sessionStorage.getItem(restartKey); } catch { /* Storage is optional. */ }
     const cached = readingCache.readSnapshot(); if (cached) snapshot={...cached,agents:cached.agents.filter(a=>a.hostId===cached.entryId),hosts:cached.hosts?.filter(h=>h.id===cached.entryId).map(h=>({...h,connected:false}))};
     if (selectedId && selectedId.startsWith((snapshot.entryId ?? "") + ":")) detail = readingCache.readDetail(selectedId);
     const cleanupNavigation = initializeNavigation(selectedId);
@@ -634,6 +682,7 @@
       if(selectedId){const id=selectedId.split(":")[0];if(!before.hosts?.find(h=>h.id===id)?.connected&&value.snapshot.hosts?.find(h=>h.id===id)?.connected)void restoreDetail(selectedId);}
       if(!entryWasConnected&&value.snapshot.hosts?.find(h=>h.id===value.snapshot.entryId)?.connected){
         void load();
+        void refreshInstance();
         if(modal==="new")void loadProjects();
       }
     },id=>{
@@ -646,7 +695,7 @@
     const compositionEnd = () => composing = false;
     window.addEventListener("compositionstart", compositionStart);
     window.addEventListener("compositionend", compositionEnd);
-    const timer = setInterval(() => now = Date.now(), 1000);
+    const timer = setInterval(() => { now = Date.now(); if (modal === "settings" && settingsPage === "grove" && connected && now % 5000 < 1000) void refreshInstance(); }, 1000);
     const permission = () => { if ("Notification" in window && Notification.permission === "default") void Notification.requestPermission().catch(() => {}); };
     const reserveTab = (e: KeyboardEvent) => { if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing && e.keyCode !== 229) e.preventDefault(); };
     window.addEventListener("keydown", reserveTab, true);
@@ -663,7 +712,7 @@
 <div class="workbench" class:close-recovery-layout={closeRecovery.entries.some(i => modal !== "abandon-close" || abandon?.id !== i.agentId)}>
 <main>
   <Sidebar.Root>
-  <SessionList bind:this={sessionList} user={currentUser} {showAuthors} onsettings={() => show("settings")} onlogout={() => show("sign-out")} agents={visibleAgents} {projects} {projectsLoading} {instanceId} {activityWindow} onactivitywindow={value => activityWindow = value} {now} rootOrder={treeOrder[instanceId] ?? []} onreorder={ids => treeOrder = { ...treeOrder, [instanceId]: ids }} {hosts} {selectedId} {loading} {connected} {closingId} closeError={selectedId === closeError?.id && navigation.surfaces.at(-1) !== "sidebar" ? null : closeError} onclosetree={closeTree} onopen={open} onnew={() => show("new")}>
+  <SessionList bind:this={sessionList} user={currentUser} version={instance?.version ?? null} {showAuthors} onsettings={() => show("settings")} onlogout={() => show("sign-out")} agents={visibleAgents} {projects} {projectsLoading} {instanceId} {activityWindow} onactivitywindow={value => activityWindow = value} {now} rootOrder={treeOrder[instanceId] ?? []} onreorder={ids => treeOrder = { ...treeOrder, [instanceId]: ids }} {hosts} {selectedId} {loading} {connected} {closingId} closeError={selectedId === closeError?.id && navigation.surfaces.at(-1) !== "sidebar" ? null : closeError} onclosetree={closeTree} onopen={open} onnew={() => show("new")}>
     {#if !connected && !loading}<div class="connection-banner" role="status"><strong>{m.reconnecting()}</strong><span>{m.offline_help()}</span><Button variant="ghost" size="sm" onclick={load}>{m.retry()}</Button></div>{/if}
   </SessionList>
   </Sidebar.Root>
@@ -730,6 +779,7 @@
           <button class:active={settingsPage === "users"} aria-current={settingsPage === "users" ? "page" : undefined} onclick={() => settingsPage = "users"}>{m.users()}</button>
           <button class:active={settingsPage === "models"} aria-current={settingsPage === "models" ? "page" : undefined} onclick={() => settingsPage = "models"}>{m.models()}</button>
           <button class:active={settingsPage === "voice"} aria-current={settingsPage === "voice" ? "page" : undefined} onclick={() => settingsPage = "voice"}>{m.voice_settings()}</button>
+          <button class:active={settingsPage === "grove"} aria-current={settingsPage === "grove" ? "page" : undefined} onclick={() => { settingsPage = "grove"; void refreshInstance(); }}>{m.grove_settings()}</button>
         </nav>
         <div class="settings-content">
           {#if settingsPage === "account"}
@@ -738,6 +788,22 @@
             <section class="settings-section"><h2>{m.users()}</h2>{#if users}<ul class="account-users">{#each users as person (person.id)}<li><span class="account-avatar" style:background={person.color}>{person.name.slice(0,1).toUpperCase()}</span><span>{person.name}</span>{#if person.id === user.id}<small>{m.you()}</small>{/if}</li>{/each}</ul>{:else}<p>{m.loading_users()}</p>{/if}<div class="account-actions"><Button variant="outline" size="sm" disabled={inviteBusy} onclick={invite}>{m.create_invitation()}</Button></div>{#if invitation}<div class="invite-code"><code>{invitation.code}</code><Button variant="ghost" size="sm" onclick={() => navigator.clipboard.writeText(invitation!.code).then(() => toast.success(m.copied())).catch(() => toast.error(m.could_not_copy()))}>{m.copy()}</Button><small>{m.expires_at({time:new Date(invitation.expiresAt).toLocaleTimeString()})}</small></div>{/if}{#if inviteError}<p role="alert">{inviteError}</p>{/if}</section>
           {:else if settingsPage === "voice"}
             <VoiceSettings peerId={snapshot.entryId ?? ""} {connected} />
+          {:else if settingsPage === "grove"}
+            <section class="settings-section instance-settings"><h2>{m.grove_settings()}</h2>
+              <div class="instance-actions"><Button variant="outline" size="sm" disabled={!connected || !instance || !!instanceStatusError || instance.busy || instanceAction || !!restartPending} onclick={reloadMcp}>{instanceAction && !restartPending ? m.reloading_mcp() : m.reload_mcp()}</Button><Button variant="outline" size="sm" disabled={!connected || !instance || !!instanceStatusError || instance.busy || !instance.restartAvailable || instanceAction || !!restartPending} onclick={() => setSurface("restart-grove", true)}>{m.restart_grove()}</Button></div>
+              {#if restartPending}<p role="status">{m.restart_unknown()} <Button variant="ghost" size="sm" disabled={!connected} onclick={refreshInstance}>{m.restart_check()}</Button></p>
+              {:else if instance?.busy}<p role="status">{m.restart_wait_idle()}</p><InstanceBlockers sessions={instance.sessions} instanceReasons={instance.instanceReasons} />
+              {:else if instance && !instance.restartAvailable}<p role="status">{m.restart_unavailable()}</p>{/if}
+              {#if instanceError}<p class="inline-error" role="alert">{instanceError}</p>{/if}
+              {#if instanceNotice}<p role="status">{instanceNotice}</p>{/if}
+              {#if instanceStatusError}<p class="inline-error" role="alert">{instanceStatusError}</p>{/if}
+              <Dialog.Root open={navigation.surfaces.includes("restart-grove")} onOpenChange={value => { if (!value) setSurface("restart-grove", false); }}>
+                <Dialog.Content class="grove-dialog signout-dialog" showCloseButton={false} onEscapeKeydown={event => { event.preventDefault(); event.stopPropagation(); void back(); }}>
+                  <Dialog.Header><Dialog.Title>{m.restart_grove_confirm()}</Dialog.Title><Dialog.Description>{m.restart_grove_help()}</Dialog.Description></Dialog.Header>
+                  <Dialog.Footer class="signout-actions"><Button variant="ghost" size="sm" onclick={() => back()}>{m.cancel()}</Button><Button variant="default" size="sm" disabled={!connected || !instance || !!instanceStatusError || instance.busy || !instance.restartAvailable || instanceAction || !!restartPending} onclick={restartGrove}>{m.restart_grove()}</Button></Dialog.Footer>
+                </Dialog.Content>
+              </Dialog.Root>
+            </section>
           {:else}
             <section class="settings-section"><div class="settings-heading"><h2>{m.models()}</h2><Popover.Root bind:open={modelHelpOpen}><Popover.Trigger aria-label={m.model_settings_help()} title={m.settings_help()} class={buttonVariants({variant:"ghost",size:"icon-xs"})}><CircleHelp aria-hidden="true" /></Popover.Trigger><Popover.Content align="start" sideOffset={6} class="w-64 max-w-[calc(100vw-2rem)] p-3 text-xs" onEscapeKeydown={event => event.stopPropagation()}>{m.settings_help()}</Popover.Content></Popover.Root></div>
             {#if !settings&&modalModelsLoading}<p role="status">{m.loading()}</p>{/if}

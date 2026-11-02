@@ -734,6 +734,35 @@ export async function openPiSession(
       threadId: id,
       threadName: metadata.title === "New session" ? null : metadata.title,
       ...current,
+      async reloadMcp() {
+        return serialize(async () => {
+          if (closed) throw new Error("Pi session is closed");
+          const replacement = await openPiMcp({
+            agentDir: options.agentDir,
+            cwd,
+            trusted: settings.isProjectTrusted(),
+          });
+          try {
+            registry.install(replacement.extension);
+          } catch (error) {
+            await replacement.close();
+            throw error;
+          }
+          const previous = mcp;
+          const wasClosed = mcpClosed;
+          mcp = replacement;
+          mcpClosed = false;
+          const issues = [...replacement.issues];
+          if (!wasClosed) {
+            try {
+              await previous?.close();
+            } catch {
+              issues.push("Previous MCP connections could not be fully closed");
+            }
+          }
+          return { issues };
+        });
+      },
       async readSettings() {
         return { ...current };
       },

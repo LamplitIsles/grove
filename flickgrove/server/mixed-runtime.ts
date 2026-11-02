@@ -19,6 +19,9 @@ export class MixedRuntime implements Runtime {
     private readonly codex: Runtime,
     private readonly pi: Runtime,
   ) {}
+  async reloadMcp() {
+    await this.codex.reloadMcp?.();
+  }
   private runtime(backend: Backend) {
     return backend === "pi" ? this.pi : this.codex;
   }

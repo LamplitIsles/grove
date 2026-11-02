@@ -10,11 +10,12 @@ import { resolve, sep } from "node:path";
 import { z } from "zod";
 import type { Server } from "bun";
 import type { Workspace } from "./workspace";
-import type { HostService } from "./hosts";
+import { qualify, type HostService } from "./hosts";
 import { groveWebsocket, type SocketData } from "./chord-socket";
 const json = (value: unknown, status = 200) =>
   Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
 type Options = {
+  instance?: import("./instance-controls").InstanceControls;
   voice?: VoiceOptions;
   origin: () => string;
   localOrigin?: () => string;
@@ -127,6 +128,38 @@ export function createHandler(workspace: Workspace, options: Options) {
         403,
       );
     try {
+      if (
+        url.pathname === "/api/instance" ||
+        url.pathname.startsWith("/api/instance/")
+      ) {
+        if (!options.auth || !human)
+          return json({ error: "Authentication required" }, 401);
+        if (!browserOrigin(request, origins))
+          return json({ error: "Wrong origin" }, 403);
+        if (!options.instance)
+          return json({ error: "Instance controls unavailable" }, 503);
+        if (request.method === "GET" && url.pathname === "/api/instance") {
+          const status = await options.instance.status();
+          return json({
+            ...status,
+            sessions: status.sessions.map((session) => ({
+              ...session,
+              id: qualify(options.service.identity.id, session.id),
+            })),
+          });
+        }
+        if (
+          request.method === "POST" &&
+          url.pathname === "/api/instance/mcp/reload"
+        )
+          return json(await options.instance.reload());
+        if (
+          request.method === "POST" &&
+          url.pathname === "/api/instance/restart"
+        )
+          return json(await options.instance.restart());
+        return json({ error: "Action not found" }, 404);
+      }
       if (mcp) {
         const token = /^Bearer (.+)$/.exec(
           request.headers.get("authorization") ?? "",

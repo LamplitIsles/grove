@@ -58,6 +58,7 @@ test("fake app-server receives per-input untrusted context on start and steer", 
       deliveries: [],
     };
     const handle = await runtime.open(agent, () => {});
+    await runtime.reloadMcp();
     const turn = await handle.send(
       "first",
       undefined,
@@ -86,6 +87,15 @@ test("fake app-server receives per-input untrusted context on start and steer", 
       (request) =>
         request.method === "turn/start" || request.method === "turn/steer",
     );
+    expect(
+      requests.filter(
+        (request) => request.method === "config/mcpServer/reload",
+      ),
+    ).toHaveLength(1);
+    expect(
+      requests.find((request) => request.method === "thread/start").params
+        .config["mcp_servers.flickgrove"].env.FLICKGROVE_AGENT_TOKEN,
+    ).toBe("fixture");
     expect(turns.map((request) => request.method)).toEqual([
       "turn/start",
       "turn/steer",
