@@ -170,6 +170,29 @@ test("existing instance identity and local MCP authorization survive peer deleti
   ).toBe(200);
 });
 
+test("local MCP stays on its loopback origin when browser origin differs", async () => {
+  const f = fixture();
+  const browser = "http://localhost:4321";
+  const handler = createHandler(f.app, {
+    ...f.options,
+    origin: () => browser,
+    localOrigin: () => f.origin,
+  });
+  const agent = await f.app.createOrc("alpha");
+  const token = f.runtime.agents.get(agent.id)!.token;
+  const headers = { Authorization: `Bearer ${token}` };
+  expect(
+    (await handler(new Request(f.origin + "/api/mcp/info", { headers })))
+      .status,
+  ).toBe(200);
+  expect(
+    (await handler(new Request(browser + "/api/mcp/info", { headers }))).status,
+  ).toBe(403);
+  expect((await handler(new Request(f.origin + "/api/mcp/info"))).status).toBe(
+    401,
+  );
+});
+
 // The TLS terminator preserves Host; Bun sees HTTP and browser GET omits Origin.
 test("proxy HTTPS same-origin capability reaches actual business response", async () => {
   const f = fixture();

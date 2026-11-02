@@ -39,7 +39,7 @@ const port = Number(values.port);
 if (!Number.isInteger(port) || port < 1 || port > 65535)
   throw new Error("Use a port between 1 and 65535");
 const localOrigin = `http://127.0.0.1:${port}`;
-const origin = values.origin ?? localOrigin;
+const origin = values.origin ?? `http://localhost:${port}`;
 if (
   !["http:", "https:"].includes(new URL(origin).protocol) ||
   new URL(origin).origin !== origin

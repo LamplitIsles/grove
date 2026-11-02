@@ -27,13 +27,13 @@ bun run --cwd flickgrove build
 bun run --cwd flickgrove start
 ```
 
-Leave the server running. It listens on `127.0.0.1:4318` by default, with origin `http://127.0.0.1:4318` and state in `~/.local/share/flickgrove`. In a second terminal, from the same checkout and OS account, create the first-user setup code:
+Leave the server running. It listens on `127.0.0.1:4318` by default, with origin `http://localhost:4318` and state in `~/.local/share/flickgrove`. In a second terminal, from the same checkout and OS account, create the first-user setup code:
 
 ```sh
 bun run --cwd flickgrove start --auth bootstrap
 ```
 
-Open **http://127.0.0.1:4318**, enter the code and a nickname, then register a passkey using your authenticator's user verification. The setup code is single-use and expires after ten minutes. If you set `--origin` or `--state` on the server, supply the **same values** to the bootstrap command and open that exact origin. Keep the code private.
+Open **http://localhost:4318**, enter the code and a nickname, then register a passkey using your authenticator's user verification. The setup code is single-use and expires after ten minutes. If you set `--origin`, `--port` or `--state` on the server, supply the **same values** to the bootstrap command and open that exact origin. Passkeys are scoped to an RP ID, and authentication checks the configured origin; a passkey created for a different RP ID does not automatically work after a hostname change. Keep the code private.
 
 ### Choose a project and start a session
 
