@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Workspace } from "../server/workspace";
 import { WorkspaceStore } from "../server/workspace-store";
 import { HostService } from "../server/hosts";
@@ -282,9 +282,13 @@ function unit(
   };
   const configPath = join(stateDirectory, "config.toml");
   writeFileSync(configPath, "");
-  writeFileSync(join(stateDirectory, "voice-key"), "synthetic-browser-key", {
-    mode: 0o600,
-  });
+  writeFileSync(
+    join(stateDirectory, "voice-api-key"),
+    "synthetic-browser-key",
+    {
+      mode: 0o600,
+    },
+  );
   const voice = { configPath, connect: voiceProvider.connect };
   const handler = createHandler(app, {
     voice,
@@ -678,6 +682,13 @@ const server = Bun.serve({
     );
     if (v) return v === true ? undefined : v;
     const url = new URL(request.url);
+    // Legacy voice fixtures test the composer without an authentication server.
+    if (process.env.GROVE_TEST_AUTH_STUB && url.pathname === "/api/auth/status")
+      return Response.json({
+        state: "signed_in",
+        user: { id: "fixture-user", name: "Fixture", color: "#555555" },
+        colors: ["#555555"],
+      });
     if (url.pathname === "/fixture/voice") {
       if (request.method === "POST") {
         const body = await request.json();
@@ -686,8 +697,9 @@ const server = Bun.serve({
         if (body.ready) voiceProvider.ready();
         for (const u of units)
           writeFileSync(
-            u.voice.configPath,
-            body.disabled ? "" : '[voice]\napi_key_file="voice-key"\n',
+            join(dirname(u.voice.configPath), "voice-api-key"),
+            body.disabled ? "" : "synthetic-browser-key",
+            { mode: 0o600 },
           );
       }
       return Response.json({

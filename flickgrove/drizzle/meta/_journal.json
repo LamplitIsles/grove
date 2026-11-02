@@ -36,6 +36,13 @@
       "when": 1793544200824,
       "tag": "0004_multi_user_auth",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1793629026487,
+      "tag": "0005_voice_settings",
+      "breakpoints": true
     }
   ]
 }

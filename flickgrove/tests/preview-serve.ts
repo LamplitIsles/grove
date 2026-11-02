@@ -217,7 +217,15 @@ async function unit(name: string, color: string, origin: () => string) {
   const auth = process.env.PREVIEW_AUTH
     ? new GroveAuth(app.store, join(cwd, "state"), origin())
     : undefined;
-  const handler = createHandler(app, { service, assets, origin, auth });
+  const handler = createHandler(app, {
+    service,
+    assets,
+    origin,
+    auth,
+    voice: process.env.PREVIEW_VOICE
+      ? { configPath: join(cwd, "config.toml") }
+      : undefined,
+  });
   return {
     app,
     runtime,

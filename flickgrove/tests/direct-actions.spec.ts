@@ -75,14 +75,8 @@ test("skill panel preserves independent multiword query, insertion, caret and Ba
   await input.press("Alt+KeyS");
   await search.press("ArrowDown");
   await search.press("ArrowDown");
-  await expect(page.locator(".completion-description")).toHaveText(
-    "Review code and verify tests",
-  );
   await search.press("ArrowUp");
   await search.press("ArrowUp");
-  await expect(page.locator(".completion-description")).toHaveText(
-    "Implement one spec with one Worker",
-  );
   await search.press("ArrowDown");
   await search.press("ArrowDown");
   await search.press("Tab");

@@ -17,8 +17,8 @@ afterEach(async () => {
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), "grove-voice-test-"));
   const configPath = join(directory, "config.toml"),
-    keyPath = join(directory, "key");
-  await writeFile(configPath, '[voice]\napi_key_file="key"\n');
+    keyPath = join(directory, "voice-api-key");
+  await writeFile(configPath, "");
   await writeFile(keyPath, "synthetic-key\n", { mode: 0o600 });
   const app = new Workspace({
     directory: join(directory, "state"),
@@ -105,29 +105,11 @@ const until = async (check: () => boolean) => {
   expect(check()).toBe(true);
 };
 
-test("voice configuration reads relative private files per request and fails closed without affecting text", async () => {
+test("voice reads the default private file per request and fails closed without affecting text", async () => {
   const f = await fixture();
   expect(await (await f.capability()).json()).toEqual({ available: true });
-  await writeFile(f.configPath, "");
-  expect(await (await f.capability()).json()).toEqual({
-    available: false,
-    reason: "voice_disabled",
-  });
-  for (const content of [
-    "[voice]\napi_key_file=5",
-    '[voice]\napi_key_file="missing"',
-    '[voice]\napi_key_file=""',
-  ]) {
-    await writeFile(f.configPath, content);
-    expect(await (await f.capability()).json()).toEqual({
-      available: false,
-      reason: "config_unavailable",
-    });
-  }
-  await writeFile(
-    f.configPath,
-    `[voice]\napi_key_file=${JSON.stringify(f.keyPath)}`,
-  );
+  await writeFile(f.configPath, '[voice]\napi_key_file="ignored"\n');
+  expect(await (await f.capability()).json()).toEqual({ available: true });
   await chmod(f.keyPath, 0o644);
   expect((await (await f.capability()).json()).available).toBe(false);
   await chmod(f.keyPath, 0o600);
@@ -330,8 +312,8 @@ test("PCM total budget and upstream queue limit close the real relay without for
   expect(s.frames.at(-1)).toEqual({ type: "error", code: "invalid_audio" });
   expect(f.provider.stats.bytes).toBe(9_600_000);
   let full = false;
-  f.voice.connect = (key) => {
-    const upstream = f.provider.connect(key);
+  f.voice.connect = (key, endpoint) => {
+    const upstream = f.provider.connect(key, endpoint);
     Object.defineProperty(upstream, "bufferedAmount", {
       get: () => (full ? 256 * 1024 : 0),
     });

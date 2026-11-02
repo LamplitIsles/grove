@@ -36,6 +36,7 @@
   const sidebar = Sidebar.useSidebar();
   import SessionList from "./SessionList.svelte";
   import AccountSettings from "./AccountSettings.svelte";
+  import VoiceSettings from "./VoiceSettings.svelte";
   import { historyCache } from "./history-cache";
   import AgentDetail from "./AgentDetail.svelte";
   import SessionHistory from "./SessionHistory.svelte";
@@ -45,7 +46,7 @@
   let users = $state<Human[] | undefined>();
   const showAuthors = $derived((users?.length ?? 0) > 1);
   const currentUser = $derived(users?.find(person => person.id === user.id) ?? user);
-  let settingsPage = $state<"account" | "users" | "models">("account");
+  let settingsPage = $state<"account" | "users" | "models" | "voice">("account");
   let modelRole = $state<"orc" | "worker">("orc");
   let modelHelpOpen = $state(false);
   const projectListId = $props.id();
@@ -733,12 +734,15 @@
           <button class:active={settingsPage === "account"} aria-current={settingsPage === "account" ? "page" : undefined} onclick={() => settingsPage = "account"}>{m.account()}</button>
           <button class:active={settingsPage === "users"} aria-current={settingsPage === "users" ? "page" : undefined} onclick={() => settingsPage = "users"}>{m.users()}</button>
           <button class:active={settingsPage === "models"} aria-current={settingsPage === "models" ? "page" : undefined} onclick={() => settingsPage = "models"}>{m.models()}</button>
+          <button class:active={settingsPage === "voice"} aria-current={settingsPage === "voice" ? "page" : undefined} onclick={() => settingsPage = "voice"}>{m.voice_settings()}</button>
         </nav>
         <div class="settings-content">
           {#if settingsPage === "account"}
             <AccountSettings user={currentUser} {colors} onpasskey={addPasskey} onsaved={value => { users = users?.map(person => person.id === value.id ? value : person); }} />
           {:else if settingsPage === "users"}
             <section class="settings-section"><h2>{m.users()}</h2>{#if users}<ul class="account-users">{#each users as person (person.id)}<li><span class="account-avatar" style:background={person.color}>{person.name.slice(0,1).toUpperCase()}</span><span>{person.name}</span>{#if person.id === user.id}<small>{m.you()}</small>{/if}</li>{/each}</ul>{:else}<p>{m.loading_users()}</p>{/if}<div class="account-actions"><Button variant="outline" size="sm" disabled={inviteBusy} onclick={invite}>{m.create_invitation()}</Button></div>{#if invitation}<div class="invite-code"><code>{invitation.code}</code><Button variant="ghost" size="sm" onclick={() => navigator.clipboard.writeText(invitation!.code).then(() => toast.success(m.copied())).catch(() => toast.error(m.could_not_copy()))}>{m.copy()}</Button><small>{m.expires_at({time:new Date(invitation.expiresAt).toLocaleTimeString()})}</small></div>{/if}{#if inviteError}<p role="alert">{inviteError}</p>{/if}</section>
+          {:else if settingsPage === "voice"}
+            <VoiceSettings peerId={snapshot.entryId ?? ""} {connected} />
           {:else}
             <section class="settings-section"><div class="settings-heading"><h2>{m.models()}</h2><Popover.Root bind:open={modelHelpOpen}><Popover.Trigger aria-label={m.model_settings_help()} title={m.settings_help()} class={buttonVariants({variant:"ghost",size:"icon-xs"})}><CircleHelp aria-hidden="true" /></Popover.Trigger><Popover.Content align="start" sideOffset={6} class="w-64 max-w-[calc(100vw-2rem)] p-3 text-xs" onEscapeKeydown={event => event.stopPropagation()}>{m.settings_help()}</Popover.Content></Popover.Root></div>
             {#if !settings&&modalModelsLoading}<p role="status">{m.loading()}</p>{/if}

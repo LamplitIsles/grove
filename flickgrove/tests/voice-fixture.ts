@@ -6,6 +6,7 @@ export function fakeVoiceProvider() {
   const sockets = new Set<ServerWebSocket<{ taskId: string }>>();
   const stats = {
     authorization: [] as string[],
+    endpoints: [] as string[],
     runs: [] as any[],
     pcm: [] as number[][],
     events: [] as string[],
@@ -121,10 +122,12 @@ export function fakeVoiceProvider() {
     get active() {
       return sockets.size;
     },
-    connect: (key: string) =>
-      socketWithHeaders(server.url.origin.replace(/^http/, "ws"), {
+    connect: (key: string, endpoint: string) => {
+      stats.endpoints.push(endpoint);
+      return socketWithHeaders(server.url.origin.replace(/^http/, "ws"), {
         Authorization: `Bearer ${key}`,
-      }),
+      });
+    },
     mode(value: string) {
       mode = value;
     },

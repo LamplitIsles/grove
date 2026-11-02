@@ -1,5 +1,14 @@
-import { test, expect } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { test, expect, spyOn } from "bun:test";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { GroveAuth } from "./auth";
@@ -248,9 +257,13 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
     port: 0,
   };
   const provider = fakeVoiceProvider();
-  const configPath = join(dir, "voice-config.toml");
-  writeFileSync(configPath, '[voice]\napi_key_file="voice-key"\n');
-  writeFileSync(join(dir, "voice-key"), "test-only-key", { mode: 0o600 });
+  const configDir = join(dir, "voice-config");
+  mkdirSync(configDir);
+  const configPath = join(configDir, "config.toml");
+  writeFileSync(configPath, "");
+  writeFileSync(join(configDir, "voice-api-key"), "test-only-key", {
+    mode: 0o600,
+  });
   options.voice = { configPath, connect: provider.connect };
   const server = servePeer(app, options);
   origin = `http://localhost:${server.port}`;
@@ -276,6 +289,7 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
       "/api/images/a/original",
       "/api/voice/capability",
       "/api/voice/stream",
+      "/api/voice/settings",
     ])
       expect((await call(path)).status).toBe(401);
     expect((await call("/preview/random/test.html")).status).toBe(410);
@@ -407,6 +421,213 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
     );
     for (let i = 0; i < 100 && !provider.active; i++) await Bun.sleep(5);
     expect(provider.active).toBe(1);
+    expect(provider.stats.endpoints[0]).toBe(
+      "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
+    );
+    expect(provider.stats.authorization[0]).toBe("Bearer test-only-key");
+    const setting = (
+      method: string,
+      cookieValue: string,
+      body?: unknown,
+      requestOrigin = origin,
+    ) =>
+      fetch(origin.replace("localhost", "127.0.0.1") + "/api/voice/settings", {
+        method,
+        headers: {
+          host: `localhost:${server.port}`,
+          origin: requestOrigin,
+          cookie: cookieValue,
+          "x-grove-peer": service.identity.id,
+          "content-type": "application/json",
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    const initialSettings = await setting("GET", session);
+    expect(initialSettings.headers.get("cache-control")).toBe("no-store");
+    expect(await initialSettings.json()).toEqual({
+      region: "beijing",
+      configured: true,
+    });
+    unlinkSync(join(configDir, "voice-api-key"));
+    expect(await (await setting("GET", session)).json()).toEqual({
+      region: "beijing",
+      configured: false,
+    });
+    expect((await setting("POST", session, { region: "beijing" })).status).toBe(
+      400,
+    );
+    writeFileSync(join(configDir, "voice-api-key"), "test-only-key", {
+      mode: 0o600,
+    });
+    expect(
+      (await setting("POST", session, { region: "singapore" })).status,
+    ).toBe(400);
+    expect(
+      (await setting("POST", session, { region: "other", apiKey: "bad" }))
+        .status,
+    ).toBe(400);
+    expect(
+      (
+        await setting("POST", session, {
+          region: "singapore",
+          apiKey: "two keys",
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await setting(
+          "POST",
+          session,
+          { region: "singapore", apiKey: "replacement" },
+          "https://evil.example",
+        )
+      ).status,
+    ).toBe(403);
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    let saved: Response;
+    try {
+      saved = await setting("POST", session, {
+        region: "singapore",
+        apiKey: "singapore-synthetic",
+      });
+      expect(
+        JSON.stringify([log.mock.calls, warn.mock.calls, error.mock.calls]),
+      ).not.toContain("singapore-synthetic");
+    } finally {
+      log.mockRestore();
+      warn.mockRestore();
+      error.mockRestore();
+    }
+    expect(saved.status).toBe(200);
+    const savedText = await saved.text();
+    expect(savedText).not.toContain("singapore-synthetic");
+    expect(JSON.parse(savedText)).toEqual({
+      region: "singapore",
+      configured: true,
+    });
+    expect(statSync(join(configDir, "voice-api-key")).mode & 0o777).toBe(0o600);
+    expect(await (await setting("GET", bobSession)).json()).toEqual({
+      region: "singapore",
+      configured: true,
+    });
+    expect(
+      (await setting("POST", bobSession, { region: "singapore", apiKey: "" }))
+        .status,
+    ).toBe(200);
+    const secondVoice = socketWithHeaders(
+      `ws://127.0.0.1:${server.port}/api/voice/stream`,
+      {
+        Host: `localhost:${server.port}`,
+        Origin: origin,
+        Cookie: bobSession,
+        "Sec-WebSocket-Protocol": `grove-voice.v1, grove-peer.${service.identity.id}`,
+      },
+    );
+    for (let i = 0; i < 100 && provider.active < 2; i++) await Bun.sleep(5);
+    expect(provider.active).toBe(2);
+    expect(provider.stats.endpoints[1]).toBe(
+      "wss://dashscope-intl.aliyuncs.com/api-ws/v1/inference",
+    );
+    expect(provider.stats.authorization[1]).toBe("Bearer singapore-synthetic");
+    expect(voiceSocket.readyState).toBe(WebSocket.OPEN);
+    voiceSocket.send(new Uint8Array([1, 2]));
+    for (let i = 0; i < 100 && !provider.stats.frames; i++) await Bun.sleep(5);
+    expect(provider.stats.frames).toBe(1);
+    secondVoice.close();
+    chmodSync(configDir, 0o500);
+    let writeFailed: Response;
+    try {
+      writeFailed = await setting("POST", session, {
+        region: "beijing",
+        apiKey: "write-fails",
+      });
+    } finally {
+      chmodSync(configDir, 0o700);
+    }
+    expect(((await writeFailed.json()) as { code: string }).code).toBe(
+      "key_save_failed",
+    );
+    expect(readFileSync(join(configDir, "voice-api-key"), "utf8")).toBe(
+      "singapore-synthetic",
+    );
+    expect(await (await setting("GET", session)).json()).toEqual({
+      region: "singapore",
+      configured: true,
+    });
+    app.store.sqlite.exec(
+      "CREATE TRIGGER fail_voice_region BEFORE UPDATE ON voice_settings BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END",
+    );
+    const failureLog = spyOn(console, "error").mockImplementation(() => {});
+    let partial: Response;
+    try {
+      partial = await setting("POST", session, {
+        region: "beijing",
+        apiKey: "beijing-synthetic",
+      });
+      expect(JSON.stringify(failureLog.mock.calls)).not.toContain(
+        "beijing-synthetic",
+      );
+    } finally {
+      failureLog.mockRestore();
+    }
+    expect(partial.status).toBe(500);
+    const partialText = await partial.text();
+    expect(JSON.parse(partialText).code).toBe("key_saved_region_failed");
+    expect(partialText).not.toContain("beijing-synthetic");
+    expect(readFileSync(join(configDir, "voice-api-key"), "utf8")).toBe(
+      "beijing-synthetic",
+    );
+    expect(await (await setting("GET", session)).json()).toEqual({
+      region: "singapore",
+      configured: true,
+    });
+    app.store.sqlite.exec("DROP TRIGGER fail_voice_region");
+    const concurrent = await Promise.all([
+      setting("POST", session, {
+        region: "beijing",
+        apiKey: "parallel-beijing",
+      }),
+      setting("POST", bobSession, {
+        region: "singapore",
+        apiKey: "parallel-singapore",
+      }),
+    ]);
+    expect(concurrent.map((response) => response.status)).toEqual([200, 200]);
+    const concurrentStatus = (await (await setting("GET", session)).json()) as {
+      region: string;
+    };
+    expect(readFileSync(join(configDir, "voice-api-key"), "utf8")).toBe(
+      concurrentStatus.region === "beijing"
+        ? "parallel-beijing"
+        : "parallel-singapore",
+    );
+    expect(
+      (
+        await setting("POST", session, {
+          region: "beijing",
+          apiKey: "beijing-synthetic",
+        })
+      ).status,
+    ).toBe(200);
+    const thirdVoice = socketWithHeaders(
+      `ws://127.0.0.1:${server.port}/api/voice/stream`,
+      {
+        Host: `localhost:${server.port}`,
+        Origin: origin,
+        Cookie: bobSession,
+        "Sec-WebSocket-Protocol": `grove-voice.v1, grove-peer.${service.identity.id}`,
+      },
+    );
+    for (let i = 0; i < 100 && provider.stats.authorization.length < 3; i++)
+      await Bun.sleep(5);
+    expect(provider.stats.endpoints[2]).toBe(
+      "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
+    );
+    expect(provider.stats.authorization[2]).toBe("Bearer beijing-synthetic");
+    thirdVoice.close();
     const aliceClient = await openGrove(
       socket,
       () => {},
@@ -424,6 +645,21 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
       },
     );
     expect(agentInfo.status).toBe(200);
+    expect(
+      (
+        await fetch(
+          origin.replace("localhost", "127.0.0.1") + "/api/voice/settings",
+          {
+            headers: {
+              host: `localhost:${server.port}`,
+              origin,
+              authorization: `Bearer ${agentToken}`,
+              "x-grove-peer": service.identity.id,
+            },
+          },
+        )
+      ).status,
+    ).toBe(401);
     const id = `${service.identity.id}:${orc.id}`;
     await Promise.all([
       aliceClient.call("send", {

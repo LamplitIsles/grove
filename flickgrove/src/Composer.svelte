@@ -47,7 +47,7 @@
   const queueBlocked = $derived(followUps.some(item => item.status === "failed" || item.status === "sending" || ((item.status === "uncertain" || item.status === "sent") && !inspections[item.id]?.canContinue)));
   let revision=0;
   let voiceStatus = $state<VoiceRecordingStatus>("idle");
-  let voiceAvailable = $state(false); let voiceReason = $state("Checking voice availability…");
+  let voiceAvailable = $state(false); let voiceReason = $state("Checking voice availability…"); let voiceSettingsRevision = $state(0);
   let voiceError = $state(""); let voiceSeconds = $state(0);
   const voiceBusy = $derived(voiceStatus !== "idle");
   const voiceTarget = $derived(connected ? agentId : "");
@@ -73,23 +73,26 @@
   function stopVoice() { void voice.stopAndGet().catch(()=>{}); }
   $effect(()=>{ const value=text; untrack(()=>{if(takeDraft && value!==takeDraft.text)cancelVoice();}); });
   $effect(()=>{
-    const id=voiceTarget; const online=!!id;
-    const abort=new AbortController();voiceAvailable=false;voiceReason="Checking voice availability…";
+    const id=voiceTarget; const online=!!id; void voiceSettingsRevision;
+    const abort=new AbortController();let retry: ReturnType<typeof setTimeout> | undefined;voiceAvailable=false;voiceReason="Checking voice availability…";
+    const retryWhenVisible=()=>{ retry=setTimeout(()=>{if(!abort.signal.aborted && !document.hidden)voiceSettingsRevision++;},15000); };
     if(!online){cancelVoice();voiceReason="Execution Peer is offline";return;}
     if(!canCaptureVoice()){voiceReason="Voice requires HTTPS or localhost and a supported browser";return;}
     void connection().voiceCapability(id,abort.signal).then(value=>{
       if(abort.signal.aborted)return;voiceAvailable=value.available;
       voiceReason=value.available ? "Start voice input" : value.reason==="config_unavailable" ? "Voice configuration is unavailable on this Peer" : "Voice is not configured on this Peer";
-    }).catch(()=>{if(!abort.signal.aborted)voiceReason="Voice is unavailable on this Peer";});
-    return()=>abort.abort();
+      if(!value.available)retryWhenVisible();
+    }).catch(()=>{if(!abort.signal.aborted){voiceReason="Voice is unavailable on this Peer";retryWhenVisible();}});
+    return()=>{abort.abort();if(retry)clearTimeout(retry);};
   });
   onMount(()=>{
-    const hidden=()=>{if(document.hidden)cancelVoice();};
+    const hidden=()=>{if(document.hidden)cancelVoice();else voiceSettingsRevision++;};
+    const settingsChanged=()=>voiceSettingsRevision++;
     const navigating=(e:Event)=>{if(!(e as CustomEvent<{foreground:boolean}>).detail.foreground)cancelVoice();};
     const escape=(e:KeyboardEvent)=>{if(e.key==="Escape" && !e.isComposing && voiceBusy && !navigation.surfaces.length && !(e.target instanceof HTMLElement && e.target.closest(".title-editor"))){e.preventDefault();e.stopImmediatePropagation();cancelVoice();}};
     const timer=setInterval(()=>{voiceSeconds=Math.floor(voice.elapsedMs/1000);},500);
-    window.addEventListener("keydown",escape,true);document.addEventListener("visibilitychange",hidden);window.addEventListener("pagehide",cancelVoice);window.addEventListener("grove-navigation-pop",navigating);
-    return()=>{clearInterval(timer);voice.dispose();window.removeEventListener("keydown",escape,true);document.removeEventListener("visibilitychange",hidden);window.removeEventListener("pagehide",cancelVoice);window.removeEventListener("grove-navigation-pop",navigating);};
+    window.addEventListener("keydown",escape,true);document.addEventListener("visibilitychange",hidden);window.addEventListener("focus",settingsChanged);window.addEventListener("pagehide",cancelVoice);window.addEventListener("grove-navigation-pop",navigating);window.addEventListener("grove-voice-settings-changed",settingsChanged);
+    return()=>{clearInterval(timer);voice.dispose();window.removeEventListener("keydown",escape,true);document.removeEventListener("visibilitychange",hidden);window.removeEventListener("focus",settingsChanged);window.removeEventListener("pagehide",cancelVoice);window.removeEventListener("grove-navigation-pop",navigating);window.removeEventListener("grove-voice-settings-changed",settingsChanged);};
   });
   let ordinarySelection: {start: number; end: number} | undefined;
   $effect(() => {

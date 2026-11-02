@@ -127,6 +127,10 @@ export const authPairing = sqliteTable("authPairing", {
   expiresAt: authDate("expiresAt").notNull(),
   generation: text("generation").notNull(),
 });
+export const voiceSettings = sqliteTable("voice_settings", {
+  id: integer("id").primaryKey(),
+  region: text("region").$type<"beijing" | "singapore">().notNull(),
+});
 export const sessions = sqliteTable(
   "sessions",
   {

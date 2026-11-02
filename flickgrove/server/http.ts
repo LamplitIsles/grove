@@ -106,6 +106,10 @@ export function createHandler(workspace: Workspace, options: Options) {
       options.service,
       origins,
       options.voice,
+      undefined,
+      options.auth && human
+        ? { auth: options.auth, human, authHeaders: request.headers }
+        : undefined,
     );
     if (voice && voice !== true) return voice;
     if (file) return file;

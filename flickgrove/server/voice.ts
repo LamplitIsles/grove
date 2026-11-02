@@ -11,17 +11,21 @@ import {
   type VoiceServerEvent,
 } from "../src/voice-contract";
 
-export const VOICE_PROVIDER =
-  "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
+export const VOICE_PROVIDERS = {
+  beijing: "wss://dashscope.aliyuncs.com/api-ws/v1/inference",
+  singapore: "wss://dashscope-intl.aliyuncs.com/api-ws/v1/inference",
+} as const;
+export type VoiceRegion = keyof typeof VOICE_PROVIDERS;
 export const VOICE_MODEL = "qwen-audio-3.1-asr-flash-streaming";
 export type VoiceOptions = {
   configPath?: string;
   // The production connector is fixed; fixtures inject only a test-owned upstream.
-  connect?: (key: string) => WebSocket;
+  connect?: (key: string, endpoint: string) => WebSocket;
   timeouts?: { startup: number; finish: number; lifetime: number };
 };
 export type VoiceSocketData = {
   key: string;
+  region: VoiceRegion;
   peerId: string;
   options: VoiceOptions;
   relay?: ReturnType<typeof voiceRelay>;
@@ -121,8 +125,8 @@ export function voiceRelay(
       ): WebSocket;
     };
     upstream = data.options.connect
-      ? data.options.connect(data.key)
-      : new Client(VOICE_PROVIDER, {
+      ? data.options.connect(data.key, VOICE_PROVIDERS[data.region])
+      : new Client(VOICE_PROVIDERS[data.region], {
           headers: { Authorization: `Bearer ${data.key}` },
         });
     data.key = "";

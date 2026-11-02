@@ -1,45 +1,104 @@
-import { open, readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import {
+  closeSync,
+  fchmodSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
+import { eq } from "drizzle-orm";
+import { voiceSettings } from "./schema";
+import type { WorkspaceStore } from "./workspace-store";
+import type { VoiceRegion } from "./voice";
 
-/** Read on every capability check and take. Never surface file paths/content. */
-export async function readVoiceKey(
-  configPath?: string,
-): Promise<{ key?: string; reason?: "voice_disabled" | "config_unavailable" }> {
-  if (!configPath) return { reason: "voice_disabled" };
+export function validVoiceKey(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value.length <= 512 &&
+    Buffer.byteLength(value) <= 1024 &&
+    !/\s|[\x00-\x1f\x7f]/u.test(value)
+  );
+}
+
+export function voiceRegion(store: WorkspaceStore): VoiceRegion {
+  const region = store.db
+    .select()
+    .from(voiceSettings)
+    .where(eq(voiceSettings.id, 1))
+    .get()?.region;
+  if (region === undefined) return "beijing";
+  if (region === "beijing" || region === "singapore") return region;
+  throw new Error("Invalid saved voice region");
+}
+
+// Each snapshot is read synchronously so it cannot interleave with a save.
+export function readVoiceKey(
+  configPath: string | undefined,
+): string | undefined {
+  if (!configPath) return;
+  let fd: number | undefined;
   try {
-    const config = Bun.TOML.parse(await readFile(configPath, "utf8")) as Record<
-      string,
-      unknown
-    >;
-    if (config.voice === undefined) return { reason: "voice_disabled" };
-    const voice = config.voice as { api_key_file?: unknown } | null;
-    if (
-      !voice ||
-      typeof voice.api_key_file !== "string" ||
-      !voice.api_key_file.trim()
-    )
-      return { reason: "config_unavailable" };
-    const file = await open(
-      resolve(dirname(configPath), voice.api_key_file),
-      "r",
-    );
-    try {
-      const stat = await file.stat();
-      if (!stat.isFile() || stat.size > 1024 || stat.mode & 0o077)
-        return { reason: "config_unavailable" };
-      const buffer = Buffer.alloc(1025);
-      const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
-      if (bytesRead > 1024) return { reason: "config_unavailable" };
-      const key = new TextDecoder("utf-8", { fatal: true })
-        .decode(buffer.subarray(0, bytesRead))
-        .trim();
-      if (!key || key.length > 512 || /\s|[\x00-\x1f\x7f]/u.test(key))
-        return { reason: "config_unavailable" };
-      return { key };
-    } finally {
-      await file.close();
-    }
+    fd = openSync(join(dirname(configPath), "voice-api-key"), "r");
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > 1024 || stat.mode & 0o077) return;
+    const buffer = Buffer.alloc(1025);
+    const size = readSync(fd, buffer, 0, buffer.length, 0);
+    if (size > 1024) return;
+    const key = new TextDecoder("utf-8", { fatal: true })
+      .decode(buffer.subarray(0, size))
+      .trim();
+    return validVoiceKey(key) ? key : undefined;
   } catch {
-    return { reason: "config_unavailable" };
+    return;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
+}
+
+export function voiceSettingsStatus(
+  store: WorkspaceStore,
+  configPath?: string,
+) {
+  return {
+    region: voiceRegion(store),
+    configured: !!readVoiceKey(configPath),
+  };
+}
+
+export function writeVoiceKey(configPath: string, key: string) {
+  const directory = dirname(configPath);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const temporary = join(directory, `.voice-key-${crypto.randomUUID()}.tmp`);
+  let created = false;
+  try {
+    const fd = openSync(temporary, "wx", 0o600);
+    created = true;
+    try {
+      fchmodSync(fd, 0o600);
+      writeFileSync(fd, key, "utf8");
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(temporary, join(directory, "voice-api-key"));
+    created = false;
+  } finally {
+    if (created)
+      try {
+        unlinkSync(temporary);
+      } catch {
+        /* preserve original error */
+      }
+  }
+}
+
+export function saveVoiceRegion(store: WorkspaceStore, region: VoiceRegion) {
+  store.db
+    .insert(voiceSettings)
+    .values({ id: 1, region })
+    .onConflictDoUpdate({ target: voiceSettings.id, set: { region } })
+    .run();
 }

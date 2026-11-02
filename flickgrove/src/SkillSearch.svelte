@@ -30,7 +30,6 @@
         {:else}<div class="skill-search-empty">{m.no_skills()}</div>{/each}
       </Command.List>
     </Command.Root>
-    {#if current}<div class="completion-description">{current.description}</div>{/if}
     <div class="skill-search-heading"><span>{m.skill_search_hint()}</span><Kbd>Tab</Kbd></div>
   </div>
 {/if}

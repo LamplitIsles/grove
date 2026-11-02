@@ -645,13 +645,6 @@ pre {
   box-shadow: 0 12px 36px #0005;
   z-index: 30;
 }
-.completion-description {
-  padding: 10px 8px 4px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--muted-foreground);
-  border-top: 1px solid var(--border);
-}
 .skill-search {
   max-height: min(480px, 60dvh);
   overflow-y: auto;
@@ -2384,6 +2377,24 @@ button.question-option {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--background);
+}
+.voice-form {
+  margin-top: 20px;
+  gap: 10px;
+}
+.voice-region-label {
+  font-weight: 600;
+}
+.voice-form > label:not(:first-child) {
+  margin-top: 8px;
+}
+.voice-key-hint,
+.voice-key-status {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+.voice-key-status {
+  margin-top: -4px;
 }
 .profile-form fieldset {
   margin: 12px 0;
