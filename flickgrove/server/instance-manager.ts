@@ -9,7 +9,7 @@ export interface InstanceManager {
 }
 export class ManagerNotStarted extends Error {}
 
-/** Only the fixed user service whose main process is this process is eligible. */
+/** Only this process's verified same-user service is eligible. */
 type ManagerHost = {
   platform: string;
   uid: number | undefined;
@@ -45,6 +45,39 @@ const host: ManagerHost = {
   },
 };
 
+function userService(cgroup: string, uid: number) {
+  if (!Number.isSafeInteger(uid) || uid < 0) return null;
+  const paths: string[] = [];
+  const lines = cgroup.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  for (const line of lines) {
+    const entry = /^(\d+):([^:]*):(\/[^\s]*)$/.exec(line);
+    if (!entry) return null;
+    if (
+      (entry[1] === "0" && entry[2] === "") ||
+      entry[2]!.split(",").includes("name=systemd")
+    )
+      paths.push(entry[3]!);
+  }
+  if (paths.length !== 1) return null;
+  const group = paths[0]!;
+  const prefix = `/user.slice/user-${uid}.slice/user@${uid}.service/`;
+  if (!group.startsWith(prefix)) return null;
+  const parts = group.slice(prefix.length).split("/");
+  const unit = parts.pop()!;
+  const safeName = /^[A-Za-z0-9_][A-Za-z0-9_.:@-]*$/;
+  if (
+    unit.length > 255 ||
+    !unit.endsWith(".service") ||
+    !safeName.test(unit) ||
+    parts.some((part) =>
+      part.length > 255 || !part.endsWith(".slice") || !safeName.test(part),
+    )
+  )
+    return null;
+  return { unit, group };
+}
+
 export function instanceManager(target: ManagerHost = host): InstanceManager {
   const uid = target.uid;
   const linux = target.platform === "linux" && uid !== undefined;
@@ -58,43 +91,79 @@ export function instanceManager(target: ManagerHost = host): InstanceManager {
         XDG_RUNTIME_DIR: `/run/user/${uid}`,
       }
     : process.env;
-  const inspectArgs = linux
-    ? [
-        "--user",
-        "show",
-        "flickgrove.service",
-        "--property=MainPID",
-        "--property=ControlGroup",
-      ]
-    : ["print", `gui/${uid}/io.guion.flickgrove`];
-  const requestArgs = linux
-    ? ["--user", "--no-block", "restart", "flickgrove.service"]
-    : ["kickstart", "-k", `gui/${uid}/io.guion.flickgrove`];
+  type Verified = { unit: string; group: string };
+  let verified: Verified | null = null;
+  async function verify(): Promise<Verified | null> {
+    if ((!linux && !mac) || !Number.isSafeInteger(target.pid) || target.pid <= 0)
+      return null;
+    try {
+      if (linux) {
+        if ((await target.busUid(bus)) !== uid) return null;
+        const service = userService(await target.cgroup(), uid!);
+        if (!service) return null;
+        const stdout = await target.inspect(
+          binary,
+          [
+            "--user",
+            "show",
+            service.unit,
+            "--property=Id",
+            "--property=MainPID",
+            "--property=ControlGroup",
+          ],
+          env,
+        );
+        const property = (name: string) => {
+          const matches = [
+            ...stdout.matchAll(new RegExp(`^${name}=(.*)$`, "gm")),
+          ];
+          return matches.length === 1 ? matches[0]![1] : null;
+        };
+        const after = userService(await target.cgroup(), uid!);
+        return property("Id") === service.unit &&
+          property("MainPID") === String(target.pid) &&
+          property("ControlGroup") === service.group &&
+          after?.unit === service.unit &&
+          after.group === service.group
+          ? service
+          : null;
+      }
+      const stdout = await target.inspect(
+        binary,
+        ["print", `gui/${uid}/io.guion.flickgrove`],
+        env,
+      );
+      const pids = [...stdout.matchAll(/^\s*pid = (\d+)\s*$/gm)];
+      return pids.length === 1 && pids[0]![1] === String(target.pid)
+        ? { unit: `gui/${uid}/io.guion.flickgrove`, group: "" }
+        : null;
+    } catch {
+      return null;
+    }
+  }
   return {
     async available() {
-      if (!linux && !mac) return false;
-      try {
-        if (linux && (await target.busUid(bus)) !== uid) return false;
-        const stdout = await target.inspect(binary, inspectArgs, env);
-        if (linux) {
-          const pid = /^MainPID=(\d+)$/m.exec(stdout)?.[1];
-          const group = /^ControlGroup=(\/.+)$/m.exec(stdout)?.[1];
-          const current = await target.cgroup();
-          return (
-            pid === String(target.pid) &&
-            !!group &&
-            group.endsWith("/flickgrove.service") &&
-            current.split("\n").some((line) => line.endsWith(`:${group}`))
-          );
-        }
-        const pids = [...stdout.matchAll(/^\s*pid = (\d+)\s*$/gm)];
-        return pids.length === 1 && pids[0]![1] === String(target.pid);
-      } catch {
-        return false;
-      }
+      verified = await verify();
+      return verified !== null;
     },
-    request() {
-      return target.spawn(binary, requestArgs, env);
+    async request() {
+      const previous = verified;
+      verified = null;
+      if (!previous) throw new ManagerNotStarted();
+      const current = await verify();
+      if (
+        !current ||
+        current.unit !== previous.unit ||
+        current.group !== previous.group
+      )
+        throw new ManagerNotStarted();
+      await target.spawn(
+        binary,
+        linux
+          ? ["--user", "--no-block", "restart", current.unit]
+          : ["kickstart", "-k", current.unit],
+        env,
+      );
     },
   };
 }

@@ -26,17 +26,18 @@ test("fixed manager accepts only this uid and process and sends fixed arguments"
   const calls: string[][] = [];
   let busUid = 1000,
     pid = 42,
-    group = "/user.slice/flickgrove.service";
+    group = "/user.slice/user-1000.slice/user@1000.service/app.slice/flickgrove.service";
   const host = {
     platform: "linux",
     uid: 1000,
     pid: 42,
     inspect: async (_binary: string, args: string[]) => {
       calls.push(args);
-      return `MainPID=${pid}\nControlGroup=${group}\n`;
+      return `Id=flickgrove.service\nMainPID=${pid}\nControlGroup=${group}\n`;
     },
     busUid: async () => busUid,
-    cgroup: async () => "0::/user.slice/flickgrove.service\n",
+    cgroup: async () =>
+      "0::/user.slice/user-1000.slice/user@1000.service/app.slice/flickgrove.service\n",
     spawn: async (_binary: string, args: string[]) => {
       calls.push(args);
     },
