@@ -25,6 +25,7 @@ const sessionKeys = [
   "serviceTier",
   "turnId",
   "turnEnded",
+  "piMemberTerminalVerified",
   "followUpPaused",
   "stop",
   "closeRequest",
@@ -98,6 +99,7 @@ function sessionRow(a: RuntimeAgent) {
     recovery: pick(a, [
       "turnId",
       "turnEnded",
+      "piMemberTerminalVerified",
       "stop",
       "closeRequest",
       "followUpPaused",

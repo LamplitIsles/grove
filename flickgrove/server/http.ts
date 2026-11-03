@@ -150,14 +150,25 @@ export function createHandler(workspace: Workspace, options: Options) {
         }
         if (
           request.method === "POST" &&
-          url.pathname === "/api/instance/mcp/reload"
-        )
-          return json(await options.instance.reload());
-        if (
-          request.method === "POST" &&
-          url.pathname === "/api/instance/restart"
-        )
-          return json(await options.instance.restart());
+          (url.pathname === "/api/instance/mcp/reload" ||
+            url.pathname === "/api/instance/restart")
+        ) {
+          const body = await request.text();
+          const confirmation = body
+            ? z
+                .object({
+                  confirmBusy: z.literal(true),
+                  instanceId: z.string().min(1),
+                })
+                .strict()
+                .parse(JSON.parse(body))
+            : undefined;
+          return json(
+            url.pathname.endsWith("/reload")
+              ? await options.instance.reload(confirmation)
+              : await options.instance.restart(confirmation),
+          );
+        }
         return json({ error: "Action not found" }, 404);
       }
       if (mcp) {

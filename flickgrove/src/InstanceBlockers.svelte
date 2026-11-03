@@ -16,7 +16,6 @@
     retrying: m.instance_retrying,
     close_requested: m.instance_close_requested,
     follow_up_inspection: m.instance_follow_up_inspection,
-    question: m.instance_question,
     delivery_waiting: m.instance_delivery_waiting,
     delivery_queued: m.instance_delivery_queued,
     delivery_sending: m.instance_delivery_sending,

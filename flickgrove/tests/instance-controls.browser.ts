@@ -12,12 +12,15 @@ for (const width of [1440, 390]) {
       id: "process-one",
       version: "a1b2c3d",
       busy: false,
+      canConfirmBusy: false,
       restartAvailable: true,
       sessions: [],
       instanceReasons: [],
     };
     let refuseRestart = false;
     let reloadFailure = 0;
+    const reloadBodies: (string | null)[] = [],
+      restartBodies: (string | null)[] = [];
     let reloads = 0,
       restarts = 0;
     await page.route("**/api/instance**", async (route) => {
@@ -25,6 +28,7 @@ for (const width of [1440, 390]) {
       if (path === "/api/instance") return route.fulfill({ json: instance });
       if (path === "/api/instance/mcp/reload") {
         reloads++;
+        reloadBodies.push(route.request().postData());
         if (reloadFailure)
           return route.fulfill({
             status: reloadFailure,
@@ -44,6 +48,7 @@ for (const width of [1440, 390]) {
       }
       if (path === "/api/instance/restart") {
         restarts++;
+        restartBodies.push(route.request().postData());
         if (refuseRestart)
           return route.fulfill({
             status: 400,
@@ -92,7 +97,9 @@ for (const width of [1440, 390]) {
     await settingsButton.click();
     await expect(page.locator(".settings-modal")).toHaveCSS("opacity", "1");
     await page.getByRole("button", { name: "Grove", exact: true }).click();
-    const reload = page.getByRole("button", { name: "Reload MCP" });
+    const reload = page
+      .locator(".instance-actions")
+      .getByRole("button", { name: "Reload MCP" });
     const restart = page.locator(".instance-actions").getByRole("button", {
       name: "Restart Grove",
       exact: true,
@@ -117,12 +124,16 @@ for (const width of [1440, 390]) {
       "Creating session",
     );
     await expect(
-      page.getByRole("alert").filter({ hasText: /Wait for all sessions/ }),
+      page
+        .getByRole("alert")
+        .filter({ hasText: /Work or instance status changed/ }),
     ).toBeVisible();
     instance = { ...instance, busy: false, instanceReasons: [] };
     await expect(reload).toBeEnabled({ timeout: 12000 });
     await expect(
-      page.getByRole("alert").filter({ hasText: /Wait for all sessions/ }),
+      page
+        .getByRole("alert")
+        .filter({ hasText: /Work or instance status changed/ }),
     ).toHaveCount(0);
     reloadFailure = 503;
     await reload.click();
@@ -146,7 +157,7 @@ for (const width of [1440, 390]) {
           title:
             "A long session name that should fit in the available space alpha",
           role: "orc",
-          reasons: ["working", "question", "delivery_uncertain"],
+          reasons: ["working", "delivery_uncertain"],
         },
         {
           id: "fixture:orc2",
@@ -173,7 +184,7 @@ for (const width of [1440, 390]) {
     await expect(rows.nth(0)).toContainText("A long session name");
     await expect(rows.nth(0)).toContainText("Orc");
     await expect(rows.nth(0)).toContainText(
-      "Working · Awaiting an answer · Message delivery unconfirmed",
+      "Working · Message delivery unconfirmed",
     );
     for (const [index, suffix] of [
       [0, "alpha"],
@@ -196,7 +207,52 @@ for (const width of [1440, 390]) {
     await page.screenshot({ path: testInfo.outputPath("blockers.png") });
     instance = {
       ...instance,
-      sessions: instance.sessions.slice(2),
+      canConfirmBusy: true,
+      sessions: instance.sessions.slice(0, 2),
+      instanceReasons: [],
+    };
+    await page.getByRole("button", { name: "Grove", exact: true }).click();
+    await expect(reload).toBeEnabled();
+    await expect(restart).toBeEnabled();
+    await reload.click();
+    const reloadDialog = page.getByRole("dialog", { name: "Reload MCP?" });
+    await expect(reloadDialog).toContainText(
+      "Work in these sessions may be interrupted",
+    );
+    await expect(reloadDialog).toContainText("alpha");
+    await reloadDialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(reloadDialog).toBeHidden();
+    expect(reloads).toBe(4);
+    await reload.click();
+    instance = { ...instance, id: "process-changed" };
+    await expect(
+      reloadDialog.getByRole("button", { name: "Reload MCP" }),
+    ).toBeDisabled({ timeout: 12000 });
+    await expect(reloadDialog.getByRole("alert")).toContainText(
+      "Work or instance status changed",
+    );
+    await reloadDialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(reloadDialog).toBeHidden();
+    instance = { ...instance, id: "process-one" };
+    await page.getByRole("button", { name: "Grove", exact: true }).click();
+    await reload.click();
+    await reloadDialog.getByRole("button", { name: "Reload MCP" }).click();
+    await expect(reloadDialog).toBeHidden();
+    expect(JSON.parse(reloadBodies.at(-1)!)).toEqual({
+      confirmBusy: true,
+      instanceId: "process-one",
+    });
+    instance = {
+      ...instance,
+      canConfirmBusy: false,
+      sessions: [
+        {
+          id: "fixture:worker",
+          title: "Background worker",
+          role: "worker",
+          reasons: ["opening", "queue"],
+        },
+      ],
       instanceReasons: [],
     };
     await expect(rows).toHaveCount(1, { timeout: 12000 });
@@ -215,15 +271,42 @@ for (const width of [1440, 390]) {
       .getByRole("button", { name: "Restart Grove", exact: true })
       .click();
     await expect(
-      page.getByRole("alert").filter({ hasText: /Wait for all sessions/ }),
+      page
+        .getByRole("alert")
+        .filter({ hasText: /Work or instance status changed/ }),
     ).toBeVisible();
     instance = { ...instance, busy: false, instanceReasons: [] };
     await expect(restart).toBeEnabled({ timeout: 12000 });
     await expect(
-      page.getByRole("alert").filter({ hasText: /Wait for all sessions/ }),
+      page
+        .getByRole("alert")
+        .filter({ hasText: /Work or instance status changed/ }),
     ).toHaveCount(0);
     refuseRestart = false;
+    instance = {
+      ...instance,
+      busy: true,
+      canConfirmBusy: true,
+      sessions: [
+        {
+          id: "fixture:orc",
+          title: "Active session",
+          role: "orc",
+          reasons: ["working"],
+        },
+      ],
+    };
+    await page.getByRole("button", { name: "Grove", exact: true }).click();
+    await expect(restart).toBeEnabled();
     await restart.click();
+    await expect(dialog).toContainText("Active session");
+    await expect(dialog).toContainText(
+      "Work in these sessions may be interrupted",
+    );
+    await expect(dialog).toHaveCSS("opacity", "1");
+    await page.screenshot({
+      path: testInfo.outputPath("confirm-busy-restart.png"),
+    });
     await dialog
       .getByRole("button", { name: "Restart Grove", exact: true })
       .click();
@@ -231,12 +314,22 @@ for (const width of [1440, 390]) {
     await expect(page.getByText(/result is not confirmed/)).toBeVisible();
     await expect(restart).toBeDisabled();
     expect(restarts).toBe(2);
+    expect(JSON.parse(restartBodies.at(-1)!)).toEqual({
+      confirmBusy: true,
+      instanceId: "process-one",
+    });
     await page.reload();
     await expect(page.locator(".settings-modal")).toBeVisible();
     await page.getByRole("button", { name: "Grove", exact: true }).click();
     await expect(page.getByText(/result is not confirmed/)).toBeVisible();
     expect(restarts).toBe(2);
-    instance = { ...instance, id: "process-two" };
+    instance = {
+      ...instance,
+      id: "process-two",
+      busy: false,
+      canConfirmBusy: false,
+      sessions: [],
+    };
     await page.getByRole("button", { name: "Check status" }).click();
     await expect(page.getByText("Grove restarted.")).toBeVisible();
     await expect(restart).toBeEnabled();

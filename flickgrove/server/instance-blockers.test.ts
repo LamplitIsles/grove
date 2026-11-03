@@ -121,13 +121,7 @@ test("authenticated instance reasons use visible qualified identities and coexis
       role: visible.role,
     });
     expect(body.sessions[0]!.reasons).toEqual(
-      expect.arrayContaining([
-        "working",
-        "turn",
-        "question",
-        "delivery_waiting",
-        "delivery_uncertain",
-      ]),
+      expect.arrayContaining(["working", "turn", "delivery_uncertain"]),
     );
     expect(body.instanceReasons).toEqual([]);
     const serialized = JSON.stringify(body);
@@ -197,6 +191,7 @@ test("in-flight opening and queue are attributed while creation is instance-wide
     await openStarted;
     let status = await f.instance.status();
     expect(status.busy).toBe(true);
+    expect(status.canConfirmBusy).toBe(false);
     expect(status.instanceReasons).toContain("creating");
     expect(status.sessions).toHaveLength(1);
     expect(status.sessions[0]!.reasons).toContain("opening");
@@ -206,7 +201,9 @@ test("in-flight opening and queue are attributed while creation is instance-wide
     await readStarted;
     status = await f.instance.status();
     expect(status.sessions[0]!.reasons).toContain("queue");
-    expect(() => f.app.beginRestart()).toThrow("active or pending");
+    expect(status.canConfirmBusy).toBe(false);
+    expect(() => f.app.beginMaintenance()).toThrow("active or pending");
+    expect(() => f.app.beginMaintenance(true)).toThrow("active or pending");
     releaseRead();
     await reconcile;
     status = await f.instance.status();
@@ -241,7 +238,7 @@ test("status samples reasons and busy together after manager availability comple
     expect(
       status.sessions.length + status.instanceReasons.length,
     ).toBeGreaterThan(0);
-    expect(() => f.app.beginRestart()).toThrow("active or pending");
+    expect(() => f.app.beginMaintenance()).toThrow("active or pending");
     let releaseSecond!: (value: boolean) => void;
     const secondGate = new Promise<boolean>((resolve) => {
       releaseSecond = resolve;
@@ -271,12 +268,12 @@ test("maintenance barrier is an instance reason without a fabricated session", a
   const f = fixture();
   try {
     await f.app.createOrc("alpha");
-    f.app.beginRestart();
+    f.app.beginMaintenance();
     const status = await f.instance.status();
     expect(status.busy).toBe(true);
     expect(status.sessions).toEqual([]);
     expect(status.instanceReasons).toEqual(["maintenance"]);
-    f.app.cancelRestart();
+    f.app.endMaintenance();
     expect((await f.instance.status()).busy).toBe(false);
   } finally {
     f.cleanup();
@@ -397,6 +394,8 @@ test("tree actions and close are attributed to their real owner", async () => {
     expect(state.sessions.find((s) => s.id === a.id)?.reasons).toContain(
       "tree_action",
     );
+    expect(state.canConfirmBusy).toBe(false);
+    expect(() => f.app.beginMaintenance(true)).toThrow("active or pending");
     expect(state.instanceReasons).not.toContain("tree_action");
     releaseModels();
     await updating;
@@ -420,6 +419,8 @@ test("tree actions and close are attributed to their real owner", async () => {
     expect(state.sessions.find((s) => s.id === a.id)?.reasons).toContain(
       "tree_closing",
     );
+    expect(state.canConfirmBusy).toBe(false);
+    expect(() => f.app.beginMaintenance(true)).toThrow("active or pending");
     expect(state.busy).toBe(true);
     releaseClose();
     await closing;
@@ -474,13 +475,9 @@ test("automatic follow-up inspection retains unknown admission and blocks mainte
     const status = await f.instance.status();
     expect(status.busy).toBe(true);
     expect(status.sessions[0]!.reasons).toEqual(
-      expect.arrayContaining([
-        "queue",
-        "delivery_uncertain",
-        "delivery_waiting",
-      ]),
+      expect.arrayContaining(["queue", "delivery_uncertain"]),
     );
-    expect(() => f.app.beginRestart()).toThrow("active or pending");
+    expect(() => f.app.beginMaintenance()).toThrow("active or pending");
     expect(
       f.runtime.inputs.filter((input) => input.clientId === "unknown"),
     ).toHaveLength(1);

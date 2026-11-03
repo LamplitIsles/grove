@@ -50,6 +50,7 @@
   let settingsPage = $state<"account" | "users" | "models" | "voice" | "grove">("account");
   let instance = $state<InstanceStatus | null>(null), instanceError = $state(""), instanceNotice = $state(""), instanceStatusError = $state(""), instanceAction = $state(false);
   let instanceBusyError = false;
+  let maintenanceAction = $state<"reload" | "restart">("restart"), confirmationInstance = $state<string | null>(null);
   let restartPending = $state<string | null>(null), instanceSequence = 0;
   const restartKey = "flickgrove.restart.pending";
   function rememberRestart(id: string | null) {
@@ -68,12 +69,25 @@
       if (restartPending && next.id !== restartPending) { rememberRestart(null); toast.success(m.restart_completed()); }
     } catch { if (sequence === instanceSequence) instanceStatusError = m.instance_load_failed(); }
   }
-  async function reloadMcp() {
+  function beginMaintenance(action: "reload" | "restart") {
+    if (!connected || !instance || instanceStatusError || instanceAction || restartPending || (instance.busy && !instance.canConfirmBusy) || (action === "restart" && !instance.restartAvailable)) return;
+    if (action === "reload" && !instance.busy) { void reloadMcp(); return; }
+    maintenanceAction = action; confirmationInstance = instance.id;
+    setSurface("maintenance-confirm", true);
+  }
+  function confirmMaintenance() {
+    if (!connected || !instance || instance.id !== confirmationInstance || instanceStatusError || instanceAction || restartPending || (instance.busy && !instance.canConfirmBusy) || (maintenanceAction === "restart" && !instance.restartAvailable)) return;
+    const confirmedInstance = instance.busy ? instance.id : undefined;
+    void back();
+    if (maintenanceAction === "reload") void reloadMcp(confirmedInstance);
+    else void restartGrove(confirmedInstance);
+  }
+  async function reloadMcp(confirmedInstance?: string) {
     if (instanceAction || restartPending) return;
     instanceAction = true; instanceError = ""; instanceBusyError = false; instanceNotice = "";
     try {
-      const response = await fetch("/api/instance/mcp/reload", {method:"POST"});
-      if (response.status === 400) { instanceBusyError = true; instanceError = m.restart_wait_idle(); return; }
+      const response = await fetch("/api/instance/mcp/reload", {method:"POST", ...(confirmedInstance ? {headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmBusy:true,instanceId:confirmedInstance})} : {})});
+      if (response.status === 400) { instanceBusyError = true; instanceError = m.instance_changed_reconfirm(); return; }
       if (!response.ok) throw new Error();
       const result = await response.json() as InstanceReloadResult;
       if (result.results.some(item => item.status === "deferred")) instanceNotice = m.mcp_reload_deferred();
@@ -82,14 +96,13 @@
     } catch { instanceError = m.mcp_reload_failed(); }
     finally { instanceAction = false; void refreshInstance(); }
   }
-  async function restartGrove() {
+  async function restartGrove(confirmedInstance?: string) {
     if (!instance || instanceAction || restartPending) return;
     const original = instance.id;
     rememberRestart(original); instanceAction = true; instanceError = ""; instanceBusyError = false;
-    void back();
     try {
-      const response = await fetch("/api/instance/restart", {method:"POST"});
-      if (response.status >= 400 && response.status < 500) { rememberRestart(null); instanceBusyError = response.status === 400; instanceError = instanceBusyError ? m.restart_wait_idle() : m.instance_load_failed(); }
+      const response = await fetch("/api/instance/restart", {method:"POST", ...(confirmedInstance ? {headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmBusy:true,instanceId:confirmedInstance})} : {})});
+      if (response.status >= 400 && response.status < 500) { rememberRestart(null); instanceBusyError = response.status === 400; instanceError = instanceBusyError ? m.instance_changed_reconfirm() : m.instance_load_failed(); }
       else if (response.ok && (await response.json() as InstanceRestartResult).status === "unavailable") { rememberRestart(null); instanceError = m.restart_unavailable(); }
     } catch { /* A disconnected response cannot prove whether restart was requested. */ }
     finally { instanceAction = false; void refreshInstance(); }
@@ -790,17 +803,19 @@
             <VoiceSettings peerId={snapshot.entryId ?? ""} {connected} />
           {:else if settingsPage === "grove"}
             <section class="settings-section instance-settings"><h2>{m.grove_settings()}</h2>
-              <div class="instance-actions"><Button variant="outline" size="sm" disabled={!connected || !instance || !!instanceStatusError || instance.busy || instanceAction || !!restartPending} onclick={reloadMcp}>{instanceAction && !restartPending ? m.reloading_mcp() : m.reload_mcp()}</Button><Button variant="outline" size="sm" disabled={!connected || !instance || !!instanceStatusError || instance.busy || !instance.restartAvailable || instanceAction || !!restartPending} onclick={() => setSurface("restart-grove", true)}>{m.restart_grove()}</Button></div>
+              <div class="instance-actions"><Button variant="outline" size="sm" disabled={!connected || !instance || !!instanceStatusError || (instance.busy && !instance.canConfirmBusy) || instanceAction || !!restartPending} onclick={() => beginMaintenance("reload")}>{instanceAction && !restartPending ? m.reloading_mcp() : m.reload_mcp()}</Button><Button variant="outline" size="sm" disabled={!connected || !instance || !!instanceStatusError || (instance.busy && !instance.canConfirmBusy) || !instance.restartAvailable || instanceAction || !!restartPending} onclick={() => beginMaintenance("restart")}>{m.restart_grove()}</Button></div>
               {#if restartPending}<p role="status">{m.restart_unknown()} <Button variant="ghost" size="sm" disabled={!connected} onclick={refreshInstance}>{m.restart_check()}</Button></p>
-              {:else if instance?.busy}<p role="status">{m.restart_wait_idle()}</p><InstanceBlockers sessions={instance.sessions} instanceReasons={instance.instanceReasons} />
+              {:else if instance?.busy}<p role="status">{instance.canConfirmBusy ? m.instance_busy_confirmable() : m.restart_wait_idle()}</p><InstanceBlockers sessions={instance.sessions} instanceReasons={instance.instanceReasons} />
               {:else if instance && !instance.restartAvailable}<p role="status">{m.restart_unavailable()}</p>{/if}
               {#if instanceError}<p class="inline-error" role="alert">{instanceError}</p>{/if}
               {#if instanceNotice}<p role="status">{instanceNotice}</p>{/if}
               {#if instanceStatusError}<p class="inline-error" role="alert">{instanceStatusError}</p>{/if}
-              <Dialog.Root open={navigation.surfaces.includes("restart-grove")} onOpenChange={value => { if (!value) setSurface("restart-grove", false); }}>
+              <Dialog.Root open={navigation.surfaces.includes("maintenance-confirm")} onOpenChange={value => { if (!value) setSurface("maintenance-confirm", false); }}>
                 <Dialog.Content class="grove-dialog signout-dialog" showCloseButton={false} onEscapeKeydown={event => { event.preventDefault(); event.stopPropagation(); void back(); }}>
-                  <Dialog.Header><Dialog.Title>{m.restart_grove_confirm()}</Dialog.Title><Dialog.Description>{m.restart_grove_help()}</Dialog.Description></Dialog.Header>
-                  <Dialog.Footer class="signout-actions"><Button variant="ghost" size="sm" onclick={() => back()}>{m.cancel()}</Button><Button variant="default" size="sm" disabled={!connected || !instance || !!instanceStatusError || instance.busy || !instance.restartAvailable || instanceAction || !!restartPending} onclick={restartGrove}>{m.restart_grove()}</Button></Dialog.Footer>
+                  <Dialog.Header><Dialog.Title>{maintenanceAction === "reload" ? m.reload_mcp_confirm() : m.restart_grove_confirm()}</Dialog.Title><Dialog.Description>{#if maintenanceAction === "restart"}{m.restart_grove_help()}{/if}{#if instance?.busy}{maintenanceAction === "restart" ? " " : ""}{m.instance_busy_warning()}{/if}</Dialog.Description></Dialog.Header>
+                  {#if instance?.busy}<InstanceBlockers sessions={instance.sessions} instanceReasons={instance.instanceReasons} />{/if}
+                  {#if instance && instance.id !== confirmationInstance}<p class="inline-error" role="alert">{m.instance_changed_reconfirm()}</p>{/if}
+                  <Dialog.Footer class="signout-actions"><Button variant="ghost" size="sm" onclick={() => back()}>{m.cancel()}</Button><Button variant="default" size="sm" disabled={!connected || !instance || instance.id !== confirmationInstance || !!instanceStatusError || (instance.busy && !instance.canConfirmBusy) || (maintenanceAction === "restart" && !instance.restartAvailable) || instanceAction || !!restartPending} onclick={confirmMaintenance}>{maintenanceAction === "reload" ? m.reload_mcp() : m.restart_grove()}</Button></Dialog.Footer>
                 </Dialog.Content>
               </Dialog.Root>
             </section>

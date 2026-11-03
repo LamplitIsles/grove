@@ -14,7 +14,7 @@ import type { RuntimeAgent, ExecutionSettings } from "./runtime";
 export type RecoveryContext = Pick<
   RuntimeAgent,
   "turnId" | "turnEnded" | "stop" | "closeRequest"
-> & { followUpPaused?: boolean };
+> & { followUpPaused?: boolean; piMemberTerminalVerified?: true };
 export type TaskContext = Pick<Agent, "reviewTarget" | "researchQuestion">;
 export type SessionDiagnostics = Pick<
   Agent,

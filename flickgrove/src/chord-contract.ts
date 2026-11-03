@@ -214,6 +214,7 @@ const agent = z.object({
   effort: z.string(),
   serviceTier: z.string(),
   state: z.enum(["idle", "working", "stopping", "error"]),
+  workUnconfirmed: z.boolean().optional(),
   closed: z.boolean(),
   questions: z.array(question),
   unansweredCount: z.number().optional(),

@@ -140,16 +140,18 @@ test("work in progress and asynchronous creation prevent instance maintenance", 
     expect(app.instanceBusy()).toBe(true);
     expect(app.instanceActivity()).toMatchObject({
       busy: true,
+      canConfirmBusy: false,
       sessions: [],
       instanceReasons: ["creating"],
     });
     await expect(app.reloadMcp()).rejects.toThrow("active or pending");
+    await expect(app.reloadMcp(true)).rejects.toThrow("active or pending");
     delayed = false;
     release();
     const agent = await creating;
     await app.send(agent.id, "active", "operation");
     expect(app.instanceBusy()).toBe(true);
-    expect(() => app.beginRestart()).toThrow("active or pending");
+    expect(() => app.beginMaintenance()).toThrow("active or pending");
   } finally {
     app.dispose();
     rmSync(dir, { recursive: true, force: true });
@@ -390,7 +392,7 @@ test("unverified failure and disconnected outcomes remain busy", async () => {
       expect(app.detail(orc.id).state).toBe("error");
       expect(app.detail(orc.id).turnId).toBeUndefined();
       expect(app.instanceBusy()).toBe(true);
-      expect(() => app.beginRestart()).toThrow("active or pending");
+      expect(() => app.beginMaintenance()).toThrow("active or pending");
     } finally {
       app.dispose();
       rmSync(directory, { recursive: true, force: true });
@@ -423,7 +425,9 @@ test("active and disconnected Codex Worker keeps an idle owner busy", async () =
     });
     expect(app.detail(worker.id).state).toBe("error");
     expect(app.detail(worker.id).turnId).toBeUndefined();
+    expect(app.detail(worker.id).workUnconfirmed).toBe(true);
     expect(app.instanceBusy()).toBe(true);
+    expect(app.instanceActivity().canConfirmBusy).toBe(true);
   } finally {
     app.dispose();
     rmSync(directory, { recursive: true, force: true });
@@ -474,7 +478,7 @@ test("an unverified Pi completion remains busy even when its display state is id
   }
 });
 
-test("a confirmed failure does not hide an unknown delivery or unanswered question", async () => {
+test("a confirmed failure retains unknown delivery protection but permits an unanswered question", async () => {
   for (const pending of ["unknown", "question"] as const) {
     const directory = mkdtempSync(join(tmpdir(), "grove-failure-pending-"));
     const runtime = new FakeRuntime();
@@ -513,7 +517,7 @@ test("a confirmed failure does not hide an unknown delivery or unanswered questi
         verified: true,
       });
       expect(app.detail(orc.id).state).toBe("error");
-      expect(app.instanceBusy()).toBe(true);
+      expect(app.instanceBusy()).toBe(pending === "unknown");
       if (pending === "unknown") {
         expect(
           app
@@ -588,6 +592,7 @@ test("unverified Pi Worker failure remains busy after recovery", async () => {
     expect(after.inputs).toHaveLength(0);
     expect(app.detail(worker.id).state).toBe("error");
     expect(app.detail(worker.id).turnId).toBeUndefined();
+    expect(app.detail(worker.id).workUnconfirmed).toBe(true);
     expect(app.instanceBusy()).toBe(true);
   } finally {
     app?.dispose();

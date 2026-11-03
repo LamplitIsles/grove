@@ -10,6 +10,7 @@ import type { ServerWebSocket } from "bun";
 import { groveWebsocket, type SocketData } from "../server/chord-socket";
 import { FakeRuntime } from "../server/testing";
 import { GroveAuth } from "../server/auth";
+import { InstanceControls } from "../server/instance-controls";
 const directory = await mkdtemp(join(tmpdir(), "grove-file-browser-"));
 const assets = resolve(
   process.env.PREVIEW_ASSETS ?? "../.scratch/flickgrove-browser/assets",
@@ -176,6 +177,13 @@ async function unit(name: string, color: string, origin: () => string) {
     status: "completed",
   });
   await app.tool(owner.token, "worker_close", { workerId: worker.id });
+  if (process.env.PREVIEW_INSTANCE && app.detail(agent.id).turnId)
+    runtime.emit(agent.id, {
+      type: "completed",
+      turnId: app.detail(agent.id).turnId!,
+      status: "completed",
+      verified: true,
+    });
   const service = new HostService(app, {
     directory: join(cwd, "peer"),
     name,
@@ -222,6 +230,12 @@ async function unit(name: string, color: string, origin: () => string) {
     assets,
     origin,
     auth,
+    instance: process.env.PREVIEW_INSTANCE
+      ? new InstanceControls(app, null, {
+          available: async () => true,
+          request: async () => {},
+        })
+      : undefined,
     voice: process.env.PREVIEW_VOICE
       ? { configPath: join(cwd, "config.toml") }
       : undefined,
@@ -586,6 +600,66 @@ const server = Bun.serve({
       return Response.json({
         local: local.service.identity.id + ":" + local.agent.id,
       });
+    if (
+      url.pathname === "/fixture/maintenance-state" &&
+      request.method === "POST"
+    ) {
+      const { kind } = await request.json();
+      const agent = await local.app.createOrc("fixture", defaults);
+      const title =
+        kind === "question"
+          ? "Waiting for an answer"
+          : kind === "unconfirmed"
+            ? "Unconfirmed work"
+            : kind === "stop"
+              ? "Unconfirmed stop"
+              : "Finished with an error";
+      await local.app.rename(agent.id, title);
+      await local.app.send(agent.id, "Start", crypto.randomUUID());
+      const turnId = local.app.detail(agent.id).turnId!;
+      if (kind === "question") {
+        local.runtime.emit(agent.id, {
+          type: "item",
+          turnId,
+          item: {
+            id: "question-item",
+            type: "agentMessage",
+            delivery: "async",
+            questions: [
+              { question: "Which option?", options: [{ label: "First" }] },
+            ],
+          },
+        });
+        local.runtime.emit(agent.id, {
+          type: "completed",
+          turnId,
+          status: "completed",
+          verified: true,
+        });
+      } else if (kind === "unconfirmed") {
+        local.runtime.emit(agent.id, {
+          type: "disconnected",
+          error: "Connection interrupted",
+        });
+      } else if (kind === "stop") {
+        local.runtime.interruptOverride = async () => {
+          throw new Error("Stop result unavailable");
+        };
+        await local.app.stop(agent.id, turnId);
+        local.runtime.interruptOverride = undefined;
+      } else if (kind === "error") {
+        local.runtime.emit(agent.id, {
+          type: "completed",
+          turnId,
+          status: "failed",
+          verified: true,
+          error: "Finished with an error",
+        });
+      } else {
+        return new Response("Unknown kind", { status: 400 });
+      }
+      return Response.json({ id: local.service.identity.id + ":" + agent.id });
+    }
     if (url.pathname === "/fixture/change" && request.method === "POST") {
       const body = await request.json();
       if (body.question) {

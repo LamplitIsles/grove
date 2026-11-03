@@ -206,6 +206,8 @@ export interface Agent {
   model: string;
   effort: Effort;
   state: WorkState;
+  /** The execution or stop has not yet been confirmed to have ended. */
+  workUnconfirmed?: boolean;
   execution?: { kind: "capacity" | "error"; retrying: boolean };
   workingSince?: number;
   /** Most recent observed work in this Orc's tree, in Unix milliseconds. */
@@ -262,7 +264,6 @@ export type InstanceSessionReason =
   | "retrying"
   | "close_requested"
   | "follow_up_inspection"
-  | "question"
   | "delivery_waiting"
   | "delivery_queued"
   | "delivery_sending"
@@ -289,6 +290,7 @@ export type InstanceStatus = {
   id: string;
   version: string | null;
   busy: boolean;
+  canConfirmBusy: boolean;
   restartAvailable: boolean;
   sessions: Array<{
     id: string;

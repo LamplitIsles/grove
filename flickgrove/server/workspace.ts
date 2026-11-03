@@ -108,17 +108,19 @@ export class Workspace {
       instanceReasons.push("tree_closing");
     if ([...this.closingChildren].some((id) => !openIds.has(id)))
       instanceReasons.push("child_closing");
+    if ([...this.stopRequests].some((id) => !openIds.has(id)))
+      instanceReasons.push("queue");
     for (const a of this.state.agents) {
       if (a.closed) continue;
       const reasons = new Set<InstanceSessionReason>();
-      // Codex members only receive native terminal notifications; a Pi
-      // member's error must remain blocking even when turnEnded was set.
       if (
         a.state !== "idle" &&
         !(
           a.state === "error" &&
           a.turnEnded === true &&
-          (a.role === "orc" || (a.backend ?? "codex") === "codex")
+          (a.role === "orc" ||
+            (a.backend ?? "codex") === "codex" ||
+            a.piMemberTerminalVerified === true)
         )
       ) {
         reasons.add(
@@ -136,18 +138,18 @@ export class Workspace {
           a.stop.status === "pending" ? "stop_pending" : "stop_unknown",
         );
       }
+      if (this.stopRequests.has(a.id)) reasons.add("stop_pending");
       if (a.execution?.retrying) reasons.add("retrying");
       if (a.closeRequest) reasons.add("close_requested");
       if (followUpInspectionCandidate(a)) reasons.add("follow_up_inspection");
-      for (const q of a.questions)
-        if (q.state !== "answered") reasons.add("question");
       for (const d of a.deliveries)
         if (
-          pendingFollowUp(d) ||
-          ["waiting", "queued", "sending", "uncertain"].includes(d.status) ||
+          (d.status === "waiting" &&
+            !(d.mode === "follow_up" && a.followUpPaused)) ||
+          ["queued", "sending", "uncertain"].includes(d.status) ||
           (d.status === "failed" &&
-            d.source !== "user" &&
-            d.source !== "question")
+            (d.mode === "follow_up" ||
+              (d.source !== "user" && d.source !== "question")))
         ) {
           if (d.status === "waiting") reasons.add("delivery_waiting");
           else if (d.status === "queued") reasons.add("delivery_queued");
@@ -168,16 +170,29 @@ export class Workspace {
           reasons: [...reasons],
         });
     }
+    const busy = sessions.length > 0 || instanceReasons.length > 0;
+    const hardBusy =
+      !!this.instanceAction ||
+      !!this.creating ||
+      this.disposed ||
+      !!this.writeFailure ||
+      !!this.opening.size ||
+      !!this.queues.size ||
+      !!this.treeActions.size ||
+      !!this.closingTrees.size ||
+      !!this.closingChildren.size ||
+      !!this.stopRequests.size;
     return {
-      busy: sessions.length > 0 || instanceReasons.length > 0,
+      busy,
+      canConfirmBusy: busy && !hardBusy,
       sessions,
       instanceReasons,
     };
   }
-  async reloadMcp(): Promise<import("../src/contracts").InstanceReloadResult> {
-    if (this.instanceBusy())
-      throw new Error("Instance has active or pending work");
-    this.instanceAction = true;
+  async reloadMcp(
+    confirmBusy = false,
+  ): Promise<import("../src/contracts").InstanceReloadResult> {
+    this.beginMaintenance(confirmBusy);
     try {
       const results: import("../src/contracts").InstanceReloadResult["results"] =
         [];
@@ -191,6 +206,10 @@ export class Workspace {
       for (const [id, handle] of this.handles) {
         const agent = this.state.agents.find((a) => a.id === id);
         if (!agent || agent.closed || agent.backend !== "pi") continue;
+        if (this.disposed || this.writeFailure) {
+          results.push({ backend: "pi", session: id, status: "deferred" });
+          continue;
+        }
         try {
           if (!handle.reloadMcp) throw new Error();
           const result = await handle.reloadMcp();
@@ -200,7 +219,11 @@ export class Workspace {
             status: result.issues.length ? "partial" : "applied",
           });
         } catch {
-          results.push({ backend: "pi", session: id, status: "failed" });
+          results.push({
+            backend: "pi",
+            session: id,
+            status: "partial_or_unknown",
+          });
         }
       }
       for (const a of this.state.agents) {
@@ -209,16 +232,36 @@ export class Workspace {
       }
       return { results };
     } finally {
-      this.instanceAction = false;
+      this.endMaintenance();
     }
   }
-  beginRestart() {
-    if (this.instanceBusy())
+  beginMaintenance(confirmBusy = false) {
+    const activity = this.instanceActivity();
+    if (activity.busy && !(confirmBusy && activity.canConfirmBusy))
       throw new Error("Instance has active or pending work");
     this.instanceAction = true;
   }
-  cancelRestart() {
+  assertMaintenanceHealthy() {
+    if (this.disposed || this.writeFailure)
+      throw new Error("Instance is unavailable for maintenance");
+  }
+  endMaintenance() {
     this.instanceAction = false;
+    if (this.disposed || this.writeFailure) return;
+    for (const [operationId, ownerId] of this.deferredReports) {
+      this.deferredReports.delete(operationId);
+      void this.serialize(ownerId, async () => {
+        const owner = this.agent(ownerId);
+        const d = owner.deliveries.find(
+          (delivery) => delivery.id === operationId,
+        );
+        if (d?.status === "queued")
+          await this.deliver(owner, d.text, d.id, d.source, d.questionIds);
+      }).catch(() => {});
+    }
+    this.advanceChildCloses();
+    for (const a of this.state.agents) this.scheduleFollowUps(a.id);
+    this.scheduleFollowUpChecks();
   }
   private readonly branches: DirectoryBranches;
   readonly images: ImageStore;
@@ -300,6 +343,8 @@ export class Workspace {
     { turnId: string; ids: Set<string> }
   >();
   private readonly closingChildren = new Set<string>();
+  private readonly stopRequests = new Set<string>();
+  private readonly deferredReports = new Map<string, string>();
   private readonly failedChildCloses = new Set<string>();
   private disposed = false;
   private writeFailure: unknown;
@@ -349,6 +394,7 @@ export class Workspace {
       },
     );
     for (const a of this.state.agents) {
+      if (a.stop?.status === "pending") a.stop.status = "unknown";
       if (
         a.backend !== "pi" &&
         (a.state === "working" ||
@@ -356,7 +402,6 @@ export class Workspace {
           (a.state === "error" && a.turnId))
       ) {
         a.turnEnded = false;
-        if (a.stop?.status === "pending") a.stop.status = "unknown";
         a.state = "error";
         a.error = "Backend restarted. Send a message to resume.";
         a.execution = undefined;
@@ -375,7 +420,6 @@ export class Workspace {
         ) &&
         ((a.turnEnded !== true &&
           !(a.backend === "pi" && a.state === "working")) ||
-          a.stop?.status === "pending" ||
           a.stop?.status === "unknown" ||
           a.deliveries.some((d) => d.status === "uncertain"))
       )
@@ -532,9 +576,20 @@ export class Workspace {
     if (
       (event.type === "error" || event.type === "progress") &&
       event.turnId !== a.turnId
-    )
+    ) {
+      if (a.piMemberTerminalVerified && !event.replayed) {
+        a.piMemberTerminalVerified = undefined;
+        this.save();
+      }
       return;
+    }
     if (event.type === "submission") {
+      if (
+        event.status === "queued" ||
+        event.status === "placed" ||
+        !event.replayed
+      )
+        a.piMemberTerminalVerified = undefined;
       const delivery = this.confirmNative(a, event.operationId, event.turnId);
       if (delivery && event.status === "unanswered")
         delivery.error =
@@ -545,6 +600,7 @@ export class Workspace {
       return;
     } else if (event.type === "working") {
       if (a.turnId === event.turnId) return;
+      a.piMemberTerminalVerified = undefined;
       if (!event.replayed) this.activity(a);
       if (a.ownerId) this.cancelHandoff(a.ownerId);
       this.handoffs.delete(a.id);
@@ -570,6 +626,14 @@ export class Workspace {
       a.execution = undefined;
       a.error = undefined;
     } else if (event.type === "item") {
+      if (
+        a.piMemberTerminalVerified &&
+        !event.replayed &&
+        !this.completedTurns.has(`${a.id}/${event.turnId}`)
+      ) {
+        a.piMemberTerminalVerified = undefined;
+        this.save();
+      }
       if (
         event.item.type !== "userMessage" &&
         event.turnId === a.turnId &&
@@ -696,8 +760,17 @@ export class Workspace {
     } else if (event.type === "completed") {
       if (event.status !== "completed" || event.verified === false)
         this.automaticFollowUps.delete(a.id);
+      if (event.verified !== true || a.turnId !== event.turnId)
+        a.piMemberTerminalVerified = undefined;
       this.completedTurns.add(`${a.id}/${event.turnId}`);
       if (a.turnId === event.turnId) {
+        a.piMemberTerminalVerified =
+          a.backend === "pi" &&
+          a.role !== "orc" &&
+          (event.status === "failed" || event.status === "interrupted") &&
+          event.verified === true
+            ? true
+            : undefined;
         if (!event.replayed) this.activity(a);
         else if (event.recoveredActivityAt !== undefined)
           this.activity(a, event.recoveredActivityAt);
@@ -775,6 +848,7 @@ export class Workspace {
       }
     } else {
       this.cancelHandoff(a.ownerId ?? a.id);
+      a.piMemberTerminalVerified = undefined;
       a.execution = undefined;
       a.turnEnded = false;
       if (
@@ -873,6 +947,7 @@ export class Workspace {
       inheritSettings: _inheritSettings,
       restoreArchived: _restoreArchived,
       turnEnded: _turnEnded,
+      piMemberTerminalVerified: _piMemberTerminalVerified,
       messages: _messages,
       deliveries: _deliveries,
       workerDefaults: _workerDefaults,
@@ -887,6 +962,14 @@ export class Workspace {
       );
     return structuredClone({
       ...agent,
+      workUnconfirmed:
+        a.turnEnded === false ||
+        a.stop?.status === "pending" ||
+        a.stop?.status === "unknown" ||
+        (a.backend === "pi" &&
+          a.role !== "orc" &&
+          a.state === "error" &&
+          a.piMemberTerminalVerified !== true),
       userHandoff: this.publishedHandoffs.get(a.id),
       finalFailure: this.finalFailures.get(a.id),
       unansweredCount: a.questions.filter((q) => q.state === "unanswered")
@@ -1316,16 +1399,19 @@ export class Workspace {
       a.deliveries.some((d) => d.mode === "follow_up" && d.status === "waiting")
     )
       a.followUpPaused = true;
-    a.stop = { turnId, status: "pending" };
-    a.state = "stopping";
-    this.save();
+    this.stopRequests.add(id);
     try {
+      a.stop = { turnId, status: "pending" };
+      a.state = "stopping";
+      this.save();
       await handle.interrupt(turnId);
     } catch {
       if (a.stop?.turnId === turnId && a.stop.status === "pending") {
         a.stop.status = "unknown";
         this.save();
       }
+    } finally {
+      this.stopRequests.delete(id);
     }
     return this.detail(id);
   }
@@ -1878,6 +1964,14 @@ export class Workspace {
       !(startOnly && d.status === "sending")
     )
       return this.detail(a.id);
+    const terminalEvidence = a.piMemberTerminalVerified;
+    const eventVersion = this.nativeEventVersions.get(a) ?? 0;
+    const previousTurnId = a.turnId;
+    const previousTurnEnded = a.turnEnded;
+    const previousStop = a.stop;
+    const previousStopStatus = a.stop?.status;
+    const previousCloseRequest = a.closeRequest;
+    a.piMemberTerminalVerified = undefined;
     this.cancelHandoff(a.ownerId ?? a.id);
     if (!d) {
       d = {
@@ -1905,6 +1999,7 @@ export class Workspace {
     this.save();
     const messagePosition = a.messages.length;
     let startPrepared = false;
+    let sendStarted = false;
     try {
       let paths: string[] = [];
       try {
@@ -1988,6 +2083,7 @@ export class Workspace {
             );
       let turnId: string;
       try {
+        sendStarted = true;
         turnId = await send(activeTurn);
       } catch (error) {
         if (!(error instanceof StaleTurn)) throw error;
@@ -2065,6 +2161,24 @@ export class Workspace {
       }
     } catch (error) {
       if (this.writeFailure) throw this.writeFailure;
+      // A pre-send rejection did not invalidate the old terminal event. Keep
+      // its evidence only if nothing observed or confirmed a concurrent change.
+      if (
+        terminalEvidence &&
+        !sendStarted &&
+        error instanceof DeliveryRejected &&
+        d.status === "sending" &&
+        (this.nativeEventVersions.get(a) ?? 0) === eventVersion &&
+        a.state === previousState &&
+        a.turnId === previousTurnId &&
+        a.turnEnded === previousTurnEnded &&
+        a.stop === previousStop &&
+        a.stop?.status === previousStopStatus &&
+        a.closeRequest === previousCloseRequest &&
+        !a.closed &&
+        !this.disposed
+      )
+        a.piMemberTerminalVerified = true;
       const restoreIdle =
         startOnly &&
         startPrepared &&
@@ -3346,6 +3460,12 @@ export class Workspace {
       at: Date.now(),
     });
     this.save();
+    if (this.instanceAction) {
+      // An async native question can arrive while admissions are barred. Keep
+      // its forwarding intent durable, without submitting it during maintenance.
+      this.deferredReports.set(requestId, owner.id);
+      return this.detail(owner.id);
+    }
     return this.serialize(owner.id, () =>
       this.deliver(
         this.agent(owner.id),
@@ -3413,7 +3533,7 @@ export class Workspace {
     }
   }
   private async advanceChildCloses() {
-    if (this.disposed) return;
+    if (this.disposed || this.instanceAction) return;
     let changed = false;
     const releases: Promise<void>[] = [];
     for (const w of this.state.agents) {
@@ -3501,6 +3621,7 @@ export class Workspace {
       if (check.timer) clearTimeout(check.timer);
     this.followUpChecks.clear();
     this.automaticFollowUps.clear();
+    this.deferredReports.clear();
     this.branches.dispose();
     this.subscribers.clear();
     this.completedItems.clear();

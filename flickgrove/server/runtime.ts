@@ -66,6 +66,7 @@ export interface RuntimeAgent extends Detail {
   inheritSettings?: boolean;
   restoreArchived?: boolean;
   turnEnded?: boolean;
+  piMemberTerminalVerified?: true;
 }
 export type ExecutionSettings = {
   provider?: string;

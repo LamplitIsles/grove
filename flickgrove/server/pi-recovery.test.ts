@@ -385,6 +385,16 @@ test("Durable accepted/queued work resumes without resubmission; scoped Stop wit
         (s) => s.requestId === "fail-first" && s.status === "unanswered",
       ),
     );
+    await until(() =>
+      queuedReplay.some(
+        (event) => event.type === "completed" && event.turnId === failed,
+      ),
+    );
+    expect(
+      queuedReplay.find(
+        (event) => event.type === "completed" && event.turnId === failed,
+      ),
+    ).toMatchObject({ status: "failed", verified: true });
     const failureStore = await readPiStorage(
       piSessionPath(sessionDir, threadId),
     );
