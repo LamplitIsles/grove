@@ -4,10 +4,10 @@
   import { navigation, setSurface, back, removeOutlineDrawer } from "./navigation.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
   import * as Sheet from "$lib/components/ui/sheet/index.js";
-  import type { UserMessageAnchor } from "./contracts";
+  import type { Human, UserMessageAnchor } from "./contracts";
   import * as m from "./paraglide/messages";
-  let { agent, revision, connected, open = $bindable(false), current, onselect, oncancel, onclose }: {
-    agent:string; revision:string; connected:boolean; open?:boolean; current?:string;
+  let { agent, revision, connected, showAuthors, users, open = $bindable(false), current, onselect, oncancel, onclose }: {
+    agent:string; revision:string; connected:boolean; showAuthors:boolean; users?:Human[]; open?:boolean; current?:string;
     onselect:(operation:string)=>Promise<boolean|undefined>; oncancel:()=>void; onclose:()=>void;
   } = $props();
   const identity=untrack(()=>agent);
@@ -92,8 +92,9 @@
     {#if error}<div class="outline-feedback"><p class="inline-error" role="alert">{error}</p><Button variant="ghost" size="sm" disabled={!connected || loading} onkeydown={itemKey} onclick={refresh}>{m.retry()}</Button></div>{/if}
     {#if !items.length}<p class="outline-feedback" role="status">{loading ? m.loading() : !connected ? m.outline_offline() : !error ? m.outline_empty() : ""}</p>{/if}
     {#each items as item (item.operation)}
+      {@const author = showAuthors && item.authorUserId ? users?.find(user => user.id === item.authorUserId) : undefined}
       <div>
-        <button onkeydown={itemKey} class="outline-item" data-operation={item.operation} aria-current={current===item.operation ? "location" : undefined} aria-busy={locating===item.operation} onclick={()=>select(item.operation)}><span>{item.summary.trim() || m.outline_images()}</span></button>
+        <button onkeydown={itemKey} class="outline-item" data-operation={item.operation} aria-current={current===item.operation ? "location" : undefined} aria-busy={locating===item.operation} onclick={()=>select(item.operation)}>{#if author}<span class="participant-avatar" style:background={author.color} title={author.name} role="img" aria-label={author.name}>{author.name.slice(0,1).toUpperCase()}</span>{/if}<span class="outline-summary">{item.summary.trim() || m.outline_images()}</span></button>
         {#if locating===item.operation}<p class="outline-feedback" role="status">{m.outline_loading()}</p>{/if}
         {#if locationError && retryOperation===item.operation}<div class="outline-feedback"><p class="inline-error" role="alert">{locationError}</p><Button variant="ghost" size="sm" onkeydown={itemKey} onclick={()=>select(item.operation)}>{m.retry()}</Button></div>{/if}
       </div>
@@ -112,10 +113,11 @@
 <style>
   .outline-rail { width:280px; flex:none; min-height:0; border-left:1px solid var(--border); padding:12px 8px; display:flex; }
   .message-outline { overflow-y:auto; overflow-x:hidden; min-height:0; width:100%; font-size:13px; line-height:1.45; }
-  .outline-item { width:100%; text-align:left; padding:8px 12px; border-left:2px solid transparent; color:var(--muted-foreground); border-radius:0 4px 4px 0; }
+  .outline-item { display:flex; align-items:flex-start; gap:8px; width:100%; text-align:left; padding:8px 12px; border-left:2px solid transparent; color:var(--muted-foreground); border-radius:0 4px 4px 0; }
+  .outline-item :global(.participant-avatar) { flex:none; margin-top:1px; }
   .outline-item:hover { background:var(--accent);color:var(--accent-foreground); }
   .outline-item[aria-current] { border-color:var(--primary);color:var(--foreground);background:var(--accent); }
-  .outline-item span { display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;white-space:pre-line; }
+  .outline-summary { min-width:0; display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere;white-space:pre-line; }
   .outline-feedback { margin:6px 12px; font-size:12px; color:var(--muted-foreground); overflow-wrap:anywhere; }
   :global(.message-outline-sheet) { padding:52px 8px 12px; width:min(320px,85vw)!important;gap:0; }
 </style>

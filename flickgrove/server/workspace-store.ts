@@ -206,6 +206,7 @@ export class WorkspaceStore {
         summary: sql<string>`substr(${s.deliveries.text}, 1, 240)`,
         images: sql<number>`coalesce(json_array_length(${s.deliveries.images}), 0)`,
         status: s.deliveries.status,
+        authorUserId: s.deliveries.authorUserId,
       })
       .from(s.deliveries)
       .where(

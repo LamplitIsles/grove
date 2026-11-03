@@ -102,6 +102,7 @@ export interface UserMessageAnchor {
   summary: string;
   images: number;
   status: Delivery["status"];
+  authorUserId?: string | null;
 }
 export interface MessageWindow {
   messages: Message[];

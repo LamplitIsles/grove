@@ -9,6 +9,7 @@ import { readingHttp } from "./reading-http";
 import { FakeRuntime, fixtureProjects } from "./testing";
 import type { RuntimeAgent } from "./runtime";
 import { encodedBytes, PAGE_BYTES } from "./conversation-reading";
+import { authUsers } from "./schema";
 const a = (id: string): RuntimeAgent => ({
   id,
   threadId: `thread-${id}`,
@@ -29,6 +30,19 @@ test("ledger outline is complete, source-specific, bounded and cold-persistent, 
   const directory = mkdtempSync(join(tmpdir(), "grove-outline-"));
   let store = new WorkspaceStore(join(directory, "workspace.sqlite"));
   try {
+    for (const id of ["alice", "bob"])
+      store.db
+        .insert(authUsers)
+        .values({
+          id,
+          name: id,
+          color: "blue",
+          email: `${id}@test.invalid`,
+          emailVerified: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        })
+        .run();
     const agent = a("one"),
       other = a("two");
     agent.deliveries = Array.from({ length: 155 }, (_, i) => ({
@@ -51,7 +65,30 @@ test("ledger outline is complete, source-specific, bounded and cold-persistent, 
           : undefined,
       questionIds: [],
       at: i,
+      authorUserId: i === 0 ? "alice" : i === 1 ? "bob" : undefined,
     }));
+    agent.deliveries.push(
+      {
+        id: "waiting",
+        source: "user",
+        mode: "follow_up",
+        status: "waiting",
+        text: "waiting",
+        questionIds: [],
+        at: 0,
+        authorUserId: "alice",
+      },
+      {
+        id: "sent-follow-up",
+        source: "user",
+        mode: "follow_up",
+        status: "sent",
+        text: "sent follow-up",
+        questionIds: [],
+        at: 0,
+        authorUserId: "bob",
+      },
+    );
     for (const source of [
       "worker",
       "reviewer",
@@ -80,7 +117,17 @@ test("ledger outline is complete, source-specific, bounded and cold-persistent, 
     store.track(other, true);
     store.flush();
     const outline = store.userMessageOutline(agent.id);
-    expect(outline).toHaveLength(155);
+    expect(outline).toHaveLength(156);
+    expect(outline.map((row) => row.operation)).toEqual([
+      ...Array.from({ length: 155 }, (_, i) => `op-${i}`),
+      "sent-follow-up",
+    ]);
+    expect(outline.slice(0, 3).map((row) => row.authorUserId)).toEqual([
+      "alice",
+      "bob",
+      null,
+    ]);
+    expect(outline[155].authorUserId).toBe("bob");
     expect(outline[0].summary).toHaveLength(240);
     expect(outline[2].images).toBe(1);
     expect(outline[0].operation).not.toBe(outline[1].operation);
@@ -112,9 +159,33 @@ test("authorized passive target windows bind identity/direction, preserve metada
       [origin],
     ))!;
   try {
+    for (const id of ["alice", "bob"])
+      app.store.db
+        .insert(authUsers)
+        .values({
+          id,
+          name: id,
+          color: "blue",
+          email: `${id}@test.invalid`,
+          emailVerified: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        })
+        .run();
     const one = await app.createOrc("alpha"),
       two = await app.createOrc("alpha");
-    await app.send(one.id, "Original", "owned");
+    await app.send(one.id, "Original", "owned", undefined, undefined, "alice");
+    await app.send(one.id, "Second", "second", undefined, undefined, "bob");
+    await app.send(one.id, "Unknown", "unknown");
+    await app.send(
+      two.id,
+      "Other session",
+      "foreign",
+      undefined,
+      undefined,
+      "bob",
+    );
+    await app.enqueueFollowUp(one.id, "Pending", "pending", undefined, "bob");
     for (let i = 0; i < 120; i++)
       runtime.emit(one.id, {
         type: "item",
@@ -131,8 +202,28 @@ test("authorized passive target windows bind identity/direction, preserve metada
     const path = `?agent=${qualified}`;
     expect((await read("/outline" + path, "foreign")).status).toBe(403);
     expect((await read(`/outline?agent=foreign:${one.id}`)).status).toBe(400);
-    expect(await (await read("/outline" + path)).json()).toMatchObject([
-      { operation: "owned" },
+    expect(await (await read("/outline" + path)).json()).toEqual([
+      {
+        operation: "owned",
+        summary: "Original",
+        images: 0,
+        status: "sent",
+        authorUserId: "alice",
+      },
+      {
+        operation: "second",
+        summary: "Second",
+        images: 0,
+        status: "sent",
+        authorUserId: "bob",
+      },
+      {
+        operation: "unknown",
+        summary: "Unknown",
+        images: 0,
+        status: "sent",
+        authorUserId: null,
+      },
     ]);
     runtime.historyMessages = async () => {
       throw new Error("Forbidden full-history fallback");
