@@ -6,6 +6,7 @@ import type {
   Model,
   Skill,
   WeeklyUsage,
+  Delivery,
 } from "../src/contracts";
 
 export interface RuntimeItem {
@@ -26,6 +27,7 @@ export interface RuntimeItem {
 }
 export type RuntimeEvent = { threadId?: string; replayed?: boolean } & (
   | { type: "working"; turnId: string }
+  | { type: "thread-status"; turnId?: string }
   | {
       type: "submission";
       operationId: string;
@@ -54,8 +56,17 @@ export type RuntimeEvent = { threadId?: string; replayed?: boolean } & (
     }
   | { type: "disconnected"; error: string }
 );
+export interface RuntimeDelivery extends Delivery {
+  /** Original steer target and observed terminal, not an admission receipt. */
+  steerEvidence?: {
+    attemptId: string;
+    turnId: string;
+    terminalObserved?: true;
+  };
+}
 export interface RuntimeAgent extends Detail {
   token: string;
+  deliveries: RuntimeDelivery[];
   orcPromptSnapshot?: string;
   researcherSnapshot?: import("./reviewer-config").ReviewerSnapshot;
   reviewerSnapshot?: import("./reviewer-config").ReviewerSnapshot;
@@ -89,6 +100,9 @@ export interface RuntimeHandle {
   model?: string;
   effort?: string;
   serviceTier?: string;
+  currentExecution?(): Promise<
+    import("../src/contracts").Agent["currentExecution"]
+  >;
   reloadMcp?(): Promise<{ issues: string[] }>;
   readSettings(): Promise<ExecutionSettings>;
   updateSettings(

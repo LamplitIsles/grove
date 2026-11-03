@@ -185,7 +185,7 @@ test("subscribed conversations retain inspected follow-up text and images when t
   }
 });
 
-test("automatic inspection backs off, confirms the original operation and resumes safe FIFO", async () => {
+test("automatic inspection confirms the original operation but leaves the queue paused", async () => {
   const f = fixture();
   const a = await f.app.createOrc("alpha");
   await f.app.send(a.id, "first", "first");
@@ -222,12 +222,21 @@ test("automatic inspection backs off, confirms the original operation and resume
   expect(checks).toEqual(["original"]);
   for (
     let i = 0;
-    i < 300 && f.app.lookupFollowUp(a.id, "later")?.status !== "sent";
+    i < 300 && f.app.lookupFollowUp(a.id, "original")?.status !== "sent";
     i++
   )
     await Bun.sleep(10);
   expect(checks).toEqual(["original", "original"]);
   expect(f.app.lookupFollowUp(a.id, "original")?.status).toBe("sent");
+  expect(f.app.lookupFollowUp(a.id, "later")?.status).toBe("waiting");
+  expect(f.app.detail(a.id).followUpPaused).toBe(true);
+  await f.app.send(a.id, "B", "B");
+  const b = f.app.detail(a.id).turnId!;
+  f.runtime.emit(a.id, { type: "completed", turnId: b, status: "completed" });
+  expect(f.app.lookupFollowUp(a.id, "later")?.status).toBe("waiting");
+  expect(f.app.detail(a.id).followUpPaused).toBe(true);
+  await f.app.resumeFollowUps(a.id);
+  await until(() => f.app.lookupFollowUp(a.id, "later")?.status === "sent");
   expect(f.app.lookupFollowUp(a.id, "later")?.status).toBe("sent");
   expect(
     f.runtime.inputs.filter((x) => x.clientId === "original"),
@@ -831,7 +840,7 @@ test("a rejected follow-up can be cancelled before the paused FIFO is explicitly
   await until(() => f.app.lookupFollowUp(a.id, "good")?.status === "sent");
 });
 
-test("restart after persisted completion resumes only waiting work", async () => {
+test("restart after persisted completion pauses waiting work until Continue", async () => {
   const f = fixture();
   const a = await f.app.createOrc("alpha");
   await f.app.send(a.id, "working", "first");
@@ -839,9 +848,58 @@ test("restart after persisted completion resumes only waiting work", async () =>
   await f.app.enqueueFollowUp(a.id, "next", "next");
   f.runtime.emit(a.id, { type: "completed", turnId, status: "completed" });
   f.restart(); // Completion was committed; queued claim has not crossed admission.
+  expect(f.app.detail(a.id).followUpPaused).toBe(true);
+  expect(f.app.lookupFollowUp(a.id, "next")?.status).toBe("waiting");
+  expect(f.runtime.inputs.map((x) => x.text)).toEqual(["working"]);
+  await f.app.resumeFollowUps(a.id);
   await until(() => f.app.lookupFollowUp(a.id, "next")?.status === "sent");
   expect(f.runtime.inputs.map((x) => x.text)).toEqual(["working", "next"]);
 });
+
+test.each(["stop", "restart", "failed"] as const)(
+  "direct input runs before a queue paused by %s, which remains paused until Continue",
+  async (reason) => {
+    const f = fixture();
+    const a = await f.app.createOrc("alpha");
+    await f.app.send(a.id, "initial", "initial");
+    const first = f.app.detail(a.id).turnId!;
+    await f.app.enqueueFollowUp(a.id, "A", "A");
+    if (reason === "stop") await f.app.stop(a.id, first);
+    f.runtime.emit(a.id, {
+      type: "completed",
+      turnId: first,
+      status:
+        reason === "stop"
+          ? "interrupted"
+          : reason === "failed"
+            ? "failed"
+            : "completed",
+    });
+    if (reason === "restart") f.restart();
+    expect(f.app.detail(a.id).followUpPaused).toBe(true);
+    await f.app.send(a.id, "B", "B");
+    const second = f.app.detail(a.id).turnId!;
+    f.runtime.emit(a.id, {
+      type: "completed",
+      turnId: second,
+      status: "completed",
+    });
+    await Bun.sleep(30);
+    expect(f.app.lookupFollowUp(a.id, "A")?.status).toBe("waiting");
+    expect(f.app.detail(a.id).followUpPaused).toBe(true);
+    expect(f.runtime.inputs.map((input) => input.text)).toEqual([
+      "initial",
+      "B",
+    ]);
+    await f.app.resumeFollowUps(a.id);
+    await until(() => f.app.lookupFollowUp(a.id, "A")?.status === "sent");
+    expect(f.runtime.inputs.map((input) => input.text)).toEqual([
+      "initial",
+      "B",
+      "A",
+    ]);
+  },
+);
 
 test("cancel racing with claimed admission cannot retract or duplicate it", async () => {
   const f = fixture();

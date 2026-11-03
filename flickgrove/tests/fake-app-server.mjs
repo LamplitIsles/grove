@@ -104,7 +104,9 @@ function threadRecord(cwd, model) {
     projectId: null,
     sessionId: "session-fake",
     source: "appServer",
-    status: { type: "idle" },
+    status: control().trackThreadStatus && state.active
+      ? { type: "active", activeFlags: [] }
+      : { type: control().readStatus ?? "idle" },
     path: state.rolloutPath ?? join(root, "thread-fake.jsonl"),
     extra: null,
     forkedFromId: null,
@@ -962,6 +964,8 @@ async function handle(request) {
       };
     }
     case "thread/resume": {
+      while (control().holdResume)
+        await new Promise((resolve) => setTimeout(resolve, 10));
       if (state.environments?.some((e) => e.environmentId !== "local"))
         send({
           method: "mcpServer/startupStatus/updated",
@@ -1021,6 +1025,7 @@ async function handle(request) {
           ),
           ...control().historyThreads?.find((s) => s.thread.id === p.threadId)
             ?.thread,
+          ...(control().resumeThreadId ? { id: control().resumeThreadId } : {}),
         },
         itemsBackwardsCursor: control().itemsBackwardsCursor ?? null,
         model: state.model ?? p.model ?? "fixture-model",
@@ -1058,6 +1063,7 @@ async function handle(request) {
           ...threadRecord(state.cwd ?? root, "fixture-model"),
           ...control().historyThreads?.find((s) => s.thread.id === p.threadId)
             ?.thread,
+          ...(control().readThreadId ? { id: control().readThreadId } : {}),
         },
       };
     case "thread/unarchive": {
@@ -1186,6 +1192,8 @@ async function handle(request) {
       };
     }
     case "thread/turns/list": {
+      while (control().holdTurnsList)
+        await new Promise((resolve) => setTimeout(resolve, 10));
       if (control().turnListError)
         rpcError(-32603, "fixture turn read failure");
       if (process.env.FAKE_HISTORY_ERROR) {
@@ -1195,7 +1203,13 @@ async function handle(request) {
           : -32603;
         throw error;
       }
-      const turns = state.turns.map((turn) => turnView(turn, p.itemsView));
+      const turns = state.turns.map((turn) => {
+        const view = turnView(turn, p.itemsView);
+        if (control().projectInterrupted && view.status === "inProgress" &&
+            (!control().trackThreadStatus || !state.active))
+          view.status = "interrupted";
+        return view;
+      });
       return page(turns, p);
     }
     case "thread/items/list": {
@@ -1298,14 +1312,17 @@ async function handle(request) {
       const turn = state.turns.find((t) => t.id === p.turnId);
       if (!turn || state.active !== p.turnId)
         rpcError(-32600, "observed turn is no longer active");
+      if (control().interruptNoEvent) return {};
       turn.status = "interrupted";
       turn.completedAt = nowSeconds();
       state.active = null;
       save();
-      send({
+      const completion = {
         method: "turn/completed",
         params: { threadId: p.threadId, turn },
-      });
+      };
+      if (control().interruptAckFirst) setTimeout(() => send(completion), 30);
+      else send(completion);
       return {};
     }
     case "turn/steer":

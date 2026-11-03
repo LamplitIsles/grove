@@ -9,7 +9,11 @@ import {
   customType,
 } from "drizzle-orm/sqlite-core";
 import type { Agent, Delivery, Project, Question } from "../src/contracts";
-import type { RuntimeAgent, ExecutionSettings } from "./runtime";
+import type {
+  RuntimeAgent,
+  RuntimeDelivery,
+  ExecutionSettings,
+} from "./runtime";
 
 export type RecoveryContext = Pick<
   RuntimeAgent,
@@ -27,14 +31,14 @@ export type CapturedConfig = Pick<
   | "researcherSnapshot"
   | "workerDefaults"
 >;
-export type ReportContext = Pick<
+export type DeliveryContext = Pick<
   Delivery,
   | "reportingWorkerId"
   | "reportingReviewerId"
   | "reportingResearcherId"
   | "reviewTarget"
   | "researchQuestion"
->;
+> & Pick<RuntimeDelivery, "steerEvidence">;
 const json = <T>(name: string) => text(name, { mode: "json" }).$type<T>();
 // Better Auth's SQLite adapter owns the encoding of its DATE columns.
 const authDate = customType<{ data: string }>({ dataType: () => "date" });
@@ -185,7 +189,8 @@ export const deliveries = sqliteTable(
     admissionAt: integer("admission_at"),
     error: text("error"),
     images: json<NonNullable<Delivery["images"]>>("images"),
-    report: json<ReportContext>("report").notNull(),
+    // The historical column name also stores optional per-operation recovery evidence.
+    report: json<DeliveryContext>("report").notNull(),
   },
   (t) => [
     primaryKey({ columns: [t.sessionId, t.operationId] }),

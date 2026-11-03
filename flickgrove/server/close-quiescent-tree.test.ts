@@ -437,10 +437,11 @@ test("native resume reveals active work before any release; disconnect never con
   restoredRuntime.closeOverride = async (id) => {
     releases.push(id);
   };
+  const selecting = restored.reconcileSettings(children[0]!.id);
   await entered.promise;
   await expect(restored.closeTree(owner.id)).rejects.toThrow();
   gate.resolve();
-  await Bun.sleep(0);
+  await selecting;
   await expect(restored.closeTree(owner.id)).rejects.toThrow("current work");
   expect(releases).toEqual([]);
   restoredRuntime.emit(children[0]!.id, {

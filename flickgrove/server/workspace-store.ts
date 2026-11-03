@@ -4,8 +4,8 @@ import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { and, eq, ne, or, sql } from "drizzle-orm";
 import { fileURLToPath } from "node:url";
-import type { Delivery, Question } from "../src/contracts";
-import type { RuntimeAgent } from "./runtime";
+import type { Question } from "../src/contracts";
+import type { RuntimeAgent, RuntimeDelivery as Delivery } from "./runtime";
 import * as s from "./schema";
 import { threadIdentity } from "./backend";
 const migrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url));
@@ -48,6 +48,7 @@ const deliveryKeys = [
   "authorUserId",
   "admissionAt",
   "attemptId",
+  "steerEvidence",
   "images",
   "answers",
   "turnId",
@@ -543,6 +544,7 @@ export class WorkspaceStore {
             "reportingResearcherId",
             "reviewTarget",
             "researchQuestion",
+            "steerEvidence",
           ]),
         };
         tx.insert(s.deliveries)

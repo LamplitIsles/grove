@@ -65,6 +65,45 @@ function store(path: string) {
   cleanup.push(() => value.close());
   return value;
 }
+test("persists steer evidence per original delivery without changing its receipt", () => {
+  const { path } = fixture();
+  const db = store(path);
+  const a = db.track(
+    agent("parent", {
+      turnEnded: false,
+      deliveries: [
+        { id: "steer", text: "input", source: "user", status: "uncertain", questionIds: [], at: 1 },
+        { id: "legacy", text: "old", source: "user", status: "uncertain", turnId: "old-turn", questionIds: [], at: 2 },
+      ],
+    }),
+    true,
+  );
+  a.deliveries[0].steerEvidence = { attemptId: "steer", turnId: "turn-1" };
+  db.flush();
+  expect(db.byId("parent")!.deliveries[0].steerEvidence).toEqual({
+    attemptId: "steer",
+    turnId: "turn-1",
+  });
+  a.turnEnded = true;
+  a.deliveries[0].steerEvidence = {
+    attemptId: "steer",
+    turnId: "turn-1",
+    terminalObserved: true,
+  };
+  db.flush();
+  const loaded = store(path).byId("parent")!;
+  expect(loaded.turnEnded).toBe(true);
+  expect(loaded.deliveries[0].status).toBe("uncertain");
+  expect(loaded.deliveries[0].steerEvidence).toEqual({
+    attemptId: "steer",
+    turnId: "turn-1",
+    terminalObserved: true,
+  });
+  expect(loaded.deliveries[1].steerEvidence).toBeUndefined();
+  a.deliveries[0].steerEvidence = undefined;
+  db.flush();
+  expect(db.byId("parent")!.deliveries[0].steerEvidence).toBeUndefined();
+});
 test("real Bun migrator converts all durable roles, envelopes and order atomically and reopens idempotently", () => {
   const { path } = fixture();
   const target = {

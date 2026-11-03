@@ -35,6 +35,7 @@ import type {
 import type {
   Runtime,
   RuntimeAgent,
+  RuntimeDelivery,
   RuntimeEvent,
   RuntimeHandle,
 } from "./runtime";
@@ -59,6 +60,20 @@ function pendingFollowUp(d: Delivery) {
   );
 }
 
+function localCodex(a: RuntimeAgent) {
+  return (
+    (a.backend ?? "codex") === "codex" && environmentId(a.project) === "local"
+  );
+}
+function uncertainExecution(d: RuntimeDelivery) {
+  return (
+    (d.status === "sending" || d.status === "uncertain") &&
+    (!d.steerEvidence?.terminalObserved ||
+      d.steerEvidence.attemptId !== (d.attemptId ?? d.id))
+  );
+}
+const interruptedWork = "Previous work was interrupted.";
+
 function followUpInspectionCandidate(a: RuntimeAgent) {
   if (
     !a.followUpPaused ||
@@ -80,6 +95,7 @@ type State = {
 type InstanceSessionBlocker = InstanceStatus["sessions"][number];
 export class Workspace {
   private instanceAction = false;
+  private shuttingDown = false;
   private creating = 0;
   private assertInstanceAvailable() {
     if (this.instanceAction)
@@ -274,6 +290,10 @@ export class Workspace {
   private readonly closingTrees = new Set<string>();
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly opening = new Map<string, Promise<RuntimeHandle>>();
+  private readonly connections = new Map<
+    string,
+    { state: "connecting" | "failed"; error?: string }
+  >();
   // Keep cancellation until the turn ends so another tool call cannot rearm it.
   private readonly handoffs = new Map<
     string,
@@ -326,6 +346,60 @@ export class Workspace {
   }
   private readonly completedTurns = new Set<string>();
   private readonly nativeEventVersions = new WeakMap<RuntimeAgent, number>();
+  private readonly currentExecutions = new Map<
+    string,
+    {
+      handle: RuntimeHandle;
+      threadId: string;
+      view: NonNullable<Agent["currentExecution"]>;
+    }
+  >();
+  private readonly currentExecutionVersions = new WeakMap<RuntimeAgent, number>();
+  private readonly currentExecutionReads = new Map<string, { again: boolean }>();
+
+  private invalidateCurrentExecution(a: RuntimeAgent) {
+    this.currentExecutionVersions.set(
+      a,
+      (this.currentExecutionVersions.get(a) ?? 0) + 1,
+    );
+    return this.currentExecutions.delete(a.id);
+  }
+  private refreshCurrentExecution(a: RuntimeAgent) {
+    const handle = this.handles.get(a.id);
+    if (!localCodex(a) || !handle?.currentExecution || a.closed || this.disposed)
+      return;
+    const inFlight = this.currentExecutionReads.get(a.id);
+    if (inFlight) {
+      inFlight.again = true;
+      return;
+    }
+    const read = { again: false };
+    this.currentExecutionReads.set(a.id, read);
+    const version = this.currentExecutionVersions.get(a) ?? 0;
+    const threadId = a.threadId;
+    void handle
+      .currentExecution()
+      .then((view) => {
+        if (
+          !view ||
+          this.disposed ||
+          a.closed ||
+          this.handles.get(a.id) !== handle ||
+          a.threadId !== threadId ||
+          handle.threadId !== threadId ||
+          (this.currentExecutionVersions.get(a) ?? 0) !== version ||
+          a.deliveries.some((d) => d.status === "sending" || d.status === "queued")
+        )
+          return;
+        this.currentExecutions.set(a.id, { handle, threadId: threadId!, view });
+        this.save();
+      })
+      .catch(() => {})
+      .finally(() => {
+        this.currentExecutionReads.delete(a.id);
+        if (read.again) this.refreshCurrentExecution(a);
+      });
+  }
   // Volatile proof that this process, not a prior Stop, paused this queue.
   private readonly automaticFollowUps = new Map<string, string>();
   private readonly followUpChecks = new Map<
@@ -396,6 +470,13 @@ export class Workspace {
     for (const a of this.state.agents) {
       if (a.stop?.status === "pending") a.stop.status = "unknown";
       if (
+        localCodex(a) &&
+        a.deliveries.some(
+          (d) => d.mode === "follow_up" && d.status === "waiting",
+        )
+      )
+        a.followUpPaused = true;
+      if (
         a.backend !== "pi" &&
         (a.state === "working" ||
           a.state === "stopping" ||
@@ -429,6 +510,15 @@ export class Workspace {
     this.advanceChildCloses();
     for (const a of this.state.agents) {
       if (a.closed || !a.threadId) continue;
+      // Idle local Codex threads are restored on selection or a real operation.
+      // Unconfirmed work still reconnects to observe any native notifications.
+      if (
+        localCodex(a) &&
+        a.state === "idle" &&
+        a.turnEnded !== false &&
+        !a.turnId
+      )
+        continue;
       // Prefeature Orcs capture the configured prompt on explicit restoration,
       // not while startup is merely reconciling saved sessions.
       if (
@@ -475,6 +565,9 @@ export class Workspace {
       throw error;
     }
     this.state.agents = this.state.agents.filter((a) => !a.closed);
+    for (const id of this.connections.keys())
+      if (!this.state.agents.some((a) => a.id === id))
+        this.connections.delete(id);
     this.branches.update(
       this.state.agents.map((a) => this.branchKey(a.project)),
     );
@@ -505,6 +598,7 @@ export class Workspace {
     // Re-reading an accepted receipt must retain its later native outcome.
     if (d.status !== "sent") d.error = undefined;
     d.status = "sent";
+    d.steerEvidence = undefined;
     d.turnId = turnId ?? d.turnId;
     for (const q of a.questions)
       if (d.questionIds.includes(q.id)) {
@@ -567,6 +661,34 @@ export class Workspace {
       (event.threadId && event.threadId !== a.threadId)
     )
       return;
+    const removedCurrent = this.invalidateCurrentExecution(a);
+    if (removedCurrent) this.save();
+    if (event.type === "thread-status") {
+      this.refreshCurrentExecution(a);
+      return;
+    }
+    if (
+      event.type === "disconnected" &&
+      localCodex(a) &&
+      a.state === "idle" &&
+      a.turnEnded === true &&
+      !a.turnId &&
+      !a.execution?.retrying &&
+      !a.closeRequest &&
+      a.stop?.status !== "pending" &&
+      a.stop?.status !== "unknown" &&
+      !this.stopRequests.has(a.id) &&
+      !a.deliveries.some(
+        (d) =>
+          d.status === "sending" ||
+          d.status === "queued" ||
+          uncertainExecution(d),
+      )
+    ) {
+      this.handles.delete(a.id);
+      this.save();
+      return;
+    }
     if (
       event.type !== "disconnected" &&
       !(event.type === "item" && event.item.type === "userMessage") &&
@@ -764,6 +886,22 @@ export class Workspace {
         a.piMemberTerminalVerified = undefined;
       this.completedTurns.add(`${a.id}/${event.turnId}`);
       if (a.turnId === event.turnId) {
+        if (
+          localCodex(a) &&
+          !event.replayed &&
+          event.verified !== false &&
+          ["completed", "failed", "interrupted"].includes(event.status)
+        ) {
+          for (const d of a.deliveries) {
+            const evidence = d.steerEvidence;
+            if (
+              (d.status === "sending" || d.status === "uncertain") &&
+              evidence?.turnId === event.turnId &&
+              evidence.attemptId === (d.attemptId ?? d.id)
+            )
+              d.steerEvidence = { ...evidence, terminalObserved: true };
+          }
+        }
         a.piMemberTerminalVerified =
           a.backend === "pi" &&
           a.role !== "orc" &&
@@ -789,7 +927,13 @@ export class Workspace {
         this.handoffs.delete(a.id);
         if (a.role === "orc" && event.status === "failed")
           this.finalFailures.set(a.id, { id: event.turnId });
-        a.turnEnded = a.role !== "orc" || event.verified !== false;
+        a.turnEnded =
+          (a.role !== "orc" && !localCodex(a)) || event.verified !== false;
+        // A different unknown admission may still have started work that this
+        // turn's terminal does not describe. A bounded steer is safe only
+        // after its own target's live terminal was observed.
+        if (localCodex(a) && a.deliveries.some(uncertainExecution))
+          a.turnEnded = false;
         if (
           a.deliveries.some(
             (d) => d.mode === "follow_up" && d.status === "waiting",
@@ -803,13 +947,31 @@ export class Workspace {
             a.turnEnded = false;
         }
         const stopped =
-          a.stop?.turnId === event.turnId && event.status === "interrupted";
+          a.stop?.turnId === event.turnId &&
+          event.status === "interrupted" &&
+          (!localCodex(a) || event.verified !== false);
         if (a.stop?.turnId === event.turnId)
-          a.stop.status = stopped ? "confirmed" : "completed";
-        a.state = stopped || event.status === "completed" ? "idle" : "error";
+          a.stop.status =
+            localCodex(a) && event.verified === false
+              ? "unknown"
+              : stopped
+                ? "confirmed"
+                : "completed";
+        const interrupted =
+          localCodex(a) &&
+          event.status === "interrupted" &&
+          event.verified !== false;
+        a.state =
+          stopped || event.status === "completed" || interrupted
+            ? "idle"
+            : "error";
         a.error =
           a.state === "idle"
-            ? undefined
+            ? interrupted
+              ? event.error
+                ? `${interruptedWork}\n\n${event.error}`
+                : interruptedWork
+              : undefined
             : (event.error ?? a.error ?? "Work was interrupted");
         a.execution =
           a.state === "idle"
@@ -866,6 +1028,7 @@ export class Workspace {
     }
     this.save();
     this.advanceChildCloses();
+    if (event.type === "completed") this.refreshCurrentExecution(a);
     if (event.type === "completed" && event.status === "completed")
       this.scheduleFollowUps(a.id);
   }
@@ -960,8 +1123,25 @@ export class Workspace {
         this.branchKey(owner.project),
         this.branchKey(a.project),
       );
+    const interrupted =
+      a.state === "idle" &&
+      (a.error === interruptedWork ||
+        a.error?.startsWith(`${interruptedWork}\n\n`));
+    const publicError = interrupted
+      ? a.error?.slice(interruptedWork.length + 2) || undefined
+      : agent.error;
     return structuredClone({
       ...agent,
+      connection: this.connections.get(a.id),
+      currentExecution:
+        this.currentExecutions.get(a.id)?.handle === this.handles.get(a.id) &&
+        this.currentExecutions.get(a.id)?.threadId === a.threadId &&
+        !a.closed &&
+        !this.disposed &&
+        !a.deliveries.some((d) => d.status === "sending" || d.status === "queued")
+          ? this.currentExecutions.get(a.id)?.view
+          : undefined,
+      lastInterrupted: interrupted ? true : undefined,
       workUnconfirmed:
         a.turnEnded === false ||
         a.stop?.status === "pending" ||
@@ -978,7 +1158,7 @@ export class Workspace {
         (d) => d.mode !== "follow_up" && d.status !== "sent",
       ).length,
       followUpCount: a.deliveries.filter(pendingFollowUp).length,
-      error: agent.error?.slice(0, 8000),
+      error: publicError?.slice(0, 8000),
       questions: agent.questions.slice(-100).map((q) => ({
         ...q,
         text: "",
@@ -1226,7 +1406,7 @@ export class Workspace {
         this.options.orcPrompt
       )
         return;
-      const handle = await this.handle(a, false);
+      const handle = await this.handle(a, localCodex(a));
       const value = await handle.readSettings();
       if (this.disposed || a.closed || this.handles.get(id) !== handle) return;
       if (
@@ -1866,6 +2046,10 @@ export class Workspace {
           this.save();
         }
         let disconnected = false;
+        if (localCodex(a) && a.threadId) {
+          this.connections.set(a.id, { state: "connecting" });
+          this.save();
+        }
         opening = this.options.runtime
           .open(a, (event) => {
             if (disconnected) return;
@@ -1894,7 +2078,24 @@ export class Workspace {
         if (refreshTitle && a.role === "orc")
           a.title = handle.threadName ?? "New session";
         this.handles.set(a.id, handle);
+        this.connections.delete(a.id);
         this.save();
+        if (
+          a.turnEnded === false ||
+          a.stop?.status === "unknown" ||
+          a.stop?.status === "pending"
+        )
+          this.refreshCurrentExecution(a);
+      } catch (error) {
+        if (localCodex(a) && a.threadId && !this.disposed) {
+          this.connections.set(a.id, {
+            state: "failed",
+            error:
+              error instanceof Error ? error.message : "Session unavailable",
+          });
+          this.save();
+        }
+        throw error;
       } finally {
         this.opening.delete(a.id);
       }
@@ -1905,12 +2106,20 @@ export class Workspace {
     if (this.instanceAction)
       return Promise.reject(new Error("Instance maintenance is in progress"));
     const a = this.state.agents.find((a) => a.id === id) ?? this.store.byId(id);
+    if (a && localCodex(a) && this.shuttingDown)
+      return Promise.reject(new Error("Instance is shutting down"));
     if (a && this.closingTrees.has(a.ownerId ?? a.id))
       return Promise.reject(new Error("Tree is closing"));
     if (a && this.treeActions.has(a.ownerId ?? a.id))
       return Promise.reject(new Error("Tree settings are being saved"));
     const previous = this.queues.get(id) ?? Promise.resolve();
-    const next = previous.catch(() => {}).then(work);
+    const next = previous
+      .catch(() => {})
+      .then(() => {
+        if (a && localCodex(a) && this.shuttingDown)
+          throw new Error("Instance is shutting down");
+        return work();
+      });
     this.queues.set(id, next);
     void next
       .finally(() => {
@@ -1964,6 +2173,7 @@ export class Workspace {
       !(startOnly && d.status === "sending")
     )
       return this.detail(a.id);
+    this.invalidateCurrentExecution(a);
     const terminalEvidence = a.piMemberTerminalVerified;
     const eventVersion = this.nativeEventVersions.get(a) ?? 0;
     const previousTurnId = a.turnId;
@@ -1991,6 +2201,7 @@ export class Workspace {
       d.status = "sending";
       d.error = undefined;
     }
+    d.steerEvidence = undefined;
     d.admissionAt = Date.now();
     // Retries use the persisted envelope, including its delegated question IDs.
     text = d.text;
@@ -2019,6 +2230,8 @@ export class Workspace {
           error instanceof Error ? error.message : "Session unavailable",
         );
       }
+      if (this.shuttingDown && localCodex(a))
+        throw new DeliveryRejected("Instance is shutting down");
       if (
         startOnly &&
         (a.state !== "idle" ||
@@ -2061,8 +2274,16 @@ export class Workspace {
         !Number.isNaN(new Date(d.at).getTime())
           ? `Human message metadata (data): ${JSON.stringify({ name: author.name, submittedAt: new Date(d.at).toISOString() }).replace(/[<>&\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)}`
           : undefined;
-      const send = (observed?: string) =>
-        a.backend === "pi"
+      const send = (observed?: string) => {
+        if (localCodex(a)) {
+          // A steer can only enter its expected turn. Persist that bound before
+          // crossing the native seam; a start has no such known target.
+          d.steerEvidence = observed
+            ? { attemptId: d.attemptId ?? d.id, turnId: observed }
+            : undefined;
+          this.save();
+        }
+        return a.backend === "pi"
           ? handle.send(
               text,
               observed,
@@ -2081,6 +2302,7 @@ export class Workspace {
               startOnly,
               humanContext,
             );
+      };
       let turnId: string;
       try {
         sendStarted = true;
@@ -2125,6 +2347,7 @@ export class Workspace {
           ...(d.images?.length ? { images: d.images } : {}),
         });
       d.status = "sent";
+      d.steerEvidence = undefined;
       d.turnId = turnId;
       this.activity(a);
       for (const q of a.questions)
@@ -2192,6 +2415,7 @@ export class Workspace {
         a.stop?.status !== "unknown";
       if (d.status !== "sent") {
         d.status = error instanceof DeliveryRejected ? "failed" : "uncertain";
+        if (d.status === "failed") d.steerEvidence = undefined;
         d.error = error instanceof Error ? error.message : "Delivery failed";
       }
       if (
@@ -2220,6 +2444,7 @@ export class Workspace {
       }
       this.save();
     }
+    this.refreshCurrentExecution(a);
     return this.detail(a.id);
   }
   retryDelivery(id: string, deliveryId: string) {
@@ -2501,6 +2726,7 @@ export class Workspace {
       this.completedTurns.add(`${id}/${native.turnId}`);
       if (
         automatic &&
+        !localCodex(a) &&
         native.completed === true &&
         this.automaticFollowUps.get(id) === operationId &&
         !a.stop &&
@@ -2572,7 +2798,7 @@ export class Workspace {
           "Inspect unresolved submissions before continuing the queue",
         );
       if (!this.handles.has(id)) {
-        if (a.backend !== "pi" || !a.threadId)
+        if ((a.backend !== "pi" && !localCodex(a)) || !a.threadId)
           throw new Error("Session connection unavailable");
         const threadId = a.threadId;
         await this.handle(a, false);
@@ -2599,6 +2825,7 @@ export class Workspace {
     const agent = this.state.agents.find((a) => a.id === id);
     if (
       !agent ||
+      (this.shuttingDown && localCodex(agent)) ||
       agent.role !== "orc" ||
       !agent.deliveries.some(
         (d) => d.mode === "follow_up" && d.status === "waiting",
@@ -2631,6 +2858,7 @@ export class Workspace {
       if (!d) return;
       this.automaticFollowUps.set(id, d.id);
       // Claim and persist before crossing either provider's admission seam.
+      this.invalidateCurrentExecution(a);
       d.status = "sending";
       this.save();
       await this.deliver(
@@ -3506,6 +3734,10 @@ export class Workspace {
     else if (
       w.state === "working" ||
       w.state === "stopping" ||
+      (localCodex(w) &&
+        (w.turnEnded === false ||
+          w.stop?.status === "pending" ||
+          w.stop?.status === "unknown")) ||
       (w.state !== "idle" && !w.turnEnded)
     )
       reason =
@@ -3539,6 +3771,7 @@ export class Workspace {
     for (const w of this.state.agents) {
       if (
         w.role === "orc" ||
+        (this.shuttingDown && localCodex(w)) ||
         w.closed ||
         !w.closeRequest ||
         this.closingChildren.has(w.id) ||
@@ -3590,6 +3823,10 @@ export class Workspace {
       );
     if (
       a.state !== "idle" ||
+      (localCodex(a) &&
+        (a.turnEnded === false ||
+          a.stop?.status === "pending" ||
+          a.stop?.status === "unknown")) ||
       this.opening.has(a.id) ||
       a.deliveries.some(
         (d) =>
@@ -3614,6 +3851,52 @@ export class Workspace {
     if (a.questions.some((q) => q.state !== "answered"))
       throw new Error(`${a.title} has unanswered questions`);
   }
+  /** Observe terminal events for known local turns before shutting down their server. */
+  async prepareShutdown() {
+    this.shuttingDown = true;
+    const turns = this.state.agents.flatMap((a) => {
+      const handle = this.handles.get(a.id);
+      return localCodex(a) &&
+        !a.closed &&
+        a.turnId &&
+        handle &&
+        (a.state === "working" ||
+          a.state === "stopping" ||
+          (a.state === "error" && a.turnEnded === false))
+        ? [{ agent: a, handle, turnId: a.turnId }]
+        : [];
+    });
+    await Promise.all(
+      turns.map(async ({ agent, handle, turnId }) => {
+        let unsubscribe = () => {};
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const finished = new Promise<void>((resolve) => {
+          const check = () => {
+            if (
+              this.disposed ||
+              this.completedTurns.has(`${agent.id}/${turnId}`)
+            )
+              resolve();
+          };
+          unsubscribe = this.subscribe(check);
+          timer = setTimeout(resolve, 4500);
+          check();
+        });
+        try {
+          if (
+            !this.completedTurns.has(`${agent.id}/${turnId}`) &&
+            agent.stop?.status !== "pending" &&
+            agent.stop?.status !== "unknown"
+          )
+            void handle.interrupt(turnId).catch(() => {});
+          await finished;
+        } finally {
+          unsubscribe();
+          if (timer) clearTimeout(timer);
+        }
+      }),
+    );
+  }
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
@@ -3625,6 +3908,7 @@ export class Workspace {
     this.branches.dispose();
     this.subscribers.clear();
     this.completedItems.clear();
+    this.connections.clear();
     void this.options.runtime.close().catch(() => {
       console.error("Runtime shutdown could not release all resources");
     });

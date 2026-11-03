@@ -1398,7 +1398,7 @@ test("Orc title edits update the runtime name, survive restart and never send a 
   expect(restarted.detail(owner.id).messages).toHaveLength(0);
 });
 
-test("restart reads canonical Orc names without resuming turns and preserves cache on read failure", async () => {
+test("selecting a restored Orc reads its canonical name without resuming turns and preserves cache on failure", async () => {
   const { app, runtime, directory, owner, worker } = await workerFixture();
   const threadId = app.detail(owner.id).threadId!;
   await app.rename(owner.id, "Cached name");
@@ -1418,6 +1418,8 @@ test("restart reads canonical Orc names without resuming turns and preserves cac
     return open(...args);
   };
   await Bun.sleep(0);
+  expect(restored.detail(owner.id).title).toBe("Cached name");
+  await restored.reconcileSettings(owner.id);
   expect(restored.detail(owner.id).title).toBe("Renamed in Codex");
   expect(restored.detail(worker.id).title).toBe("Reader");
   expect(runtime.inputs).toHaveLength(inputCount);

@@ -650,9 +650,11 @@ export class CodexRuntime implements Runtime {
       | undefined;
     let threadId = agent.threadId;
     let threadName: string | null = null;
+    let resumedPersistent = false;
     let titleGeneration: AbortController | undefined;
     const dispatch = (event: RuntimeEvent) => {
-      if (threadId) this.emptyThreads.delete(threadId);
+      if (threadId && event.type !== "thread-status")
+        this.emptyThreads.delete(threadId);
       if (!closed) notify({ ...event, threadId });
     };
     const off = [
@@ -660,6 +662,7 @@ export class CodexRuntime implements Runtime {
         if (p.threadId === threadId) {
           nativeReleased = true;
           releaseWaiter?.resolve();
+          dispatch({ type: "thread-status" });
         }
       }),
       client.onError((error) => {
@@ -680,6 +683,9 @@ export class CodexRuntime implements Runtime {
       client.onNotification("turn/started", (p) => {
         if (p.threadId === threadId)
           dispatch({ type: "working", turnId: p.turn.id });
+      }),
+      client.onNotification("thread/status/changed", (p) => {
+        if (p.threadId === threadId) dispatch({ type: "thread-status" });
       }),
       client.onNotification("item/agentMessage/delta", (p) => {
         if (p.threadId === threadId && p.delta.length)
@@ -804,6 +810,9 @@ export class CodexRuntime implements Runtime {
             environments,
             historyMode: "paginated",
           });
+      if (agent.threadId && response.thread.id !== agent.threadId)
+        throw new Error("Resumed thread identity changed");
+      resumedPersistent = !!agent.threadId && !response.thread.ephemeral;
       threadId = response.thread.id;
       this.threads.set(threadId, client);
       threadName = response.thread.name;
@@ -872,6 +881,49 @@ export class CodexRuntime implements Runtime {
       threadName,
       historyCursor,
       ...resumedSettings,
+      ...(resumedPersistent && selectedEnvironment === "local"
+        ? {
+            currentExecution: async () => {
+              if (closed || nativeReleased || this.threads.get(id) !== client)
+                return undefined;
+              // The resumed handle is the ownership boundary. The last turn
+              // is a display projection, never evidence of its admission.
+              const page: v2.ThreadTurnsListResponse = await client.call(
+                "thread/turns/list",
+                {
+                  threadId: id,
+                  limit: 1,
+                  sortDirection: "desc",
+                  itemsView: "summary",
+                },
+                { timeoutMs: 2500 },
+              );
+              const current = await client.threadRead(
+                { threadId: id, includeTurns: false },
+                { timeoutMs: 2500 },
+              );
+              if (
+                closed || nativeReleased || this.threads.get(id) !== client ||
+                current.thread.id !== id || current.thread.ephemeral
+              )
+                return undefined;
+              if (current.thread.status.type === "active")
+                return { state: "working" as const };
+              const latest = page.data[0];
+              if (
+                current.thread.status.type !== "idle" ||
+                (latest && !["completed", "failed", "interrupted"].includes(latest.status))
+              )
+                return undefined;
+              return {
+                state: "idle" as const,
+                ...(latest?.status === "interrupted"
+                  ? { lastInterrupted: true as const }
+                  : {}),
+              };
+            },
+          }
+        : {}),
       readSettings: async () => {
         await checkTarget();
         if (closed || this.threads.get(id) !== client)
@@ -1014,6 +1066,13 @@ export class CodexRuntime implements Runtime {
         let originalCompleted = false;
         let latestTerminal = false;
         let latestId: string | undefined;
+        // Local Codex may synthesize interrupted from an unfinished rollout
+        // merely because this server has no live turn. That projection does
+        // not prove that another server stopped the original execution.
+        const terminal = (status: string) =>
+          status === "completed" ||
+          status === "failed" ||
+          (selectedEnvironment !== "local" && status === "interrupted");
         try {
           for (let pages = 0; pages < 100; pages++) {
             const page: v2.ThreadTurnsListResponse = await client.call(
@@ -1028,20 +1087,12 @@ export class CodexRuntime implements Runtime {
             );
             if (pages === 0) {
               latestId = page.data[0]?.id;
-              latestTerminal =
-                !!page.data[0] &&
-                ["completed", "failed", "interrupted"].includes(
-                  page.data[0].status,
-                );
+              latestTerminal = !!page.data[0] && terminal(page.data[0].status);
             }
             const original = page.data.find((turn) => turn.id === turnId);
             if (original) {
               originalCompleted = original.status === "completed";
-              originalTerminal = [
-                "completed",
-                "failed",
-                "interrupted",
-              ].includes(original.status);
+              originalTerminal = terminal(original.status);
               break;
             }
             if (!page.nextCursor) break;

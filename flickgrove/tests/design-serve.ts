@@ -66,6 +66,7 @@ let modelFailure = false;
 let quotaResets: number | undefined = 1791252000;
 let quotaReads = 0;
 let stopMode = "pending";
+let stopGate = Promise.withResolvers<void>();
 let sendMode = "accepted";
 let sendGate = Promise.withResolvers<void>();
 let freshNoWorkers = false;
@@ -232,6 +233,7 @@ function unit(
     return turnId ?? crypto.randomUUID();
   };
   runtime.interruptOverride = async () => {
+    if (stopMode === "held") await stopGate.promise;
     if (stopMode === "unknown") throw new Error("fixture uncertain acceptance");
   };
   const app = new Workspace({
@@ -440,6 +442,8 @@ async function reset(mode = "working") {
   quotaReads = 0;
   usage = 72;
   stopMode = "pending";
+  stopGate.resolve();
+  stopGate = Promise.withResolvers<void>();
   sendMode = "accepted";
   sendGate.resolve();
   sendGate = Promise.withResolvers<void>();
@@ -729,6 +733,7 @@ const server = Bun.serve({
         hub: current.service.identity.id,
         quotaReads,
         localAgents: current.app.snapshot().agents,
+        orcDeliveries: current.app.snapshot().agents.some((agent) => agent.id === "orc") ? current.app.detail("orc").deliveries : [],
         inputs: current.runtime.inputs,
         imageUploads: JSON.parse(
           readFileSync(
@@ -762,6 +767,8 @@ const server = Bun.serve({
         usage?: number | null;
         stopMode?: string;
         sendMode?: string;
+        sessionConnection?: { state: "connecting" | "failed"; error?: string } | null;
+        executionViews?: Array<{ id: string; state: "idle" | "working" | null; interrupted?: boolean; keepState?: boolean }>;
         inspection?: { accepted: boolean; settled: boolean; turnId?: string };
         complete?: string;
         question?: boolean;
@@ -874,11 +881,51 @@ const server = Bun.serve({
       if (body.quotaResets !== undefined)
         quotaResets = body.quotaResets ?? undefined;
       if (body.usage !== undefined) usage = body.usage;
-      if (body.stopMode) stopMode = body.stopMode;
+      if (body.stopMode) {
+        stopMode = body.stopMode;
+        if (stopMode !== "held") stopGate.resolve();
+        else stopGate = Promise.withResolvers<void>();
+      }
       if (body.sendMode) {
         sendMode = body.sendMode;
         if (sendMode !== "held") sendGate.resolve();
         else sendGate = Promise.withResolvers<void>();
+      }
+      if (body.sessionConnection !== undefined) {
+        const app = current.app as unknown as {
+          connections: Map<string, { state: "connecting" | "failed"; error?: string }>;
+          save: () => void;
+        };
+        if (body.sessionConnection) app.connections.set("orc", body.sessionConnection);
+        else app.connections.delete("orc");
+        app.save();
+      }
+      if (body.executionViews) {
+        const app = current.app as unknown as {
+          state: { agents: Array<{ id: string; state: string; turnEnded?: boolean; error?: string; threadId?: string }> };
+          handles: Map<string, unknown>;
+          currentExecutions: Map<string, unknown>;
+          save: () => void;
+        };
+        for (const item of body.executionViews) {
+          const agent = app.state.agents.find((a) => a.id === item.id)!;
+          const handle = app.handles.get(item.id);
+          if (!agent || !agent.threadId || !handle) throw new Error("Fixture needs a loaded thread");
+          if (!item.keepState) {
+            agent.state = "error";
+            agent.turnEnded = false;
+            agent.error = "App-server disconnected. Send a message to resume the thread.";
+          }
+          if (item.state === null) app.currentExecutions.delete(item.id);
+          else {
+            app.currentExecutions.set(item.id, {
+              handle,
+              threadId: agent.threadId,
+              view: { state: item.state, ...(item.interrupted ? { lastInterrupted: true } : {}) },
+            });
+          }
+        }
+        app.save();
       }
       if (body.inspection) {
         const inspection = body.inspection;

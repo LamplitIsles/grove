@@ -215,6 +215,19 @@ const agent = z.object({
   serviceTier: z.string(),
   state: z.enum(["idle", "working", "stopping", "error"]),
   workUnconfirmed: z.boolean().optional(),
+  currentExecution: z
+    .object({
+      state: z.enum(["idle", "working"]),
+      lastInterrupted: z.literal(true).optional(),
+    })
+    .optional(),
+  connection: z
+    .object({
+      state: z.enum(["connecting", "failed"]),
+      error: z.string().optional(),
+    })
+    .optional(),
+  lastInterrupted: z.boolean().optional(),
   closed: z.boolean(),
   questions: z.array(question),
   unansweredCount: z.number().optional(),

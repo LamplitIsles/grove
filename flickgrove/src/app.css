@@ -257,6 +257,20 @@ main {
   color: #85858e;
   font-size: 11px;
 }
+.session-recovery-note {
+  margin-top: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.session-recovery-note.failed {
+  color: #e6ba7b;
+}
+.session-recovery-detail {
+  max-height: 5rem;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
 .conversation {
   flex: 1;
   min-height: 0;

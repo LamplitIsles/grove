@@ -103,16 +103,28 @@ function connect(socket: ServerWebSocket<SocketData>) {
             throw new Error("Select one visible conversation");
           // Validate identities before changing subscriptions; caches cannot grant writes.
           const gen = ++generation;
+          const background: string[] = [];
           for (const id of p.ids) {
-            await app.detail(id);
-            await app.synchronizeDetail(id).catch(() => app.detail(id));
-            await app.reconcileSettings(id).catch(() => {});
+            const detail = await app.detail(id);
+            if (
+              (detail.backend ?? "codex") === "codex" &&
+              (detail.project.environment?.id ?? "local") === "local"
+            )
+              background.push(id);
+            else {
+              await app.synchronizeDetail(id).catch(() => app.detail(id));
+              await app.reconcileSettings(id).catch(() => {});
+            }
           }
           if (gen !== generation || disposed) return null;
           selection = p.ids;
           unobserve();
           unobserve = () => {};
           await refresh();
+          for (const id of background) {
+            void app.synchronizeDetail(id).catch(() => {});
+            void app.reconcileSettings(id).catch(() => {});
+          }
           return null;
         }
         if (member === "identity") {

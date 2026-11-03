@@ -209,6 +209,12 @@ export interface Agent {
   state: WorkState;
   /** The execution or stop has not yet been confirmed to have ended. */
   workUnconfirmed?: boolean;
+  /** Volatile state of the currently resumed local Codex thread, not an operation receipt. */
+  currentExecution?: { state: "idle" | "working"; lastInterrupted?: true };
+  /** Local Codex session connection attempt; independent of execution outcome. */
+  connection?: { state: "connecting" | "failed"; error?: string };
+  /** The last observed local Codex turn was interrupted. */
+  lastInterrupted?: boolean;
   execution?: { kind: "capacity" | "error"; retrying: boolean };
   workingSince?: number;
   /** Most recent observed work in this Orc's tree, in Unix milliseconds. */

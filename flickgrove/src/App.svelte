@@ -187,7 +187,7 @@
   const hosts = $derived(snapshot.hosts ?? []);
   const selectedHost = $derived(hosts.find(h => h.id === shownDetail?.hostId));
   const hostConnected = $derived(!!selectedHost?.connected);
-  const visibleAgents = $derived(snapshot.agents.map(a => optimistic(a.id) && a.state !== "working" && a.state !== "stopping" ? {...a,state:"working" as const} : a));
+  const visibleAgents = $derived(snapshot.agents.map(a => optimistic(a.id) && a.state !== "working" && a.state !== "stopping" ? {...a,state:"working" as const,currentExecution:undefined} : a));
   $effect(() => { if (navigationReady) preferences.selection = { host: instanceId, sessions: $state.snapshot(remembered) }; });
   let environments = $state<ProjectEnvironment[]>([]);
   let selectedEnvironment = $state("local");
@@ -406,7 +406,10 @@
     const local = outgoing.entries.find(o => dispatchKey(o.agentId,o.id) === dispatch.key);
     return !dispatch.admitting || local?.status === "pending";
   };
-  const optimistic = (id:string) => dispatches.some(d => d.key.startsWith(id + "/") && dispatchActive(d)) && !!hosts.find(h => h.id === id.split(":")[0])?.connected;
+  const optimistic = (id:string) => {
+    const agent = detail?.id === id ? detail : snapshot.agents.find(a => a.id === id);
+    return !agent?.connection && dispatches.some(d => d.key.startsWith(id + "/") && dispatchActive(d)) && !!hosts.find(h => h.id === id.split(":")[0])?.connected;
+  };
   async function retryUser(id:string, operationId:string, older?:import("./contracts").Delivery) {
     const key = dispatchKey(id,operationId);
     if (!client || dispatches.some(d=>d.key===key && dispatchActive(d)) || receiptAlreadyAccepted(id,operationId)) return;

@@ -1149,6 +1149,21 @@ test("native inspection pages by client ID and requires both terminal turn and i
         before.filter((r) => r.method === "thread/items/list").length,
     ).toBe(2);
     expect(inspected.filter((r) => r.method === "turn/start")).toHaveLength(1);
+    // Codex can project an unfinished historical turn as interrupted when its
+    // own server is idle, without proving a previous server stopped.
+    await writeFile(
+      control,
+      JSON.stringify({
+        hold: true,
+        historyItems: [target, ...filler],
+        projectInterrupted: true,
+      }),
+    );
+    expect(await handle.inspectFollowUp!("operation")).toMatchObject({
+      accepted: true,
+      settled: false,
+      turnId,
+    });
     await writeFile(
       control,
       JSON.stringify({

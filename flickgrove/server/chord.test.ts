@@ -457,7 +457,7 @@ test("slow read and late result leave the socket and other calls alive", async (
   expect(disconnected).toBe(0);
 });
 
-test("timed-out reconnect selections identify the read and later publish the selected history", async () => {
+test("selection publishes cached detail while history loads and ignores late results after switching", async () => {
   const f = fixture();
   const a = await f.app.createOrc("alpha"),
     b = await f.app.createOrc("beta");
@@ -491,18 +491,11 @@ test("timed-out reconnect selections identify the read and later publish the sel
     () => offline++,
     80,
   );
-  const attempts = await Promise.allSettled(
-    [1, 2, 3].map(() => client.call("select", { ids: [aid] })),
-  );
-  expect(slowReads).toBe(3);
-  for (const result of attempts) {
-    expect(result.status).toBe("rejected");
-    if (result.status !== "rejected") throw new Error("Expected timeout");
-    expect(result.reason).toBeInstanceOf(RequestTimeout);
-    expect(result.reason.member).toBe("select");
-    expect(result.reason.message).toBe("Response timed out. Outcome unknown.");
-  }
-  expect(view?.details[aid]).toBeUndefined();
+  await client.call("select", { ids: [aid] });
+  await until(() => !!view?.details[aid] && slowReads === 1);
+  expect(
+    view?.details[aid]?.messages.some((m) => m.id === "native-after-restart"),
+  ).toBe(false);
   gate.resolve();
   await until(
     () =>
@@ -513,14 +506,12 @@ test("timed-out reconnect selections identify the read and later publish the sel
   expect(runtime.inputs).toHaveLength(0);
   expect(offline).toBe(0);
   gate = Promise.withResolvers<void>();
-  await expect(client.call("select", { ids: [aid] })).rejects.toBeInstanceOf(
-    RequestTimeout,
-  );
-  expect(slowReads).toBe(4);
+  await client.call("select", { ids: [aid] });
+  await until(() => slowReads === 2);
   await client.call("select", { ids: [bid] });
   await until(() => !!view?.details[bid]);
   gate.resolve();
-  await until(() => completedReads === 4);
+  await until(() => completedReads === 2);
   expect(view?.details[aid]).toBeUndefined();
   await expect(
     client.call("select", { ids: ["foreign:missing"] }),
@@ -815,4 +806,40 @@ test("failed submission deletion is owning-Peer durable, serialized and rejected
   expect(
     f.app.detail(a.id).deliveries.find((d) => d.id === report.id)?.status,
   ).toBe("failed");
+});
+
+test("selection returns while native recovery is pending and a newly sent input waits once", async () => {
+  const f = fixture();
+  const agent = await f.app.createOrc("alpha");
+  await f.app.send(agent.id, "previous", "previous");
+  f.runtime.emit(agent.id, {
+    type: "completed",
+    turnId: f.app.detail(agent.id).turnId!,
+    status: "completed",
+  });
+  const runtime = f.restart();
+  const gate = Promise.withResolvers<void>();
+  const originalOpen = runtime.open.bind(runtime);
+  runtime.open = async (...args) => {
+    await gate.promise;
+    return originalOpen(...args);
+  };
+  let view: View | undefined;
+  const client = await f.client((v) => (view = v));
+  const id = qualify(f.service.identity.id, agent.id);
+  try {
+    await client.call("select", { ids: [id] });
+    await until(() => view?.details[id]?.connection?.state === "connecting");
+    const send = client.call("send", { id, text: "new", operationId: "new" });
+    await Bun.sleep(50);
+    expect(runtime.inputs).toHaveLength(0);
+    expect(view?.details[id]?.state).toBe("idle");
+    gate.resolve();
+    await send;
+    expect(runtime.inputs.map((input) => input.text)).toEqual(["new"]);
+    expect(runtime.inputs[0]?.clientId).toBe("new");
+    expect(f.app.detail(agent.id).threadId).toBe(agent.threadId);
+  } finally {
+    gate.resolve();
+  }
 });
