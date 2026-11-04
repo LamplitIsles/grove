@@ -32,7 +32,7 @@ export default defineConfig({
           fileURLToPath(new URL(".", import.meta.url)),
         );
       },
-      closeBundle() {
+      writeBundle() {
         const assets = readdirSync(resolve(outputDirectory, "assets")).map(
           (file) => `/assets/${file}`,
         );

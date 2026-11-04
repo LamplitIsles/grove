@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 export type SourceVersion = { commit: string; dirty: boolean };
@@ -58,6 +58,15 @@ export function instanceVersion(
     const asset: unknown = JSON.parse(
       readFileSync(resolve(assets, "version.json"), "utf8"),
     );
+    const packaged = resolve(directory, "source.json");
+    if (existsSync(packaged)) {
+      const source: unknown = JSON.parse(readFileSync(packaged, "utf8"));
+      if (!source || typeof source !== "object") return null;
+      const commit = (source as { commit?: unknown }).commit;
+      if (typeof commit !== "string" || !/^[a-f0-9]{40}$/.test(commit))
+        return null;
+      return matchingVersion({ commit, dirty: false }, asset);
+    }
     return matchingVersion(sourceVersion(directory), asset);
   } catch {
     return null;

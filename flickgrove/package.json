@@ -7,7 +7,7 @@
     "start": "bun server/main.ts",
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
-    "typecheck": "svelte-check --tsconfig ./tsconfig.json",
+    "typecheck": "paraglide-js compile --project ./project.inlang --outdir ./src/paraglide --strategy baseLocale --emit-ts-declarations && svelte-check --tsconfig ./tsconfig.json",
     "test": "bun test server tests/skill-search.test.ts tests/history-cache.test.ts tests/message-image-cache.test.ts tests/message-time.test.ts tests/reading-cache.test.ts tests/project-identity.test.ts",
     "test:browser": "playwright test"
   },

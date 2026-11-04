@@ -1,0 +1,57 @@
+clone:
+  git:
+    image: docker.io/woodpeckerci/plugin-git:2.9.2
+    settings:
+      partial: false
+      depth: 0
+
+when:
+  - event: push
+    branch: main
+
+concurrency: 1
+
+steps:
+  - name: prepare-bun
+    image: oven/bun:1.3.14@sha256:e10577f0db68676a7024391c6e5cb4b879ebd17188ab750cf10024a6d700e5c4
+    commands:
+      - cp "$$(command -v bun)" .git/grove-bun
+  - name: build-and-verify
+    image: node:24.18.1-bookworm@sha256:19cd848a0e073d34bd8cd5545a1b6b4d28489b3e3b607366621ced442bd5f6b4
+    commands:
+      - |
+        set -eu
+        export PATH="$${PWD}/.git:$${PATH}"
+        ln -s grove-bun .git/bun
+        node flickgrove/scripts/snapshot-publish.mjs verify-head
+        test -z "$$(git status --porcelain --untracked-files=all)"
+        bun install --frozen-lockfile
+        node --test flickgrove/scripts/snapshot-publish.test.mjs flickgrove/scripts/snapshot-outcomes.test.mjs
+        bun run --cwd flickgrove typecheck
+        bun run --cwd flickgrove build --outDir ../.snapshot-artifacts/assets
+        git diff --quiet
+        git diff --cached --quiet
+        node flickgrove/scripts/package-snapshot.mjs .snapshot-artifacts/package .snapshot-artifacts/assets "$${CI_COMMIT_SHA}"
+        mv .snapshot-artifacts/lamplitisles-flickgrove-*.tgz .snapshot-artifacts/snapshot.tgz
+        sha256sum .snapshot-artifacts/snapshot.tgz > .snapshot-artifacts/snapshot.sha256
+        mkdir .snapshot-artifacts/install
+        npm install --prefix .snapshot-artifacts/install --ignore-scripts --legacy-peer-deps --no-audit --no-fund --registry https://registry.npmjs.org/ "$${PWD}/.snapshot-artifacts/snapshot.tgz"
+        node -e 'const fs = require("node:fs"); for (const p of ["node_modules", "flickgrove/node_modules", "codex-tps/node_modules"]) fs.rmSync(p, { recursive: true, force: true });'
+        bun --no-install flickgrove/scripts/package-smoke.ts .snapshot-artifacts/install/node_modules/@lamplitisles/flickgrove .snapshot-artifacts/smoke "$${CI_COMMIT_SHA}"
+        sha256sum -c .snapshot-artifacts/snapshot.sha256
+  - name: publish
+    image: node:24.18.1-bookworm@sha256:19cd848a0e073d34bd8cd5545a1b6b4d28489b3e3b607366621ced442bd5f6b4
+    environment:
+      FORGEJO_PACKAGES_TOKEN:
+        from_secret: forgejo_packages_token
+    commands:
+      - |
+        set -eu
+        test -n "$${FORGEJO_PACKAGES_TOKEN}" || { echo 'Missing Forgejo packages token'; exit 1; }
+        auth_file="$$(mktemp)"
+        trap 'rm -f "$${auth_file}"' EXIT
+        chmod 600 "$${auth_file}"
+        printf '%s\n' '//forgejo.n5.guion.io/api/packages/LamplitIsles/npm/:_authToken=$${FORGEJO_PACKAGES_TOKEN}' > "$${auth_file}"
+        export NPM_CONFIG_USERCONFIG="$${auth_file}"
+        sha256sum -c .snapshot-artifacts/snapshot.sha256
+        node flickgrove/scripts/snapshot-publish.mjs publish .snapshot-artifacts/snapshot.tgz
