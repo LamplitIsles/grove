@@ -24,7 +24,11 @@ import { WorkspaceStore } from "../server/workspace-store";
 import { HostService } from "../server/hosts";
 import { createHandler, createUpgrade } from "../server/http";
 import { groveWebsocket, type SocketData } from "../server/chord-socket";
-import { type RuntimeEvent, DeliveryRejected } from "../server/runtime";
+import {
+  type RuntimeEvent,
+  DeliveryRejected,
+  RequestRefused,
+} from "../server/runtime";
 import { voiceHttp } from "../server/voice-http";
 import { fakeVoiceProvider } from "./voice-fixture";
 import { FakeRuntime } from "../server/testing";
@@ -69,6 +73,16 @@ let stopMode = "pending";
 let stopGate = Promise.withResolvers<void>();
 let sendMode = "accepted";
 let sendGate = Promise.withResolvers<void>();
+let sendReply: ReturnType<typeof Promise.withResolvers<void>> | undefined;
+let sendReplyArmed = false;
+let sendReplyWaiting = false;
+let sendReplyError = false;
+let queueRejection: ReturnType<typeof Promise.withResolvers<void>> | undefined;
+let queueRejectionWaiting = false;
+let queueAck: ReturnType<typeof Promise.withResolvers<void>> | undefined;
+let queueAckWaiting = false;
+let queueLookupGate: ReturnType<typeof Promise.withResolvers<void>> | undefined;
+let queueLookupCount = 0;
 let freshNoWorkers = false;
 let longConversations = false;
 let rowConversations = false;
@@ -267,12 +281,53 @@ function unit(
         }
       : {}),
   });
+  const enqueue = app.enqueueFollowUp.bind(app);
+  app.enqueueFollowUp = async (...args) => {
+    if (queueRejection) {
+      const gate = queueRejection;
+      queueRejectionWaiting = true;
+      await gate.promise;
+      queueRejection = undefined;
+      queueRejectionWaiting = false;
+      throw new RequestRefused("Queue rejected");
+    }
+    const result = await enqueue(...args);
+    if (queueAck) {
+      queueAckWaiting = true;
+      await queueAck.promise;
+      queueAckWaiting = false;
+    }
+    return result;
+  };
   const service = new HostService(app, {
     directory: stateDirectory,
     name,
     origin,
     // Browser startup can contend with compilation on the host; keep synthetic
     // peer admission within the browser test budget without treating it as an outage.
+  });
+  const originalSend = service.send.bind(service);
+  service.send = async (...args) => {
+    const result = await originalSend(...args);
+    const gate = sendReplyArmed ? sendReply : undefined;
+    if (gate) {
+      const error = sendReplyError;
+      sendReplyArmed = false;
+      sendReplyWaiting = true;
+      await gate.promise;
+      sendReplyWaiting = false;
+      if (error) throw new Error("Synthetic late failure");
+    }
+    return result;
+  };
+  const lookupFollowUp = service.lookupFollowUp.bind(service);
+  Object.defineProperty(service, "lookupFollowUp", {
+    value: async (...args: Parameters<typeof lookupFollowUp>) => {
+      const result = lookupFollowUp(...args);
+      queueLookupCount++;
+      if (queueLookupGate) await queueLookupGate.promise;
+      return result;
+    },
   });
   const originalDetail = service.detail.bind(service);
   service.detail = async (id) => {
@@ -445,6 +500,20 @@ async function reset(mode = "working") {
   stopGate.resolve();
   stopGate = Promise.withResolvers<void>();
   sendMode = "accepted";
+  sendReply?.resolve();
+  sendReply = undefined;
+  sendReplyArmed = false;
+  sendReplyWaiting = false;
+  sendReplyError = false;
+  queueRejection?.resolve();
+  queueRejection = undefined;
+  queueRejectionWaiting = false;
+  queueAck?.resolve();
+  queueAck = undefined;
+  queueAckWaiting = false;
+  queueLookupGate?.resolve();
+  queueLookupGate = undefined;
+  queueLookupCount = 0;
   sendGate.resolve();
   sendGate = Promise.withResolvers<void>();
   const workers = ![
@@ -693,6 +762,20 @@ const server = Bun.serve({
         user: { id: "fixture-user", name: "Fixture", color: "#555555" },
         colors: ["#555555"],
       });
+    if (url.pathname === "/fixture/send-reply" && request.method === "POST") {
+      const { action, error } = (await request.json()) as {
+        action: "arm" | "release";
+        error?: boolean;
+      };
+      if (action === "arm") {
+        sendReply = Promise.withResolvers<void>();
+        sendReplyArmed = true;
+        sendReplyError = error ?? false;
+      } else {
+        sendReply?.resolve();
+      }
+      return Response.json({ ok: true });
+    }
     if (url.pathname === "/fixture/voice") {
       if (request.method === "POST") {
         const body = await request.json();
@@ -730,10 +813,18 @@ const server = Bun.serve({
     }
     if (url.pathname === "/fixture/info")
       return Response.json({
+        sendReplyWaiting,
+        queueRejectionWaiting,
+        queueAckWaiting,
+        queueLookupCount,
         hub: current.service.identity.id,
         quotaReads,
         localAgents: current.app.snapshot().agents,
-        orcDeliveries: current.app.snapshot().agents.some((agent) => agent.id === "orc") ? current.app.detail("orc").deliveries : [],
+        orcDeliveries: current.app
+          .snapshot()
+          .agents.some((agent) => agent.id === "orc")
+          ? current.app.detail("orc").deliveries
+          : [],
         inputs: current.runtime.inputs,
         imageUploads: JSON.parse(
           readFileSync(
@@ -742,6 +833,31 @@ const server = Bun.serve({
           ),
         ),
       });
+    if (
+      url.pathname === "/fixture/queue-rejection" &&
+      request.method === "POST"
+    ) {
+      const { action } = (await request.json()) as {
+        action: "arm" | "release";
+      };
+      if (action === "arm") queueRejection = Promise.withResolvers<void>();
+      else queueRejection?.resolve();
+      return Response.json({ ok: true });
+    }
+    if (url.pathname === "/fixture/queue-gates" && request.method === "POST") {
+      const { action } = (await request.json()) as {
+        action: "arm" | "release" | "pause-lookups" | "release-lookups";
+      };
+      if (action === "arm") queueAck = Promise.withResolvers<void>();
+      if (action === "release") queueAck?.resolve();
+      if (action === "pause-lookups")
+        queueLookupGate = Promise.withResolvers<void>();
+      if (action === "release-lookups") {
+        queueLookupGate?.resolve();
+        queueLookupGate = undefined;
+      }
+      return Response.json({ ok: true });
+    }
     if (url.pathname === "/fixture/change" && request.method === "POST") {
       const body = (await request.json()) as {
         projectsDelay?: number;
@@ -767,8 +883,16 @@ const server = Bun.serve({
         usage?: number | null;
         stopMode?: string;
         sendMode?: string;
-        sessionConnection?: { state: "connecting" | "failed"; error?: string } | null;
-        executionViews?: Array<{ id: string; state: "idle" | "working" | null; interrupted?: boolean; keepState?: boolean }>;
+        sessionConnection?: {
+          state: "connecting" | "failed";
+          error?: string;
+        } | null;
+        executionViews?: Array<{
+          id: string;
+          state: "idle" | "working" | null;
+          interrupted?: boolean;
+          keepState?: boolean;
+        }>;
         inspection?: { accepted: boolean; settled: boolean; turnId?: string };
         complete?: string;
         question?: boolean;
@@ -893,16 +1017,28 @@ const server = Bun.serve({
       }
       if (body.sessionConnection !== undefined) {
         const app = current.app as unknown as {
-          connections: Map<string, { state: "connecting" | "failed"; error?: string }>;
+          connections: Map<
+            string,
+            { state: "connecting" | "failed"; error?: string }
+          >;
           save: () => void;
         };
-        if (body.sessionConnection) app.connections.set("orc", body.sessionConnection);
+        if (body.sessionConnection)
+          app.connections.set("orc", body.sessionConnection);
         else app.connections.delete("orc");
         app.save();
       }
       if (body.executionViews) {
         const app = current.app as unknown as {
-          state: { agents: Array<{ id: string; state: string; turnEnded?: boolean; error?: string; threadId?: string }> };
+          state: {
+            agents: Array<{
+              id: string;
+              state: string;
+              turnEnded?: boolean;
+              error?: string;
+              threadId?: string;
+            }>;
+          };
           handles: Map<string, unknown>;
           currentExecutions: Map<string, unknown>;
           save: () => void;
@@ -910,18 +1046,23 @@ const server = Bun.serve({
         for (const item of body.executionViews) {
           const agent = app.state.agents.find((a) => a.id === item.id)!;
           const handle = app.handles.get(item.id);
-          if (!agent || !agent.threadId || !handle) throw new Error("Fixture needs a loaded thread");
+          if (!agent || !agent.threadId || !handle)
+            throw new Error("Fixture needs a loaded thread");
           if (!item.keepState) {
             agent.state = "error";
             agent.turnEnded = false;
-            agent.error = "App-server disconnected. Send a message to resume the thread.";
+            agent.error =
+              "App-server disconnected. Send a message to resume the thread.";
           }
           if (item.state === null) app.currentExecutions.delete(item.id);
           else {
             app.currentExecutions.set(item.id, {
               handle,
               threadId: agent.threadId,
-              view: { state: item.state, ...(item.interrupted ? { lastInterrupted: true } : {}) },
+              view: {
+                state: item.state,
+                ...(item.interrupted ? { lastInterrupted: true } : {}),
+              },
             });
           }
         }
@@ -934,11 +1075,18 @@ const server = Bun.serve({
       if (body.execution) {
         const id = body.execution.agentId ?? "orc";
         const detail = current.app.detail(id);
-        current.runtime.emit(id, {
-          ...body.execution.event,
-          threadId: body.execution.threadId ?? detail.threadId,
-          turnId: body.execution.turnId ?? detail.turnId!,
-        });
+        const event = body.execution.event;
+        const threadId = body.execution.threadId ?? detail.threadId;
+        current.runtime.emit(
+          id,
+          event.type === "environment-disconnected"
+            ? { ...event, threadId }
+            : {
+                ...event,
+                threadId,
+                turnId: body.execution.turnId ?? detail.turnId!,
+              },
+        );
       }
       if (body.complete) {
         const turnId = current.app.detail("orc").turnId!;

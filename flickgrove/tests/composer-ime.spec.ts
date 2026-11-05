@@ -21,8 +21,15 @@ test("IME confirmation keeps the draft; a subsequent ordinary Enter sends", asyn
     const state = window as typeof window & { imeSends: number };
     state.imeSends = 0;
     WebSocket.prototype.send = function (data) {
-      if (typeof data === "string" && JSON.parse(data).call?.member === "send")
-        state.imeSends++;
+      if (typeof data === "string") {
+        const frame = JSON.parse(data);
+        if (
+          frame.t === "call" &&
+          frame.member === "execute" &&
+          frame.args?.member === "send"
+        )
+          state.imeSends++;
+      }
       return send.call(this, data);
     };
   });

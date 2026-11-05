@@ -287,6 +287,7 @@
     try {
       const [state, , catalog] = await Promise.all([api<Snapshot>("/snapshot"), Promise.all([loadEnvironments(),loadProjects()]), api<Model[]>("/models")]);
       models = catalog;preferences.models=catalog; if(!preferences.settings&&catalog.length){const model=catalog.find(m=>m.isDefault)??catalog[0];preferences.settings={fast:false,orc:{backend:model.backend ?? "codex",provider:model.provider,model:model.id,effort:model.defaultEffort},worker:{backend:model.backend ?? "codex",provider:model.provider,model:model.id,effort:model.defaultEffort}};snapshot={...snapshot,settings:preferences.settings};} if(!connected) adopt(state, true);
+      if(!settings && (modal === "new" || modal === "settings") && preferences.settings) settings=structuredClone(preferences.settings);
       if (selectedId) await restoreDetail(selectedId);
     } catch (e) { error = e instanceof Error ? e.message : m.load_failure(); }
     finally { loading = false; }

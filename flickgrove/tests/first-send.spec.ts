@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { fileURLToPath } from "node:url";
-import { newSession, createSession } from "./browser-actions";
+import { newSession, createSession, openSidebar } from "./browser-actions";
 let server: ChildProcess, origin: string;
 test.beforeEach(async () => {
   server = spawn("bun", ["tests/empty-session-serve.ts"], {
@@ -16,29 +16,79 @@ test.afterEach(async () => {
   server.kill("SIGTERM");
   await exited;
 });
+
+test("new session opened before connection adopts the loaded model defaults", async ({
+  page,
+}) => {
+  let releaseIdentity!: () => void;
+  let identityRequested!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    releaseIdentity = resolve;
+  });
+  const requested = new Promise<void>((resolve) => {
+    identityRequested = resolve;
+  });
+  await page.route("**/api/identity", async (route) => {
+    identityRequested();
+    await gate;
+    await route.continue();
+  });
+  try {
+    await page.goto(origin);
+    await requested;
+    await newSession(page);
+    await expect(
+      page.getByRole("dialog", { name: "New session", exact: true }),
+    ).toBeVisible();
+  } finally {
+    releaseIdentity();
+  }
+  await page.getByRole("option", { name: "Fixture", exact: true }).click();
+  await expect(
+    page
+      .getByRole("dialog", { name: "New session", exact: true })
+      .getByRole("button", { name: "New session", exact: true }),
+  ).toBeEnabled();
+});
+
 for (const width of [1440, 390]) {
   test(`fresh empty restart rejects before native send with original identity at ${width}`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
-    const results = new Map<string, unknown>();
-    const calls = new Map<string, { member: string; operation?: string }>();
+    const calls: Array<{
+      member: string;
+      operation?: string;
+      result?: unknown;
+    }> = [];
     page.on("websocket", (ws) => {
+      const pending = new Map<number, (typeof calls)[number]>();
       ws.on("framesent", ({ payload }) => {
         const frame = JSON.parse(String(payload));
-        if (frame.call)
-          calls.set(frame.id, {
-            member: frame.call.member,
-            operation: frame.call.args[0]?.operationId,
-          });
+        if (frame.t === "call" && frame.member === "execute") {
+          const call = {
+            member: frame.args.member,
+            operation: frame.args.input?.operationId,
+          };
+          calls.push(call);
+          pending.set(frame.id, call);
+        }
       });
       ws.on("framereceived", ({ payload }) => {
         const frame = JSON.parse(String(payload));
-        if (frame.type === "result") results.set(frame.id, frame.result);
+        const call = pending.get(frame.id);
+        if (frame.t === "result" && call) call.result = frame.value?.value;
       });
     });
     await page.goto(origin);
-    await newSession(page);
+    if (width === 390) {
+      await openSidebar(page);
+      await page
+        .getByRole("button", { name: "New session", exact: true })
+        .click();
+    } else {
+      await newSession(page);
+    }
     await page.getByRole("option", { name: "Fixture", exact: true }).click();
     await createSession(page);
     const id = await page.evaluate(
@@ -82,14 +132,12 @@ for (const width of [1440, 390]) {
     await expect(message.getByRole("status")).toContainText(
       "JSON-RPC error -32600: no rollout found for thread id thread-fake",
     );
-    const operation = [...calls.values()].find(
-      (c) => c.member === "send",
-    )!.operation!;
+    const operation = calls.find((c) => c.member === "send")!.operation!;
     await expect
       .poll(() =>
-        [...calls]
-          .filter(([, c]) => c.member === "lookup" && c.operation === operation)
-          .map(([id]) => results.get(id)),
+        calls
+          .filter((c) => c.member === "lookup" && c.operation === operation)
+          .map((c) => c.result),
       )
       .toContainEqual(
         expect.objectContaining({ operationId: operation, state: "rejected" }),
@@ -151,17 +199,17 @@ for (const width of [1440, 390]) {
 test("attempted input stays unknown across restart and read failure without replay", async ({
   page,
 }) => {
-  const lookupIds = new Set<string>();
   const lookupResults: unknown[] = [];
   page.on("websocket", (socket) => {
+    const lookupIds = new Set<number>();
     socket.on("framesent", ({ payload }) => {
       const frame = JSON.parse(String(payload));
-      if (frame.call?.member === "lookup") lookupIds.add(frame.id);
+      if (frame.args?.member === "lookup") lookupIds.add(frame.id);
     });
     socket.on("framereceived", ({ payload }) => {
       const frame = JSON.parse(String(payload));
-      if (frame.type === "result" && lookupIds.has(frame.id))
-        lookupResults.push(frame.result);
+      if (frame.t === "result" && lookupIds.has(frame.id))
+        lookupResults.push(frame.value?.value);
     });
   });
   expect(
@@ -255,17 +303,18 @@ test("resumed empty thread admits first input while unsupported history stays ac
   page,
 }) => {
   let operation: string | undefined;
-  const lookupIds = new Set<string>();
   const receipts: unknown[] = [];
   page.on("websocket", (socket) => {
+    const lookupIds = new Set<number>();
     socket.on("framesent", ({ payload }) => {
       const f = JSON.parse(String(payload));
-      if (f.call?.member === "send") operation = f.call.args[0].operationId;
-      if (f.call?.member === "lookup") lookupIds.add(f.id);
+      if (f.args?.member === "send") operation = f.args.input.operationId;
+      if (f.args?.member === "lookup") lookupIds.add(f.id);
     });
     socket.on("framereceived", ({ payload }) => {
       const f = JSON.parse(String(payload));
-      if (f.type === "result" && lookupIds.has(f.id)) receipts.push(f.result);
+      if (f.t === "result" && lookupIds.has(f.id))
+        receipts.push(f.value?.value);
     });
   });
   await page.goto(origin);

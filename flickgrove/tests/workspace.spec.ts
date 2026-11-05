@@ -390,24 +390,8 @@ test("Orc closure of a running Worker shows Closing and automatically removes it
 
 test("Orc titles edit in place, cancel safely, retain failed drafts and persist across reload", async ({
   page,
+  request,
 }) => {
-  let failTitle = false;
-  await page.routeWebSocket("**/api/socket", (ws) => {
-    const server = ws.connectToServer();
-    ws.onMessage((raw) => {
-      const frame = JSON.parse(String(raw));
-      if (failTitle && frame.call?.member === "rename") {
-        failTitle = false;
-        ws.send(
-          JSON.stringify({
-            type: "error",
-            id: frame.id,
-            error: "Title save failed",
-          }),
-        );
-      } else server.send(raw);
-    });
-  });
   await page.goto("/");
   await newSession(page);
   await page.getByRole("option", { name: "Alpha", exact: true }).click();
@@ -427,7 +411,7 @@ test("Orc titles edit in place, cancel safely, retain failed drafts and persist 
   await title.fill(" ");
   await expect(page.getByRole("button", { name: "Save title" })).toBeDisabled();
   await title.fill("Reader implementation");
-  failTitle = true;
+  expect((await request.post("/fixture/fail-next-title")).ok()).toBe(true);
   await page.getByRole("button", { name: "Save title" }).click();
   await expect(title).toHaveValue("Reader implementation");
   await expect(

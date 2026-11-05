@@ -165,7 +165,11 @@ test("a late detail update cannot reopen a dismissed mobile conversation", async
   await page.routeWebSocket("**/api/socket", (ws) => {
     const server = ws.connectToServer();
     server.onMessage((raw) => {
-      if (hold && JSON.parse(String(raw)).type === "update") queued.push(raw);
+      const frame = JSON.parse(String(raw));
+      // Once a state frame is held, retain later data frames in wire order.
+      // ACK frames do not advance Chord's cumulative receive counter.
+      if (hold && frame.t !== "ack" && (queued.length || frame.t === "state"))
+        queued.push(raw);
       else ws.send(raw);
     });
     release = () => {
@@ -189,7 +193,7 @@ test("a late detail update cannot reopen a dismissed mobile conversation", async
   await expect(page.locator(".session-list")).toBeVisible();
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Settings", exact: true })).toBeVisible();
   await expect(page.locator(".agent-detail")).toHaveCount(0);
 });
 

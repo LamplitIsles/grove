@@ -296,7 +296,7 @@ for (const width of [1440, 390]) {
     page.on("websocket", (socket) =>
       socket.on("framesent", ({ payload }) => {
         const frame = JSON.parse(String(payload));
-        if (frame.call?.member === "send") submitted = frame.call.args[0];
+        if (frame.args?.member === "send") submitted = frame.args.input;
       }),
     );
     await setup(page, request, width);
@@ -1044,6 +1044,7 @@ for (const width of [1440, 390]) {
     const image = page
       .locator(".user-message")
       .filter({ hasText: "Image awaiting native receipt" });
+    await expect(image).toHaveCount(1);
     await expect(image.locator("small[role=status]")).toHaveCount(0);
     await expect
       .poll(
@@ -1096,45 +1097,38 @@ for (const width of [1440, 390]) {
     });
     // Upload succeeds, then the synthetic native call has no confirmed admission.
     await request.post(origin + "/fixture/change", {
-      data: { sendMode: "uncertain" },
+      data: { sendMode: "held" },
     });
-    let wireId = "",
-      operationId = "",
-      dropped = false;
+    let operationId = "";
     const calls: string[] = [];
-    await page.routeWebSocket("**/api/socket", (ws) => {
-      const server = ws.connectToServer();
-      ws.onMessage((raw) => {
-        const frame = JSON.parse(String(raw));
-        if (frame.call?.member === "send") {
-          wireId = frame.id;
-          operationId = frame.call.args[0].operationId;
+    page.on("websocket", (socket) => {
+      socket.on("framesent", ({ payload }) => {
+        const frame = JSON.parse(String(payload));
+        if (frame.args?.member === "send") {
+          operationId = frame.args.input.operationId;
           calls.push(operationId);
         }
-        server.send(raw);
-      });
-      server.onMessage((raw) => {
-        const frame = JSON.parse(String(raw));
-        if (wireId && !dropped && frame.type === "update") return;
-        if (!dropped && frame.type === "result" && frame.id === wireId) {
-          dropped = true;
-          ws.close({
-            code: 1011,
-            reason: "Synthetic lost admission acknowledgement",
-          });
-          return;
-        }
-        ws.send(raw);
       });
     });
-    await page.reload(); // Apply interception to a new socket; retain drafts and image blobs.
+    await page.reload(); // Observe the new socket while retaining drafts and image blobs.
     await expect(composer(page)).toHaveValue("Newer image draft");
     await composer(page).fill("Uploaded image without native confirmation");
     await expect(
       page.getByRole("button", { name: "Send message", exact: true }),
     ).toBeEnabled();
     await composer(page).press("Enter");
-    await expect.poll(() => dropped).toBe(true);
+    await expect.poll(() => operationId).not.toBe("");
+    await expect
+      .poll(
+        async () =>
+          (await (await request.get(origin + "/fixture/info")).json()).inputs
+            .length,
+      )
+      .toBe(before + 3);
+    await request.post(origin + "/fixture/change", { data: { outage: true } });
+    await request.post(origin + "/fixture/change", {
+      data: { sendMode: "uncertain", outage: false },
+    });
     const pending = page
       .locator(".user-message")
       .filter({ hasText: "Uploaded image without native confirmation" });
@@ -1172,10 +1166,10 @@ test("server image ownership rejection keeps originals and Retry preserves newer
       const frame = JSON.parse(String(raw));
       if (
         reject &&
-        frame.call?.member === "send" &&
-        frame.call.args[0].images?.length
+        frame.args?.member === "send" &&
+        frame.args.input.images?.length
       )
-        frame.call.args[0].text += " changed";
+        frame.args.input.text += " changed";
       server.send(JSON.stringify(frame));
     });
     server.onMessage((raw) => ws.send(raw));

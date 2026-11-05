@@ -14,7 +14,7 @@ import { createCodemodeExtension } from "@earendil-works/pi-durable/codemode";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
 import { createToolSearchExtension } from "@earendil-works/pi-durable/tool-search";
 import { McpClient, StdioTransport } from "@earendil-works/pi-mcp";
-import { openPiStorage } from "./pi-storage";
+import { openPiStorage, readPiStorage } from "./pi-storage";
 
 test("released Durable + ModelRuntime + Bun SQLite + official MCP/codemode execute in owned isolation", async () => {
   if (!process.env.GROVE_DURABLE_CHILD) {
@@ -159,11 +159,18 @@ test("released Durable + ModelRuntime + Bun SQLite + official MCP/codemode execu
     const root = await harness.root(ctx, {
       agent: { model: { provider: "fixture", modelId: "fake" } },
     });
+    const watch = await root.watch(ctx);
+    const initialEntries = watch.value.entries.length;
+    const changed = Promise.withResolvers<void>();
+    watch.start(async (value) => {
+      if (value.entries.length > initialEntries) changed.resolve();
+    });
     const submission = await root.submit(
       { type: "input", requestId: "owned-operation", content: "Use the tool" },
       ctx,
     );
     expect((await submission.status(ctx)).status).toBe("placed");
+    await changed.promise;
     expect(
       (await storage.submissionByRequest(root.id, "owned-operation", ctx))?.id,
     ).toBe(submission.id);
@@ -184,6 +191,17 @@ test("released Durable + ModelRuntime + Bun SQLite + official MCP/codemode execu
     const entries = await root.entries({}, 100, undefined, ctx);
     expect(JSON.stringify(entries)).toContain("actual call");
     expect(requests).toBe(2);
+    await watch.stop();
+    await harness.close(ctx);
+    harness = undefined;
+    const reader = await readPiStorage(join(home, "native.sqlite"));
+    try {
+      expect(
+        (await reader.submissionByRequest(root.id, "owned-operation", ctx))?.id,
+      ).toBe(submission.id);
+    } finally {
+      await reader.close(ctx);
+    }
   } finally {
     release();
     await harness?.close(ctx);

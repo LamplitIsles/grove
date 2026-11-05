@@ -26,21 +26,21 @@ function observe(page: Page) {
     results: any[] = [],
     lookups: any[] = [];
   page.on("websocket", (socket) => {
-    const calls = new Map<string, any>();
+    const calls = new Map<number, any>();
     socket.on("framesent", ({ payload }) => {
       const f = JSON.parse(String(payload));
-      if (["send", "lookup"].includes(f.call?.member)) {
-        calls.set(f.id, { member: f.call.member, args: f.call.args[0] });
-        if (f.call.member === "send") sends.push(f.call.args[0]);
+      if (["send", "lookup"].includes(f.args?.member)) {
+        calls.set(f.id, { member: f.args.member, args: f.args.input });
+        if (f.args.member === "send") sends.push(f.args.input);
       }
     });
     socket.on("framereceived", ({ payload }) => {
       const f = JSON.parse(String(payload)),
         call = calls.get(f.id);
-      if (call && f.type === "result")
+      if (call && f.t === "result")
         (call.member === "send" ? results : lookups).push({
           request: call.args,
-          result: f.result,
+          result: f.value?.value,
         });
     });
   });

@@ -29,7 +29,69 @@ export async function until(check: () => boolean) {
     await new Promise((r) => setTimeout(r, 5));
   }
 }
-function fixture() {
+// Exercise the real Grove socket adapter without relying on Bun's client-side
+// WebSocket event ordering. This pair does not exercise HTTP upgrade or TCP.
+function orderedSocket(service: HostService): WebSocket {
+  class Client extends EventTarget {
+    readyState: number = WebSocket.CONNECTING;
+    bufferedAmount = 0;
+    opened = false;
+    private listeners: Array<{
+      type: string;
+      listener: EventListenerOrEventListenerObject;
+      options?: boolean | AddEventListenerOptions;
+    }> = [];
+    override addEventListener(
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: boolean | AddEventListenerOptions,
+    ) {
+      super.addEventListener(type, listener, options);
+      if (listener) this.listeners.push({ type, listener, options });
+    }
+    send(data: string | Uint8Array) {
+      if (this.readyState !== WebSocket.OPEN) throw new Error("Socket closed");
+      queueMicrotask(() => {
+        if (this.readyState === WebSocket.OPEN)
+          groveWebsocket.message(server, data as string);
+      });
+    }
+    close() {
+      if (this.readyState === WebSocket.CLOSED) return;
+      this.readyState = WebSocket.CLOSED;
+      if (this.opened) groveWebsocket.close(server);
+      this.dispatchEvent(new Event("close"));
+      for (const { type, listener, options } of this.listeners)
+        super.removeEventListener(type, listener, options);
+      this.listeners = [];
+    }
+  }
+  const client = new Client();
+  const server = {
+    data: { app: service, service },
+    getBufferedAmount: () => 0,
+    send(data: string) {
+      queueMicrotask(() => {
+        if (client.readyState === WebSocket.OPEN)
+          client.dispatchEvent(new MessageEvent("message", { data }));
+      });
+      return Buffer.byteLength(data);
+    },
+    close: () => client.close(),
+    ping: () => {},
+  } as unknown as Parameters<typeof groveWebsocket.open>[0];
+  queueMicrotask(() => {
+    if (client.readyState !== WebSocket.CONNECTING) return;
+    client.readyState = WebSocket.OPEN;
+    client.opened = true;
+    groveWebsocket.open(server);
+    if (client.readyState === WebSocket.OPEN)
+      client.dispatchEvent(new Event("open"));
+  });
+  return client as unknown as WebSocket;
+}
+
+function fixture(transport: "tcp" | "ordered" = "tcp") {
   const directory = mkdtempSync(join(tmpdir(), "grove-chord-"));
   const runtime = new FakeRuntime();
   let app = new Workspace({
@@ -73,9 +135,11 @@ function fixture() {
       timeoutMs = 30_000,
     ) {
       const client = await openGrove(
-        socketWithHeaders(origin.replace("http:", "ws:") + "/api/socket", {
-          Origin: origin,
-        }),
+        transport === "ordered"
+          ? orderedSocket(service)
+          : socketWithHeaders(origin.replace("http:", "ws:") + "/api/socket", {
+              Origin: origin,
+            }),
         changed,
         offline,
         timeoutMs,
@@ -301,23 +365,14 @@ test("independent clients share the durable FIFO and observe pending counts with
   ]);
   expect(f.app.detail(agent.id).state).toBe("working");
 });
-test("public Chord provider reset over a real socket precedes the next delta and a fresh decoder rehydrates", async () => {
-  const {
-    RemoteServiceProvider,
-    replicatedState,
-    createServiceStateEncoder,
-    decodeServiceControlCall,
-    parseServiceCall,
-  } = await import("@earendil-works/chord");
-  const { BACKGROUND_CONTEXT } = await import("@earendil-works/chord/context");
-  const { Grove, inputs, jsonValue } = await import("../src/chord-contract");
+test("large selected state updates and rehydrates over a real socket", async () => {
   const f = fixture();
   const agent = await f.app.createOrc("alpha");
-  await f.app.send(agent.id, "start", "reset-start");
+  await f.app.send(agent.id, "start", "view-start");
   f.runtime.historyItems.set(
     agent.threadId!,
     Array.from({ length: 140 }, (_, i) => ({
-      id: `reset-item-${i}`,
+      id: `view-item-${i}`,
       role: "assistant",
       text: "body".repeat(10_000),
       at: i + 1,
@@ -325,116 +380,64 @@ test("public Chord provider reset over a real socket precedes the next delta and
   );
   const id = qualify(f.service.identity.id, agent.id);
   await f.service.synchronizeDetail(id);
-  const initial: View = {
-    snapshot: { ...f.service.snapshot(), revision: 0 },
-    details: { [id]: await f.service.detail(id) },
-  };
   const bytes: number[] = [];
-  const encoded = (frame: unknown) => {
-    const raw = JSON.stringify(frame);
-    bytes.push(new TextEncoder().encode(raw).length);
-    return raw;
-  };
-  const view = replicatedState(jsonValue(initial));
-  const provider = new RemoteServiceProvider([Grove]);
-  provider.provide(Grove, {
-    ...Object.fromEntries(
-      Object.keys(inputs).map((method) => [method, async () => null]),
-    ),
-    view,
-  } as unknown as import("../src/chord-contract").GroveContract);
-  const subs = new Set<{ close(): void }>();
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(req, server) {
-      return server.upgrade(req)
-        ? undefined
-        : new Response("Upgrade required", { status: 400 });
-    },
-    websocket: {
-      message(ws, raw) {
-        void (async () => {
-          const frame = JSON.parse(String(raw));
-          const call = parseServiceCall(frame.call),
-            control = decodeServiceControlCall(call);
-          if (control?.type === "subscribe") {
-            const encoder = createServiceStateEncoder();
-            const sub = provider.subscribe(
-              control.serviceId,
-              control.mode,
-              (update) => {
-                ws.send(
-                  encoded({
-                    type: "update",
-                    subscriptionId: control.subscriptionId,
-                    update: encoder.encodeUpdate(update),
-                  }),
-                );
-              },
-            );
-            subs.add(sub);
-            ws.send(
-              encoded({
-                type: "result",
-                id: frame.id,
-                result: encoder.encodeSnapshot(sub.snapshot),
-              }),
-            );
-            // Public provider buffers 101 exact state updates before activation and emits an explicit reset.
-            for (let revision = 1; revision <= 101; revision++)
-              view.change(BACKGROUND_CONTEXT, (draft) => {
-                draft.snapshot.revision = revision;
-              });
-            sub.activate();
-            view.change(BACKGROUND_CONTEXT, (draft) => {
-              draft.snapshot.revision = 102;
-            });
-          } else
-            ws.send(
-              encoded({
-                type: "result",
-                id: frame.id,
-                result:
-                  control?.type === "catalogue" ? provider.catalogue : null,
-              }),
-            );
-        })();
+  const socket = () => {
+    const ws = socketWithHeaders(
+      f.origin.replace("http:", "ws:") + "/api/socket",
+      {
+        Origin: f.origin,
       },
-    },
-  });
-  cleanups.push(() => {
-    server.stop(true);
-    for (const sub of subs) sub.close();
-    provider.dispose();
-  });
+    );
+    ws.addEventListener("message", (event) => {
+      if (typeof event.data === "string")
+        bytes.push(new TextEncoder().encode(event.data).byteLength);
+    });
+    return ws;
+  };
   let latest: View | undefined;
-  const seen: number[] = [];
   const client = await openGrove(
-    new WebSocket(`ws://127.0.0.1:${server.port}`),
-    (value) => {
-      latest = value;
-      seen.push(value.snapshot.revision);
-    },
+    socket(),
+    (value) => (latest = value),
     () => {},
   );
   cleanups.push(() => client.close());
-  await until(() => latest?.snapshot.revision === 102);
-  expect(seen.at(-1)).toBe(102);
-  expect(latest?.details[id].messages.at(-1)?.id).toBe("reset-item-139");
-  expect(Math.max(...bytes)).toBeLessThan(1024 * 1024);
-  console.log(
-    `bounded reset: maximum encoded frame ${Math.max(...bytes)} bytes`,
+  await client.call("select", { ids: [id] });
+  await until(
+    () => latest?.details[id]?.messages.at(-1)?.id === "view-item-139",
   );
+  for (let i = 0; i < 102; i++) {
+    f.runtime.emit(agent.id, {
+      type: "item",
+      turnId: f.app.detail(agent.id).turnId!,
+      item: {
+        id: `burst-${i}`,
+        type: "agentMessage",
+        phase: "final_answer",
+        text: `Update ${i}`,
+      },
+    });
+  }
+  await until(
+    () =>
+      latest?.details[id]?.messages.some((item) => item.id === "burst-101") ===
+      true,
+  );
+  expect(Math.max(...bytes)).toBeLessThan(2 * 1024 * 1024);
   client.close();
   let hydrated: View | undefined;
   const fresh = await openGrove(
-    new WebSocket(`ws://127.0.0.1:${server.port}`),
+    socket(),
     (value) => (hydrated = value),
     () => {},
   );
   cleanups.push(() => fresh.close());
-  await until(() => hydrated?.snapshot.revision === 102);
+  await fresh.call("select", { ids: [id] });
+  await until(
+    () =>
+      hydrated?.details[id]?.messages.some(
+        (item) => item.id === "burst-101",
+      ) === true,
+  );
 });
 
 test("slow read and late result leave the socket and other calls alive", async () => {
@@ -701,7 +704,7 @@ test("passive Chord select and reconnect preserve prefeature Orc until explicit 
 });
 
 test("failed submission deletion is owning-Peer durable, serialized and rejected-user-only", async () => {
-  const f = fixture();
+  const f = fixture("ordered");
   const a = await f.app.createOrc("alpha"),
     b = await f.app.createOrc("alpha");
   const id = qualify(f.service.identity.id, a.id),
@@ -841,5 +844,311 @@ test("selection returns while native recovery is pending and a newly sent input 
     expect(f.app.detail(agent.id).threadId).toBe(agent.threadId);
   } finally {
     gate.resolve();
+  }
+});
+
+test("admission guards reject explicitly while failures after admission stay unknown", async () => {
+  const f = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  const client = await f.client();
+  await expect(
+    client.call("enqueueFollowUp", {
+      id: "foreign:missing",
+      text: "guard",
+      operationId: "guard",
+    }),
+  ).rejects.toBeInstanceOf(RequestRejected);
+  await expect(
+    client.call("enqueueFollowUp", {
+      id: qualify(f.service.identity.id, "missing"),
+      text: "guard",
+      operationId: "missing",
+    }),
+  ).rejects.toBeInstanceOf(RequestRejected);
+  let admissions = 0;
+  f.app.enqueueFollowUp = async () => {
+    admissions++;
+    throw new Error("Fixture failed after admission");
+  };
+  const error = await client
+    .call("enqueueFollowUp", {
+      id,
+      text: "once",
+      operationId: "uncertain",
+    })
+    .catch((failure: unknown) => failure);
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(RequestRejected);
+  expect(admissions).toBe(1);
+});
+
+test("image ownership refusal is explicit and the original upload can be retried once", async () => {
+  const f = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  const client = await f.client();
+  const png = await sharp({
+    create: { width: 4, height: 4, channels: 3, background: "#123456" },
+  })
+    .png()
+    .toBuffer();
+  const images = await f.app.images.upload(agent.id, "image-op", "original", [
+    new File([png], "owned.png", { type: "image/png" }),
+  ]);
+  const send = { id, text: "original", operationId: "image-op", images };
+  const refusal = await client
+    .call("send", { ...send, text: "changed" })
+    .catch((e: unknown) => e);
+  expect(refusal).toBeInstanceOf(RequestRejected);
+  expect((refusal as Error).message).toContain("Images do not belong");
+  expect(f.runtime.inputs).toHaveLength(0);
+  expect(f.app.lookup(agent.id, "image-op")).toBeNull();
+  const followUp = await client
+    .call("enqueueFollowUp", { ...send, text: "changed" })
+    .catch((e: unknown) => e);
+  expect(followUp).toBeInstanceOf(RequestRejected);
+  expect(f.app.lookupFollowUp(agent.id, "image-op")).toBeNull();
+  const retried = await client.call<Detail>("send", {
+    ...send,
+    retry: { after: "image-op", attempt: "image-retry" },
+  });
+  expect(retried.deliveries.find((d) => d.id === "image-op")?.status).toBe(
+    "sent",
+  );
+  expect(f.runtime.inputs.map((input) => input.clientId)).toEqual(["image-op"]);
+});
+
+test("image validation infrastructure errors stay unknown", async () => {
+  const f = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  const client = await f.client();
+  f.app.images.validate = () => {
+    throw new Error("Synthetic storage error");
+  };
+  const error = await client
+    .call("send", {
+      id,
+      text: "test",
+      operationId: "image-error",
+      images: [
+        { id: "0".repeat(64), name: "test.png", width: 1, height: 1, bytes: 1, mediaType: "image/png" },
+      ],
+    })
+    .catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(RequestRejected);
+  expect((error as Error).message).toContain("Synthetic storage error");
+  expect(f.runtime.inputs).toHaveLength(0);
+});
+
+test("unreadable native history leaves the prior rejection authoritative without retry admission", async () => {
+  const f = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  const client = await f.client();
+  f.runtime.sendOverride = async () => {
+    throw new DeliveryRejected("First rejected");
+  };
+  await client.call("send", { id, text: "original", operationId: "history-op" });
+  expect(f.app.lookup(agent.id, "history-op")?.state).toBe("rejected");
+  const history = f.runtime.historyMessages.bind(f.runtime);
+  f.runtime.historyMessages = async () => {
+    throw new Error("History unavailable");
+  };
+  const result = await client.call<Detail & { retryNotAdmitted?: string }>("send", {
+    id,
+    text: "original",
+    operationId: "history-op",
+    retry: { after: "history-op", attempt: "history-retry" },
+  });
+  expect(result.retryNotAdmitted).toBe("history-retry");
+  expect(result.deliveries.find((d) => d.id === "history-op")).toMatchObject({
+    status: "failed",
+    error: "First rejected",
+  });
+  expect(f.app.lookup(agent.id, "history-op")).toMatchObject({
+    state: "rejected",
+    attemptId: undefined,
+  });
+  expect(f.runtime.inputs.map((input) => input.clientId)).toEqual(["history-op"]);
+  f.runtime.historyMessages = history;
+  f.runtime.sendOverride = async () => {
+    throw new Error("Synthetic unknown admission");
+  };
+  const retried = await client.call<Detail & { retryNotAdmitted?: string }>("send", {
+    id,
+    text: "original",
+    operationId: "history-op",
+    retry: { after: "history-op", attempt: "later-retry" },
+  });
+  expect(retried.retryNotAdmitted).toBeUndefined();
+  expect(retried.deliveries.find((d) => d.id === "history-op")).toMatchObject({
+    status: "uncertain",
+    attemptId: "later-retry",
+  });
+  expect(f.runtime.inputs.map((input) => input.clientId)).toEqual([
+    "history-op",
+    "history-op",
+  ]);
+});
+
+test("native acceptance and failed persistence never become a retry rejection", async () => {
+  const f = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  const client = await f.client();
+  f.runtime.sendOverride = async () => {
+    throw new DeliveryRejected("First rejected");
+  };
+  await client.call("send", { id, text: "original", operationId: "accepted-op" });
+  f.runtime.historyItems.set(agent.threadId!, [
+    { id: "native-item", clientId: "accepted-op", role: "user", text: "original", at: 1 },
+  ]);
+  const save = (f.app as any).save;
+  (f.app as any).save = () => {
+    throw new Error("Synthetic persistence failure");
+  };
+  const error = await client
+    .call("send", {
+      id,
+      text: "original",
+      operationId: "accepted-op",
+      retry: { after: "accepted-op", attempt: "blocked-retry" },
+    })
+    .catch((e: unknown) => e);
+  (f.app as any).save = save;
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(RequestRejected);
+  expect((error as Error).message).toContain("Synthetic persistence failure");
+  expect(f.runtime.inputs.map((input) => input.clientId)).toEqual([
+    "accepted-op",
+  ]);
+  expect(f.app.lookup(agent.id, "accepted-op")?.state).toBe("accepted");
+});
+
+test("native history acceptance prevents retry and remains authoritative", async () => {
+  const f = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  const client = await f.client();
+  f.runtime.sendOverride = async () => {
+    throw new DeliveryRejected("First rejected");
+  };
+  await client.call("send", { id, text: "original", operationId: "native-op" });
+  f.runtime.historyItems.set(agent.threadId!, [
+    { id: "native-item", clientId: "native-op", role: "user", text: "original", at: 1 },
+  ]);
+  const error = await client
+    .call("send", {
+      id,
+      text: "original",
+      operationId: "native-op",
+      retry: { after: "native-op", attempt: "not-admitted" },
+    })
+    .catch((e: unknown) => e);
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(RequestRejected);
+  expect(f.app.lookup(agent.id, "native-op")?.state).toBe("accepted");
+  expect(f.runtime.inputs.map((input) => input.clientId)).toEqual(["native-op"]);
+});
+
+test("native acceptance observed during a retry history read prevents another admission", async () => {
+  const f = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  const client = await f.client();
+  f.runtime.sendOverride = async () => {
+    throw new DeliveryRejected("First rejected");
+  };
+  await client.call("send", { id, text: "original", operationId: "race-op" });
+  const entered = Promise.withResolvers<void>();
+  const history = Promise.withResolvers<{
+    messages: never[];
+    nextCursor: null;
+  }>();
+  f.runtime.historyMessages = async () => {
+    entered.resolve();
+    return history.promise;
+  };
+  const retry = client.call<Detail & { retryNotAdmitted?: string }>("send", {
+    id,
+    text: "original",
+    operationId: "race-op",
+    retry: { after: "race-op", attempt: "race-retry" },
+  });
+  try {
+    await entered.promise;
+    f.runtime.emit(agent.id, {
+      type: "item",
+      turnId: "native-turn",
+      item: {
+        type: "userMessage",
+        id: "native-race",
+        clientId: "race-op",
+        text: "original",
+      },
+    });
+    history.resolve({ messages: [], nextCursor: null });
+    const result = await retry;
+    expect(result.retryNotAdmitted).toBe("race-retry");
+    expect(result.messages.some((m) => m.clientId === "race-op")).toBe(true);
+    expect(f.app.lookup(agent.id, "race-op")?.state).toBe("accepted");
+    expect(f.runtime.inputs.map((input) => input.clientId)).toEqual(["race-op"]);
+  } finally {
+    history.resolve({ messages: [], nextCursor: null });
+  }
+});
+
+test("disconnect releases observation while an admitted send completes once", async () => {
+  const f = fixture();
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  const subscribe = f.service.subscribe.bind(f.service);
+  let observers = 0;
+  f.service.subscribe = (listener) => {
+    observers++;
+    const off = subscribe(listener);
+    return () => {
+      observers--;
+      return off();
+    };
+  };
+  const gate = Promise.withResolvers<string>();
+  f.runtime.sendOverride = () => gate.promise;
+  let offline = 0;
+  const client = await f.client(
+    () => {},
+    () => offline++,
+  );
+  try {
+    expect(observers).toBe(1);
+    const pending = client
+      .call("send", {
+        id,
+        text: "once across disconnect",
+        operationId: "disconnect-once",
+      })
+      .catch((error: unknown) => error);
+    await until(() => f.runtime.inputs.length === 1);
+    client.close();
+    const result = await pending;
+    expect(result).toBeInstanceOf(Error);
+    expect(result).not.toBeInstanceOf(RequestRejected);
+    await until(() => observers === 0);
+    expect(offline).toBe(1);
+    gate.resolve("disconnect-turn");
+    await until(() => f.app.detail(agent.id).deliveries[0]?.status === "sent");
+    const fresh = await f.client();
+    const receipt = await fresh.call<Receipt>("lookup", {
+      id,
+      operationId: "disconnect-once",
+    });
+    expect(receipt.state).toBe("accepted");
+    expect(f.runtime.inputs).toHaveLength(1);
+  } finally {
+    gate.resolve("disconnect-turn");
+    client.close();
   }
 });

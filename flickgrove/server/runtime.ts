@@ -173,4 +173,6 @@ export class StaleTurn extends Error {
     super(message);
   }
 }
+// The operation was refused before the requested mutation was admitted.
+export class RequestRefused extends Error {}
 export class DeliveryRejected extends Error {}

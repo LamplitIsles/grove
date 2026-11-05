@@ -46,7 +46,7 @@ import {
   projectDirectoryKey,
 } from "../src/project-identity";
 import type { ProjectEnvironments } from "./project-environments";
-import { DeliveryRejected, StaleTurn } from "./runtime";
+import { DeliveryRejected, RequestRefused, StaleTurn } from "./runtime";
 import { z } from "zod";
 import { roleTools, toolDefinitions, sessionTitle } from "./tools";
 
@@ -1127,11 +1127,14 @@ export class Workspace {
       );
     return a;
   }
-  private agent(id: string) {
+  private agent(id: string, refuseMissing = false) {
     const a = this.readableAgent(
       this.state.agents.find((a) => a.id === id) ?? this.store.byId(id),
     );
-    if (!a || a.closed) throw new Error("Session not found");
+    if (!a || a.closed)
+      throw refuseMissing
+        ? new RequestRefused("Session not found")
+        : new Error("Session not found");
     return a;
   }
   private publicAgent(a: RuntimeAgent): Agent {
@@ -2140,20 +2143,24 @@ export class Workspace {
   }
   private serialize<T>(id: string, work: () => Promise<T>): Promise<T> {
     if (this.instanceAction)
-      return Promise.reject(new Error("Instance maintenance is in progress"));
+      return Promise.reject(
+        new RequestRefused("Instance maintenance is in progress"),
+      );
     const a = this.state.agents.find((a) => a.id === id) ?? this.store.byId(id);
     if (a && localCodex(a) && this.shuttingDown)
-      return Promise.reject(new Error("Instance is shutting down"));
+      return Promise.reject(new RequestRefused("Instance is shutting down"));
     if (a && this.closingTrees.has(a.ownerId ?? a.id))
-      return Promise.reject(new Error("Tree is closing"));
+      return Promise.reject(new RequestRefused("Tree is closing"));
     if (a && this.treeActions.has(a.ownerId ?? a.id))
-      return Promise.reject(new Error("Tree settings are being saved"));
+      return Promise.reject(
+        new RequestRefused("Tree settings are being saved"),
+      );
     const previous = this.queues.get(id) ?? Promise.resolve();
     const next = previous
       .catch(() => {})
       .then(() => {
         if (a && localCodex(a) && this.shuttingDown)
-          throw new Error("Instance is shutting down");
+          throw new RequestRefused("Instance is shutting down");
         return work();
       });
     this.queues.set(id, next);
@@ -2516,14 +2523,21 @@ export class Workspace {
     };
   }
 
-  private async requireNativeRejection(a: RuntimeAgent, operationId: string) {
-    if (!a.threadId) return;
+  private async requireNativeRejection(
+    a: RuntimeAgent,
+    operationId: string,
+    returnOnReadFailure = false,
+  ): Promise<boolean> {
+    if (!a.threadId) return true;
     let cursor: string | undefined;
     do {
-      const page = await this.options.runtime.historyMessages(
-        a.threadId,
-        cursor,
-      );
+      let page;
+      try {
+        page = await this.options.runtime.historyMessages(a.threadId, cursor);
+      } catch (error) {
+        if (returnOnReadFailure) return false;
+        throw error;
+      }
       const accepted = page.messages.find(
         (m) =>
           m.role === "user" &&
@@ -2538,6 +2552,7 @@ export class Workspace {
       }
       cursor = page.nextCursor ?? undefined;
     } while (cursor);
+    return true;
   }
   deleteFailedSubmission(id: string, operationId: string) {
     return this.serialize(id, async () => {
@@ -2585,12 +2600,13 @@ export class Workspace {
     this.automaticFollowUps.delete(id);
     return this.serialize(id, async () => {
       this.automaticFollowUps.delete(id);
-      const a = this.agent(id);
+      const a = this.agent(id, true);
       if (a.role !== "orc" || a.closed || a.closeRequest)
-        throw new Error("Choose an open Orc conversation");
+        throw new RequestRefused("Choose an open Orc conversation");
       if (!text.trim() && !images?.length)
-        throw new Error("Write a message first");
-      if (text.length > 100_000) throw new Error("Message is too long");
+        throw new RequestRefused("Write a message first");
+      if (text.length > 100_000)
+        throw new RequestRefused("Message is too long");
       const previous = a.deliveries.find((d) => d.id === requestId);
       if (previous) {
         if (
@@ -2598,13 +2614,17 @@ export class Workspace {
           previous.text !== text ||
           JSON.stringify(previous.images ?? []) !== JSON.stringify(images ?? [])
         )
-          throw new Error("Operation ID is bound to different content");
+          throw new RequestRefused(
+            "Operation ID is bound to different content",
+          );
         return this.detail(id);
       }
       if (a.state === "stopping")
-        throw new Error("Wait for the observed turn outcome before queueing");
+        throw new RequestRefused(
+          "Wait for the observed turn outcome before queueing",
+        );
       if (a.deliveries.filter(pendingFollowUp).length >= 50)
-        throw new Error("Follow-up queue is full");
+        throw new RequestRefused("Follow-up queue is full");
       if (images?.length) this.images.commit(a.id, requestId, text, images);
       if (
         !a.deliveries.some(pendingFollowUp) &&
@@ -2990,18 +3010,21 @@ export class Workspace {
     this.automaticFollowUps.delete(id);
     return this.serialize(id, async () => {
       this.automaticFollowUps.delete(id);
-      const a = this.agent(id);
-      if (a.role !== "orc") throw new Error("Send instructions through Orc");
+      const a = this.agent(id, true);
+      if (a.role !== "orc")
+        throw new RequestRefused("Send instructions through Orc");
       const previous = a.deliveries.find((d) => d.id === requestId);
       if (previous) {
         if (previous.mode === "follow_up")
-          throw new Error("Operation belongs to a follow-up");
+          throw new RequestRefused("Operation belongs to a follow-up");
         if (
           previous.text !== text ||
           previous.source !== "user" ||
           JSON.stringify(previous.images ?? []) !== JSON.stringify(images ?? [])
         )
-          throw new Error("Operation ID is bound to different content");
+          throw new RequestRefused(
+            "Operation ID is bound to different content",
+          );
         // The logical operation/native clientId stays fixed. A fresh attempt
         // may replace only the exact rejected predecessor, inside this queue.
         // Repeated or delayed tokens return the current outcome without admission.
@@ -3018,7 +3041,19 @@ export class Workspace {
           )
         )
           throw new Error("Only a rejected user submission can be retried");
-        await this.requireNativeRejection(a, requestId);
+        const verified = await this.requireNativeRejection(a, requestId, true);
+        // History can become unavailable or a native event can confirm the old
+        // operation while the read is pending. Neither admits this attempt.
+        if (
+          !verified ||
+          previous.status !== "failed" ||
+          a.messages.some(
+            (m) =>
+              m.role === "user" &&
+              (m.id === requestId || m.clientId === requestId),
+          )
+        )
+          return { ...this.detail(id), retryNotAdmitted: retry.attempt };
         previous.attemptId = retry.attempt;
         this.save();
         if (a.state === "stopping") return this.detail(id);
@@ -3125,8 +3160,9 @@ export class Workspace {
     if (abandonUnknownOperationIds !== undefined)
       return this.closeAbandoningUnknown(id, abandonUnknownOperationIds);
     const a = this.agent(id);
-    if (a.role !== "orc") throw new Error("Only an Orc tree can be closed");
-    if (this.closingTrees.has(id)) throw new Error("Tree is closing");
+    if (a.role !== "orc")
+      throw new RequestRefused("Only an Orc tree can be closed");
+    if (this.closingTrees.has(id)) throw new RequestRefused("Tree is closing");
     const members = this.state.agents.filter(
       (w) => w.ownerId === id && !w.closed,
     );
@@ -3156,7 +3192,13 @@ export class Workspace {
           throw new Error(`${w.title}: Native thread startup is unconfirmed`);
       }
     };
-    validate(); // No releases or durable close requests on preflight failure.
+    try {
+      validate(); // No releases or durable close requests on preflight failure.
+    } catch (error) {
+      throw new RequestRefused(
+        error instanceof Error ? error.message : "Close refused",
+      );
+    }
     this.closingTrees.add(id);
     try {
       for (const member of [...members, a]) {
@@ -3199,7 +3241,13 @@ export class Workspace {
             "Unconfirmed submissions changed. Read the session and confirm again.",
           );
       };
-      validate();
+      try {
+        validate();
+      } catch (error) {
+        throw new RequestRefused(
+          error instanceof Error ? error.message : "Close refused",
+        );
+      }
       // Keep explicit abandonment scoped to the root and its cached handle.
       await this.handles.get(id)?.close();
       this.handles.delete(id);
@@ -3216,9 +3264,9 @@ export class Workspace {
     authorUserId?: string,
   ) {
     return this.serialize(id, async () => {
-      const a = this.agent(id);
+      const a = this.agent(id, true);
       if (a.role !== "orc")
-        throw new Error("Answer owned agent questions through Orc");
+        throw new RequestRefused("Answer owned agent questions through Orc");
       const frozen = answers.map((answer) => ({
         questionId: answer.questionId,
         answer: answer.answer.trim(),
@@ -3229,25 +3277,31 @@ export class Workspace {
           prior.source !== "question" ||
           JSON.stringify(prior.answers) !== JSON.stringify(frozen)
         )
-          throw new Error("Operation ID is bound to different content");
+          throw new RequestRefused(
+            "Operation ID is bound to different content",
+          );
         if (prior.status !== "failed") return this.detail(id);
       }
       if (a.state === "stopping")
-        throw new Error("Wait for the observed turn outcome before answering");
+        throw new RequestRefused(
+          "Wait for the observed turn outcome before answering",
+        );
       if (
         !frozen.length ||
         new Set(frozen.map((answer) => answer.questionId)).size !==
           frozen.length
       )
-        throw new Error("Choose a non-empty batch of distinct questions");
+        throw new RequestRefused(
+          "Choose a non-empty batch of distinct questions",
+        );
       const questions = frozen.map((answer) => {
         const q = a.questions.find((q) => q.id === answer.questionId);
         if (!q || q.state !== "unanswered")
-          throw new Error(
+          throw new RequestRefused(
             "Every submitted question must belong to this Orc and remain unanswered",
           );
         if (!answer.answer || answer.answer.length > 100_000)
-          throw new Error("Write a valid answer for every question");
+          throw new RequestRefused("Write a valid answer for every question");
         if (
           a.deliveries.some(
             (d) =>
@@ -3256,7 +3310,7 @@ export class Workspace {
               ["sending", "queued", "uncertain"].includes(d.status),
           )
         )
-          throw new Error(
+          throw new RequestRefused(
             "Check the original answer batch before another submission",
           );
         return q;

@@ -1,18 +1,8 @@
-// Adapted from LamplitIsles/lamplit-app packages/contracts/src/client.ts (Apache-2.0).
-// See licenses/lamplit-app-Apache-2.0.txt. Grove owns this transport and domain service.
 import {
-  createRemoteServiceBinding,
-  createServiceSubscribeCall,
-  createServiceUnsubscribeCall,
-  createServiceStateDecoder,
-  parseWireServiceSubscriptionSnapshot,
-  parseWireServiceProviderUpdate,
-  isJsonValue,
-  type JsonValue,
-  type RemoteServiceTransport,
-  type ServiceSubscription,
+  createHost,
+  webSocketLink,
+  type WebSocketLike,
 } from "@earendil-works/chord";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   Grove,
   inputs,
@@ -21,20 +11,9 @@ import {
   type Method,
   type View,
 } from "./chord-contract";
+
 export const MAX_FRAME = 2 * 1024 * 1024;
-export function decodeFrame(raw: string) {
-  if (new TextEncoder().encode(raw).byteLength > MAX_FRAME)
-    throw new Error("Frame too large");
-  const frame: unknown = JSON.parse(raw);
-  if (
-    !isJsonValue(frame) ||
-    !frame ||
-    typeof frame !== "object" ||
-    Array.isArray(frame)
-  )
-    throw new Error("Invalid frame");
-  return frame;
-}
+
 export class RequestRejected extends Error {}
 export class RequestTimeout extends Error {
   constructor(readonly member: string) {
@@ -42,6 +21,7 @@ export class RequestTimeout extends Error {
     this.name = "RequestTimeout";
   }
 }
+
 export async function openGrove(
   socket: WebSocket,
   changed: (view: View) => void,
@@ -49,195 +29,105 @@ export async function openGrove(
   timeoutMs = 30_000,
   timedOut: (member: string) => void = () => {},
 ) {
-  if (socket.readyState !== 1)
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        socket.close();
-        reject(new Error("Connection timed out"));
-      }, 10_000);
-      const done = () => {
-        clearTimeout(timer);
-        socket.removeEventListener("open", opened);
-        socket.removeEventListener("close", failed);
-        socket.removeEventListener("error", failed);
-      };
-      const opened = () => {
-        done();
-        resolve();
-      };
-      const failed = () => {
-        done();
-        reject(new Error("Connection failed"));
-      };
-      socket.addEventListener("open", opened, { once: true });
-      socket.addEventListener("close", failed, { once: true });
-      socket.addEventListener("error", failed, { once: true });
-    });
-  let closed = false,
-    sequence = 0;
-  const pending = new Map<
-    string,
-    {
-      resolve: (v: JsonValue) => void;
-      reject: (e: Error) => void;
-      timer: ReturnType<typeof setTimeout>;
-    }
-  >();
-  const listeners = new Map<string, (v: unknown) => void>();
-  const invoke: RemoteServiceTransport["invoke"] = (call, _context) =>
-    new Promise<JsonValue>((resolve, reject) => {
-      if (closed || socket.readyState !== 1)
-        return reject(new Error("Connection offline. Outcome unknown."));
-      if (pending.size >= 256)
-        return reject(new Error("Too many pending requests"));
-      const id = String(++sequence);
-      const timer = setTimeout(() => {
-        pending.delete(id);
-        const member =
-          call.serviceId === Grove.id ? call.member : "subscription";
-        reject(new RequestTimeout(member));
-        timedOut(member);
-      }, timeoutMs);
-      pending.set(id, { resolve, reject, timer });
-      try {
-        const raw = JSON.stringify({ type: "call", version: 1, id, call });
-        if (
-          new TextEncoder().encode(raw).byteLength > MAX_FRAME ||
-          socket.bufferedAmount > 2 * MAX_FRAME
-        )
-          throw new Error("Connection overloaded");
-        socket.send(raw);
-      } catch (e) {
-        pending.delete(id);
-        clearTimeout(timer);
-        reject(e as Error);
+  let closed = false;
+  let pending = 0;
+  let unsubscribe = () => {};
+  const encoder = new TextEncoder();
+  // Chord's WebSocket link supplies framing; keep Grove's existing frame and
+  // backpressure limits around it, including on the browser side.
+  const bounded: WebSocketLike = {
+    get readyState() {
+      return socket.readyState;
+    },
+    send(data) {
+      if (
+        typeof data !== "string" ||
+        encoder.encode(data).byteLength > MAX_FRAME ||
+        socket.bufferedAmount > 2 * MAX_FRAME
+      ) {
+        socket.close(1002, "Connection overloaded");
+        throw new Error("Connection overloaded");
       }
-    });
-  const transport: RemoteServiceTransport = {
-    invoke,
-    async subscribe(
-      serviceId,
-      mode,
-      listener,
-      context,
-    ): Promise<ServiceSubscription> {
-      const subscriptionId = `view-${++sequence}`;
-      const decoder = createServiceStateDecoder();
-      let hydrated = false,
-        active = false,
-        disposed = false;
-      const queue: unknown[] = [];
-      const accept = (raw: unknown) => {
-        if (disposed) return;
-        if (!hydrated || !active) {
-          if (queue.length >= 100) throw new Error("Subscription overflow");
-          queue.push(raw);
-          return;
-        }
-        // The public decoder handles explicit reset and clears its path dictionaries.
-        listener(
-          decoder.decodeUpdate(parseWireServiceProviderUpdate(raw)),
-          BACKGROUND_CONTEXT,
-        );
-      };
-      listeners.set(subscriptionId, accept);
-      try {
-        const raw = await invoke(
-          createServiceSubscribeCall(subscriptionId, serviceId, mode),
-          context,
-        );
-        const snapshot = decoder.decodeSnapshot(
-          parseWireServiceSubscriptionSnapshot(raw),
-        );
-        hydrated = true;
-        return {
-          snapshot,
-          activate() {
-            active = true;
-            for (const raw of queue.splice(0)) accept(raw);
-          },
-          close() {
-            disposed = true;
-            queue.length = 0;
-            listeners.delete(subscriptionId);
-            if (!closed)
-              void invoke(
-                createServiceUnsubscribeCall(subscriptionId),
-                BACKGROUND_CONTEXT,
-              ).catch(() => {});
-          },
-        };
-      } catch (e) {
-        listeners.delete(subscriptionId);
-        throw e;
+      socket.send(data);
+    },
+    close(code, reason) {
+      socket.close(code, reason);
+    },
+    addEventListener(type: string, listener: (event: any) => void) {
+      if (type === "message") {
+        socket.addEventListener("message", (event) => {
+          if (
+            typeof event.data !== "string" ||
+            encoder.encode(event.data).byteLength > MAX_FRAME
+          ) {
+            socket.close(1002, "Invalid frame");
+            return;
+          }
+          listener(event);
+        });
+      } else {
+        socket.addEventListener(type as "open" | "close" | "error", listener);
       }
     },
   };
-  const binding = createRemoteServiceBinding({
-    services: [Grove],
-    transport,
-    onError: () => {
-      socket.close(1002, "Invalid state");
-      finish();
-    },
+  const link = webSocketLink(bounded, { acceptPacked: false });
+  const host = createHost({
+    name: "browser",
+    self: "browser",
+    kind: "client",
+    readyTimeout: 10_000,
+    upstream: { link, principal: "server" },
   });
-  const service = binding.use(Grove);
-  let unsubscribe = () => {};
-  function finish() {
+  let release = () => {};
+  const finish = () => {
     if (closed) return;
     closed = true;
     unsubscribe();
-    listeners.clear();
-    for (const p of pending.values()) {
-      clearTimeout(p.timer);
-      p.reject(new Error("Connection offline. Outcome unknown."));
-    }
-    pending.clear();
-    void binding.dispose(BACKGROUND_CONTEXT).catch(() => {});
+    release();
+    void host.close().catch(() => {});
     offline();
-  }
-  socket.addEventListener("message", (event) => {
-    try {
-      if (typeof event.data !== "string") throw new Error("Invalid frame");
-      const frame = decodeFrame(event.data);
-      if (frame.type === "update" && typeof frame.subscriptionId === "string") {
-        const accept = listeners.get(frame.subscriptionId);
-        if (!accept) throw new Error("Unknown subscription");
-        accept(frame.update);
-      } else if (
-        (frame.type === "result" || frame.type === "error") &&
-        typeof frame.id === "string"
-      ) {
-        const p = pending.get(frame.id);
-        if (!p) return;
-        pending.delete(frame.id);
-        clearTimeout(p.timer);
-        if (frame.type === "error")
-          p.reject(
-            new RequestRejected(
-              typeof frame.error === "string"
-                ? frame.error
-                : "Request rejected",
-            ),
-          );
-        else p.resolve(frame.result as JsonValue);
-      } else throw new Error("Invalid frame");
-    } catch {
-      socket.close(1002, "Invalid protocol");
-      finish();
-    }
-  });
-  socket.addEventListener("close", finish, { once: true });
-  socket.addEventListener(
-    "error",
-    () => {
-      socket.close();
-      finish();
-    },
-    { once: true },
-  );
+  };
+  link.onClose(finish);
+  socket.addEventListener("error", () => socket.close());
+
   try {
-    await binding.ready(BACKGROUND_CONTEXT);
+    // Register the Chord link before awaiting open: the server may send its
+    // hello immediately, and that message must not be lost between events.
+    if (socket.readyState !== WebSocket.OPEN)
+      await new Promise<void>((resolve, reject) => {
+        if (socket.readyState !== WebSocket.CONNECTING) {
+          reject(new Error("Connection failed"));
+          return;
+        }
+        const timer = setTimeout(() => {
+          socket.close();
+          done();
+          reject(new Error("Connection timed out"));
+        }, 10_000);
+        const done = () => {
+          clearTimeout(timer);
+          socket.removeEventListener("open", opened);
+          socket.removeEventListener("close", failed);
+          socket.removeEventListener("error", failed);
+        };
+        const opened = () => {
+          done();
+          resolve();
+        };
+        const failed = () => {
+          done();
+          reject(new Error("Connection failed"));
+        };
+        socket.addEventListener("open", opened, { once: true });
+        socket.addEventListener("close", failed, { once: true });
+        socket.addEventListener("error", failed, { once: true });
+      });
+    const service = await host.get(Grove, {});
+    if (closed) {
+      service.release();
+      throw new Error("Connection offline. Outcome unknown.");
+    }
+    release = () => service.release();
     unsubscribe = service.view.subscribe((value) => {
       try {
         changed(viewSchema.parse(value));
@@ -246,22 +136,52 @@ export async function openGrove(
         finish();
       }
     });
+    if (closed) throw new Error("Invalid view");
     return {
       async call<T>(member: Method, input: unknown): Promise<T> {
-        return (await service[member](
-          jsonValue(inputs[member].parse(input)) as JsonValue,
-          BACKGROUND_CONTEXT,
-        )) as T;
+        if (closed || socket.readyState !== WebSocket.OPEN)
+          throw new Error("Connection offline. Outcome unknown.");
+        if (pending >= 256) throw new Error("Too many pending requests");
+        const parsed = jsonValue(inputs[member].parse(input));
+        const operation = service.execute({ member, input: parsed });
+        pending++;
+        void operation.then(
+          () => pending--,
+          () => pending--,
+        );
+        const result = await new Promise<Awaited<typeof operation>>(
+          (resolve, reject) => {
+            const timer = setTimeout(() => {
+              reject(new RequestTimeout(member));
+              timedOut(member);
+            }, timeoutMs);
+            operation.then(
+              (value) => {
+                clearTimeout(timer);
+                resolve(value);
+              },
+              (error) => {
+                clearTimeout(timer);
+                reject(error);
+              },
+            );
+          },
+        );
+        if (result.ok) return result.value as T;
+        if (result.outcome === "rejected")
+          throw new RequestRejected(result.error);
+        throw new Error(result.error);
       },
       close() {
         socket.close();
         finish();
       },
     };
-  } catch (e) {
+  } catch (error) {
     socket.close();
     finish();
-    throw e;
+    throw error;
   }
 }
+
 export type GroveClient = Awaited<ReturnType<typeof openGrove>>;

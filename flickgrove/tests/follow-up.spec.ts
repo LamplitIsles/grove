@@ -64,47 +64,16 @@ for (const width of [1440, 390]) {
 }
 
 async function holdQueueResponse(page: Page) {
-  let held: (() => void) | undefined;
-  let pauseLookups = false;
-  let lookupCount = 0;
-  const heldLookups: (() => void)[] = [];
-  await page.routeWebSocket("**/api/socket", (socket) => {
-    let callId: string | undefined;
-    const lookupIds = new Set<string>();
-    const server = socket.connectToServer();
-    socket.onMessage((message) => {
-      const frame = JSON.parse(String(message));
-      if (frame.call?.member === "enqueueFollowUp") callId = frame.id;
-      if (frame.call?.member === "lookupFollowUp") {
-        lookupIds.add(frame.id);
-        lookupCount++;
-      }
-      server.send(message);
-    });
-    server.onMessage((message) => {
-      const frame = JSON.parse(String(message));
-      if (frame.type === "result" && lookupIds.has(frame.id) && pauseLookups) {
-        heldLookups.push(() => socket.send(message));
-        return;
-      }
-      if (frame.type === "result" && frame.id === callId) {
-        held = () => socket.send(message);
-        return;
-      }
-      socket.send(message);
-    });
-  });
+  const control = (action: string) =>
+    page.request.post("/fixture/queue-gates", { data: { action } });
+  const info = async () => (await page.request.get("/fixture/info")).json();
+  await control("arm");
   return {
-    held: () => !!held,
-    lookupCount: () => lookupCount,
-    release: () => held?.(),
-    pauseLookups: () => {
-      pauseLookups = true;
-    },
-    releaseLookups: () => {
-      pauseLookups = false;
-      for (const release of heldLookups.splice(0)) release();
-    },
+    held: async () => (await info()).queueAckWaiting,
+    lookupCount: async () => (await info()).queueLookupCount,
+    release: () => control("release"),
+    pauseLookups: () => control("pause-lookups"),
+    releaseLookups: () => control("release-lookups"),
   };
 }
 
@@ -137,7 +106,7 @@ test("normal queue admission does not briefly ask to check the message", async (
   await expect(
     page.getByRole("button", { name: "Send message", exact: true }),
   ).toBeDisabled();
-  gate.release();
+  await gate.release();
   await expect(
     page.getByRole("region", { name: "Queued messages" }),
   ).toContainText("Normal follow-up");
@@ -189,24 +158,7 @@ test("a rejected queue request clears its pending state after switching back", a
   request,
 }) => {
   await request.post("/fixture/reset", { data: { mode: "working" } });
-  let reject: (() => void) | undefined;
-  await page.routeWebSocket("**/api/socket", (socket) => {
-    const server = socket.connectToServer();
-    socket.onMessage((message) => {
-      const frame = JSON.parse(String(message));
-      if (frame.call?.member === "enqueueFollowUp" && !reject) {
-        reject = () =>
-          socket.send(
-            JSON.stringify({
-              type: "error",
-              id: frame.id,
-              error: "Queue rejected",
-            }),
-          );
-      } else server.send(message);
-    });
-    server.onMessage((message) => socket.send(message));
-  });
+  await request.post("/fixture/queue-rejection", { data: { action: "arm" } });
   await page.goto("/");
   const session = (title: string) =>
     page.locator(".session-open").filter({ hasText: title }).first();
@@ -224,13 +176,21 @@ test("a rejected queue request clears its pending state after switching back", a
   await expect(page.locator(".image-draft")).toHaveCount(1);
   await input.fill("Retain rejected draft");
   await input.press("Tab");
-  await expect.poll(() => !!reject).toBe(true);
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get("/fixture/info")).json())
+          .queueRejectionWaiting,
+    )
+    .toBe(true);
   await session("Reader performance").click();
   await session("Streaming voice input").click();
   await expect(
     page.getByRole("region", { name: "Queued messages" }),
   ).toContainText("Retain rejected draft");
-  reject!();
+  await request.post("/fixture/queue-rejection", {
+    data: { action: "release" },
+  });
   await expect(
     page.getByRole("region", { name: "Queued messages" }),
   ).toContainText("Failed");
@@ -287,7 +247,7 @@ test("switching sessions before queue acknowledgement preserves original identit
     .filter({ hasText: "Reader performance" })
     .first()
     .click();
-  gate.release();
+  await gate.release();
   await page
     .locator(".session-open")
     .filter({ hasText: "Streaming voice input" })
@@ -361,7 +321,7 @@ test("image follow-up is recovered after switching sessions", async ({
   await input.press("Tab");
   await expect.poll(gate.held).toBe(true);
   await session("Reader performance").click();
-  gate.release();
+  await gate.release();
   await session("Streaming voice input").click();
   const queue = page.getByRole("region", { name: "Queued messages" });
   await expect(
@@ -381,7 +341,7 @@ for (const interruption of ["edit", "switch", "reload"] as const) {
   }) => {
     await request.post("/fixture/reset", { data: { mode: "working" } });
     const gate = await holdQueueResponse(page);
-    gate.pauseLookups();
+    await gate.pauseLookups();
     await page.goto("/");
     const session = (name: string) =>
       page.locator(".session-open").filter({ hasText: name }).first();
@@ -407,7 +367,7 @@ for (const interruption of ["edit", "switch", "reload"] as const) {
     await input.press("Tab");
     await expect.poll(gate.held).toBe(true);
     await session("Reader performance").click();
-    gate.release();
+    await gate.release();
     await session("Streaming voice input").click();
     await expect(
       page.getByRole("region", { name: "Queued messages" }),
@@ -435,7 +395,7 @@ for (const interruption of ["edit", "switch", "reload"] as const) {
       });
       state.holdCompletion = true;
     });
-    gate.releaseLookups();
+    await gate.releaseLookups();
     await expect
       .poll(() =>
         page.evaluate(
@@ -446,7 +406,7 @@ for (const interruption of ["edit", "switch", "reload"] as const) {
       )
       .toBe(true);
     if (interruption === "reload") {
-      gate.pauseLookups();
+      await gate.pauseLookups();
       await page.reload();
       await expect(page.locator(".image-draft")).toHaveCount(1);
       await expect(input).toHaveValue("Pending with attachment");

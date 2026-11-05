@@ -7,6 +7,7 @@ import { createHandler, createUpgrade } from "../server/http";
 import { groveWebsocket } from "../server/chord-socket";
 import type { HistorySession } from "../src/contracts";
 import { FakeRuntime, fixtureProjects } from "../server/testing";
+import { fixtureAuth } from "./fixture-auth";
 const directory = mkdtempSync(join(tmpdir(), "flickgrove-browser-"));
 const runtime = new FakeRuntime();
 for (const [threadId, title, preview, archived] of [
@@ -171,6 +172,18 @@ const server = Bun.serve({
   idleTimeout: 0,
   websocket: groveWebsocket,
   async fetch(request, server) {
+    const auth = fixtureAuth(request);
+    if (auth) return auth;
+    if (
+      request.method === "POST" &&
+      new URL(request.url).pathname === "/fixture/fail-next-title"
+    ) {
+      runtime.renameOverride = async () => {
+        runtime.renameOverride = undefined;
+        throw new Error("Title save failed");
+      };
+      return Response.json({ ok: true });
+    }
     const upgraded = createUpgrade(app, {
       service,
       origin: () => "http://127.0.0.1:14318",

@@ -60,7 +60,13 @@ export async function execProjectRead(
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) return abort();
     try {
-      socket = new WebSocket(url, {
+      const Client = WebSocket as unknown as {
+        new (
+          url: string,
+          options: { headers: Record<string, string> },
+        ): WebSocket;
+      };
+      socket = new Client(url, {
         headers: { Authorization: `Bearer ${token}` },
       });
       socket.onopen = () =>

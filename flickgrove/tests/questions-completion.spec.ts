@@ -14,7 +14,7 @@ async function start(page: Page, request: APIRequestContext, width = 1440) {
   await request.post(origin + "/fixture/reset", { data: { mode: "working" } });
   await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
   await page.goto(origin);
-  if (width === 390) await page.locator(".session-open").first().click();
+  await page.getByRole("button", { name: "Open Streaming voice input Orc", exact: true }).click();
   await expect(input(page)).toBeVisible();
 }
 for (const width of [1440, 390])
@@ -119,9 +119,17 @@ test("unadmitted answer retains exact identity after reload and null lookup neve
       const server = ws.connectToServer();
       ws.onMessage((raw) => {
         const message = JSON.parse(String(raw));
-        if (message.call?.member === "answerBatch")
-          intercepted = message.call.args[0];
-        else server.send(raw);
+        if (
+          message.t === "call" &&
+          message.member === "execute" &&
+          message.args?.member === "answerBatch"
+        ) {
+          intercepted = message.args.input;
+          // The request never reaches the owner; disconnect so no side observes
+          // a hole in Chord's cumulative acknowledgement sequence.
+          ws.close({ code: 1011 });
+          server.close({ code: 1011 });
+        } else server.send(raw);
       });
     },
   );

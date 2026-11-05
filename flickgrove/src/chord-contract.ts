@@ -1,9 +1,9 @@
 import {
-  defineService,
-  type Context,
+  hostNamed,
+  method,
+  remote,
   type JsonValue,
   type JsonRepresentation,
-  type ReplicatedState,
 } from "@earendil-works/chord";
 import { z } from "zod";
 import type { Detail, Human, Snapshot } from "./contracts";
@@ -143,13 +143,67 @@ export const abandonCloseSchema = z.discriminatedUnion("closed", [
   }),
 ]);
 export type Method = keyof typeof inputs;
-type Methods = {
-  [K in Method]: (input: JsonValue, context: Context) => Promise<JsonValue>;
+// Chord transport errors do not prove whether a call reached the server. Only a
+// complete application response can establish an explicit rejection.
+export type GroveResult =
+  | { ok: true; value: JsonValue }
+  | { ok: false; outcome: "rejected" | "unknown"; error: string };
+// Chord understands JSON Schema directly; its TypeBox static marker supplies
+// compile-time types without adding a direct runtime dependency.
+const emptyInput = {
+  type: "object",
+  properties: {},
+  additionalProperties: false,
+} as const;
+const callInput = {
+  type: "object",
+  properties: { member: { type: "string" }, input: {} },
+  required: ["member", "input"],
+  additionalProperties: false,
+} as const as {
+  readonly type: "object";
+  readonly properties: {
+    readonly member: { readonly type: "string" };
+    readonly input: {};
+  };
+  readonly required: readonly ["member", "input"];
+  readonly additionalProperties: false;
+  readonly "~unsafe": { member: Method; input: JsonValue };
 };
-export type GroveContract = Methods & {
-  view: ReplicatedState<JsonRepresentation<View>>;
+const callResult = {
+  anyOf: [
+    {
+      type: "object",
+      properties: { ok: { const: true }, value: {} },
+      required: ["ok", "value"],
+      additionalProperties: false,
+    },
+    {
+      type: "object",
+      properties: {
+        ok: { const: false },
+        outcome: { enum: ["rejected", "unknown"] },
+        error: { type: "string" },
+      },
+      required: ["ok", "outcome", "error"],
+      additionalProperties: false,
+    },
+  ],
+} as const as unknown as {
+  readonly anyOf: readonly object[];
+  readonly "~unsafe": GroveResult;
 };
-export const Grove = defineService<GroveContract>("flickgrove.workspace.v1");
+export const Grove = remote("flickgrove.workspace", {
+  version: 1,
+  input: emptyInput,
+  host: hostNamed("server"),
+  variants: {
+    default: {
+      state: { view: {} },
+      methods: { execute: method(callInput, callResult) },
+    },
+  },
+});
 export const receiptSchema = z.object({
   attemptId: id.optional(),
   operationId: id,

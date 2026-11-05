@@ -210,35 +210,15 @@ for (const [name, viewport] of [
     });
   });
 }
-test("lost receipt and state update recover from authority after refresh", async ({
+test("an accepted input with a lost receipt recovers from authority after refresh", async ({
   page,
   request,
 }) => {
   await request.post(origin + "/fixture/reset", {
     data: { mode: "no-workers" },
   });
-  let blocked = false;
-  let sendId = "";
-  await page.routeWebSocket("**/api/socket", (ws) => {
-    const server = ws.connectToServer();
-    let first = true;
-    ws.onMessage((raw) => {
-      const frame = JSON.parse(String(raw));
-      if (frame.call?.member === "send") {
-        sendId = frame.id;
-        blocked = true;
-      }
-      server.send(raw);
-    });
-    server.onMessage((raw) => {
-      const frame = JSON.parse(String(raw));
-      if (frame.type === "update" && blocked) return;
-      if (frame.type === "result" && frame.id === sendId && first) {
-        first = false;
-        return;
-      }
-      ws.send(raw);
-    });
+  await request.post(origin + "/fixture/send-reply", {
+    data: { action: "arm" },
   });
   await page.goto(origin);
   await page
@@ -261,7 +241,18 @@ test("lost receipt and state update recover from authority after refresh", async
         ).length,
     )
     .toBe(1);
-  blocked = false;
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(origin + "/fixture/info")).json())
+          .sendReplyWaiting,
+    )
+    .toBe(true);
+  await request.post(origin + "/fixture/change", { data: { outage: true } });
+  await request.post(origin + "/fixture/send-reply", {
+    data: { action: "release" },
+  });
+  await request.post(origin + "/fixture/change", { data: { outage: false } });
   await page.reload();
   await expect(
     page
@@ -280,30 +271,8 @@ test("an observed accepted input survives a late RPC error", async ({
   await request.post(origin + "/fixture/reset", {
     data: { mode: "no-workers" },
   });
-  let late: (() => void) | undefined;
-  await page.routeWebSocket("**/api/socket", (ws) => {
-    const server = ws.connectToServer();
-    let sendId = "";
-    ws.onMessage((raw) => {
-      const frame = JSON.parse(String(raw));
-      if (frame.call?.member === "send") sendId = frame.id;
-      server.send(raw);
-    });
-    server.onMessage((raw) => {
-      const frame = JSON.parse(String(raw));
-      if (frame.type === "result" && frame.id === sendId) {
-        late = () =>
-          ws.send(
-            JSON.stringify({
-              type: "error",
-              id: sendId,
-              error: "Synthetic late failure",
-            }),
-          );
-        return;
-      }
-      ws.send(raw);
-    });
+  await request.post(origin + "/fixture/send-reply", {
+    data: { action: "arm", error: true },
   });
   await page.goto(origin);
   await page
@@ -322,8 +291,16 @@ test("an observed accepted input survives a late RPC error", async ({
       ),
     )
     .toBe(0);
-  await expect.poll(() => !!late).toBe(true);
-  late!();
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(origin + "/fixture/info")).json())
+          .sendReplyWaiting,
+    )
+    .toBe(true);
+  await request.post(origin + "/fixture/send-reply", {
+    data: { action: "release" },
+  });
   await expect(
     page
       .locator(".user-message")
@@ -350,12 +327,16 @@ test("two tabs cannot erase an unadmitted operation before its owner has a recei
     const server = ws.connectToServer();
     ws.onMessage((raw) => {
       const frame = JSON.parse(String(raw));
-      if (frame.call?.member === "send") {
-        operationId = frame.call.args[0].operationId;
-        return; // Never admitted: there is no owner-side record to reconstruct.
+      if (frame.args?.member === "send") {
+        operationId = frame.args.input.operationId;
+        // Disconnect before forwarding, so the request is unadmitted without
+        // leaving a hole in a live connection's acknowledgement sequence.
+        ws.close({ code: 1011 });
+        server.close({ code: 1011 });
+        return;
       }
-      if (frame.call?.member === "lookup")
-        lookups.push(frame.call.args[0].operationId);
+      if (frame.args?.member === "lookup")
+        lookups.push(frame.args.input.operationId);
       server.send(raw);
     });
     server.onMessage((raw) => ws.send(raw));
@@ -411,23 +392,8 @@ test("late original rejection cannot replace an active retry or its eventual nat
   await request.post(origin + "/fixture/change", {
     data: { sendMode: "rejected" },
   });
-  let late: (() => void) | undefined,
-    first = "";
-  await page.routeWebSocket("**/api/socket", (ws) => {
-    const server = ws.connectToServer();
-    ws.onMessage((raw) => {
-      const f = JSON.parse(String(raw));
-      if (f.call?.member === "send" && !first) first = f.id;
-      server.send(raw);
-    });
-    server.onMessage((raw) => {
-      const f = JSON.parse(String(raw));
-      if (f.type === "result" && f.id === first) {
-        late = () => ws.send(raw);
-        return;
-      }
-      ws.send(raw);
-    });
+  await request.post(origin + "/fixture/send-reply", {
+    data: { action: "arm" },
   });
   await page.goto(origin);
   await page
@@ -442,13 +408,21 @@ test("late original rejection cannot replace an active retry or its eventual nat
   await expect(bubble.locator("small.failed")).toContainText(
     "Synthetic rejection",
   );
-  await expect.poll(() => !!late).toBe(true);
+  await expect
+    .poll(
+      async () =>
+        (await (await request.get(origin + "/fixture/info")).json())
+          .sendReplyWaiting,
+    )
+    .toBe(true);
   await request.post(origin + "/fixture/change", {
     data: { sendMode: "held" },
   });
   await bubble.getByRole("button", { name: "Retry", exact: true }).click();
   await expect(bubble.locator("small.failed")).toHaveCount(0);
-  late!();
+  await request.post(origin + "/fixture/send-reply", {
+    data: { action: "release" },
+  });
   await expect(bubble).toHaveCount(1);
   await expect(bubble.locator("small.failed")).toHaveCount(0);
   await request.post(origin + "/fixture/change", {

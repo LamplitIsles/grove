@@ -11,6 +11,7 @@ import {
 import { join } from "node:path";
 import { imageSchema } from "../src/chord-contract";
 import type { MessageImage } from "../src/contracts";
+import { RequestRefused } from "./runtime";
 export const IMAGE_BYTES = 5 * 1024 * 1024;
 export const MESSAGE_IMAGE_BYTES = 20 * 1024 * 1024;
 // Up to 100,000 JSON-escaped UTF-16 units (600KB) plus multipart metadata.
@@ -215,7 +216,7 @@ export class ImageStore {
       upload.text !== text ||
       JSON.stringify(upload.images) !== JSON.stringify(images)
     )
-      throw new Error(
+      throw new RequestRefused(
         "Images do not belong to this conversation and operation",
       );
     return upload;

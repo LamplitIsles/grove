@@ -169,7 +169,7 @@ async function setup(
       if (typeof data === "string") {
         try {
           const frame = JSON.parse(data);
-          if (frame.call?.member === "send") state.sends.push(frame);
+          if (frame.args?.member === "send") state.sends.push(frame);
         } catch {}
       }
       return send.call(this, data);

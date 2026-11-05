@@ -77,7 +77,7 @@ for (const width of [1440, 390])
     await expect(panel).toBeVisible();
     await chooseOption(
       page,
-      panel.getByRole("button", { name: "Reasoning effort" }),
+      panel.getByRole("combobox", { name: "Reasoning effort" }),
       "high",
     );
     await panel.getByRole("button", { name: "Cancel", exact: true }).click();
@@ -98,7 +98,7 @@ for (const width of [1440, 390])
       .click();
     await chooseOption(
       page,
-      panel.getByRole("button", { name: "Reasoning effort" }),
+      panel.getByRole("combobox", { name: "Reasoning effort" }),
       "high",
     );
     await chooseOption(
@@ -107,7 +107,7 @@ for (const width of [1440, 390])
       "gpt-6-luna",
     );
     await expect(
-      panel.getByRole("button", { name: "Reasoning effort" }),
+      panel.getByRole("combobox", { name: "Reasoning effort" }),
     ).toContainText("low");
     await expect(panel.getByRole("switch", { name: "Fast" })).toHaveCount(0); // remote catalogue differs from page Peer
     await panel.getByRole("button", { name: "Save changes" }).click();
@@ -212,8 +212,12 @@ test("model failure Cancel clears only model error; OptF toggles normally and tr
   page.on("websocket", (ws) =>
     ws.on("framesent", (frame) => {
       const value = JSON.parse(String(frame.payload));
-      if (value.call?.member === "updateTreeFast")
-        calls.push(value.call.args[0]);
+      if (
+        value.t === "call" &&
+        value.member === "execute" &&
+        value.args?.member === "updateTreeFast"
+      )
+        calls.push(value.args.input);
     }),
   );
   await setup(page);
@@ -228,7 +232,7 @@ test("model failure Cancel clears only model error; OptF toggles normally and tr
   const panel = page.getByRole("dialog", { name: "Session settings" });
   await chooseOption(
     page,
-    panel.getByRole("button", { name: "Reasoning effort" }),
+    panel.getByRole("combobox", { name: "Reasoning effort" }),
     "high",
   );
   await panel.getByRole("button", { name: "Save changes" }).click();
@@ -386,7 +390,7 @@ test("390 long model, unavailable current choice, retained catalogue on failure 
     long,
   );
   await expect(
-    panel.getByRole("button", { name: "Reasoning effort" }),
+    panel.getByRole("combobox", { name: "Reasoning effort" }),
   ).toContainText("medium");
   await expect(panel.getByRole("switch", { name: "Fast" })).toHaveCount(0);
   await page.waitForTimeout(150);

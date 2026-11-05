@@ -3,6 +3,7 @@ import { abandonFixture } from "../server/abandon-close-fixture";
 import { HostService } from "../server/hosts";
 import { createHandler, createUpgrade } from "../server/http";
 import { groveWebsocket } from "../server/chord-socket";
+import { fixtureAuth } from "./fixture-auth";
 const origin = "http://127.0.0.1:14327";
 let f = await abandonFixture();
 let closeFailure = false,
@@ -39,6 +40,8 @@ const server = Bun.serve({
   idleTimeout: 0,
   websocket: groveWebsocket,
   async fetch(request, server) {
+    const auth = fixtureAuth(request);
+    if (auth) return auth;
     const url = new URL(request.url);
     if (url.pathname === "/fixture/reset") {
       f.cleanup();

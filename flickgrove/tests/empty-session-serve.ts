@@ -7,6 +7,7 @@ import { Workspace } from "../server/workspace";
 import { HostService } from "../server/hosts";
 import { createHandler, createUpgrade } from "../server/http";
 import { groveWebsocket } from "../server/chord-socket";
+import { fixtureAuth } from "./fixture-auth";
 const directory = await mkdtemp(
   join(tmpdir(), "grove-spec3758-empty-browser-"),
 );
@@ -72,6 +73,8 @@ const server = Bun.serve({
   port: 0,
   websocket: groveWebsocket,
   async fetch(request, server) {
+    const auth = fixtureAuth(request);
+    if (auth) return auth;
     const up = upgrade(request, server);
     if (up) return up === true ? undefined : up;
     const url = new URL(request.url);

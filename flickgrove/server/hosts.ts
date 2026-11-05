@@ -1,3 +1,4 @@
+import { RequestRefused } from "./runtime";
 import { recentWindow } from "./conversation-reading";
 import { OutputSpeedService } from "./tps";
 import {
@@ -143,7 +144,7 @@ export class HostService {
   private raw(id: string) {
     const prefix = this.identity.id + ":";
     if (!id.startsWith(prefix))
-      throw new Error("Conversation belongs to another Peer");
+      throw new RequestRefused("Conversation belongs to another Peer");
     return id.slice(prefix.length);
   }
   previewDirectory(id: string) {

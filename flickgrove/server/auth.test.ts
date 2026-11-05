@@ -394,6 +394,11 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
       `ws://127.0.0.1:${server.port}/api/socket`,
       { Host: `localhost:${server.port}`, Origin: origin, Cookie: session },
     );
+    const aliceClient = await openGrove(
+      socket,
+      () => {},
+      () => {},
+    );
     const otherSocket = socketWithHeaders(
       `ws://127.0.0.1:${server.port}/api/socket`,
       {
@@ -405,10 +410,6 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
     await new Promise<void>((resolve, reject) => {
       otherSocket.onopen = () => resolve();
       otherSocket.onerror = () => reject(new Error("Second WebSocket failed"));
-    });
-    await new Promise<void>((resolve, reject) => {
-      socket.onopen = () => resolve();
-      socket.onerror = () => reject(new Error("WebSocket failed"));
     });
     const voiceSocket = socketWithHeaders(
       `ws://127.0.0.1:${server.port}/api/voice/stream`,
@@ -628,11 +629,6 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
     );
     expect(provider.stats.authorization[2]).toBe("Bearer beijing-synthetic");
     thirdVoice.close();
-    const aliceClient = await openGrove(
-      socket,
-      () => {},
-      () => {},
-    );
     const orc = await app.createOrc("alpha");
     const agentToken = app.store.byId(orc.id)!.token;
     const agentInfo = await fetch(

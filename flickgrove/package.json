@@ -8,12 +8,12 @@
     "dev": "vite --host 127.0.0.1",
     "build": "vite build",
     "typecheck": "paraglide-js compile --project ./project.inlang --outdir ./src/paraglide --strategy baseLocale --emit-ts-declarations && svelte-check --tsconfig ./tsconfig.json",
-    "test": "bun test server tests/skill-search.test.ts tests/history-cache.test.ts tests/message-image-cache.test.ts tests/message-time.test.ts tests/reading-cache.test.ts tests/project-identity.test.ts",
+    "test": "bun test server src/chord-client.test.ts tests/skill-search.test.ts tests/history-cache.test.ts tests/message-image-cache.test.ts tests/message-time.test.ts tests/reading-cache.test.ts tests/project-identity.test.ts",
     "test:browser": "playwright test"
   },
   "dependencies": {
     "@better-auth/passkey": "1.7.14",
-    "@earendil-works/chord": "1.0.1",
+    "@earendil-works/chord": "1.5.0",
     "@earendil-works/pi-ai": "1.3.0",
     "@earendil-works/pi-codemode": "1.3.0",
     "@earendil-works/pi-coding-agent": "1.3.0",

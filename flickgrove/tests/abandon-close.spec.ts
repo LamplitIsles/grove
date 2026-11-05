@@ -234,22 +234,23 @@ test("lost close response reads confirmed closed state and clears once without r
       construct(Target, args) {
         const socket = Reflect.construct(Target, args) as WebSocket;
         const send = socket.send.bind(socket);
-        let closeId: string | undefined;
+        let closeId: number | undefined;
         socket.send = (data) => {
           const frame = JSON.parse(String(data));
           if (
             (window as any).dropCloseResult &&
-            frame.call?.member === "closeTree" &&
-            frame.call.args[0]?.abandonUnknownOperationIds
+            frame.args?.member === "closeTree" &&
+            frame.args.input?.abandonUnknownOperationIds
           )
             closeId = frame.id;
           send(data);
         };
         socket.addEventListener("message", (event) => {
           const frame = JSON.parse(String(event.data));
-          if (closeId && frame.id === closeId && frame.type === "result") {
+          if (closeId && frame.id === closeId && frame.t === "result") {
             event.stopImmediatePropagation();
             closeId = undefined;
+            socket.close(1011, "Synthetic lost close response");
           }
         });
         return socket;
@@ -315,7 +316,7 @@ test("committed close survives owner unavailable through catch, reconnect and re
   request,
 }) => {
   let unavailable = false,
-    explicitId: string | undefined,
+    explicitId: number | undefined,
     held = false;
   const blocked: number[] = [];
   await page.routeWebSocket("**/api/socket", (socket) => {
@@ -328,8 +329,8 @@ test("committed close survives owner unavailable through catch, reconnect and re
     socket.onMessage((data) => {
       const frame = JSON.parse(String(data));
       if (
-        frame.call?.member === "closeTree" &&
-        frame.call.args[0]?.abandonUnknownOperationIds
+        frame.args?.member === "closeTree" &&
+        frame.args.input?.abandonUnknownOperationIds
       ) {
         explicitId = frame.id;
         held = true;
@@ -338,7 +339,7 @@ test("committed close survives owner unavailable through catch, reconnect and re
     });
     owner.onMessage((data) => {
       const frame = JSON.parse(String(data));
-      if (held && frame.type === "result" && frame.id === explicitId) {
+      if (held && frame.t === "result" && frame.id === explicitId) {
         unavailable = true;
         held = false;
         owner.close({ code: 1011 });
@@ -514,20 +515,20 @@ async function holdRecoveryRead(page: Page, target: () => string | undefined) {
   const control = { dropClose: false, closed: false, open: false, held };
   await page.routeWebSocket("**/api/socket", (socket) => {
     const owner = socket.connectToServer();
-    const calls = new Map<string, { member: string; input: any }>();
+    const calls = new Map<number, { member: string; input: any }>();
     socket.onMessage((data) => {
       const frame = JSON.parse(String(data));
-      if (frame.call)
+      if (frame.t === "call" && frame.member === "execute")
         calls.set(frame.id, {
-          member: frame.call.member,
-          input: frame.call.args[0],
+          member: frame.args.member,
+          input: frame.args.input,
         });
       owner.send(data);
     });
     owner.onMessage((data) => {
       const frame = JSON.parse(String(data));
       const call = calls.get(frame.id);
-      if (frame.type === "result" && call && call.input?.id === target()) {
+      if (frame.t === "result" && call && call.input?.id === target()) {
         if (
           control.dropClose &&
           call.member === "closeTree" &&
@@ -541,8 +542,8 @@ async function holdRecoveryRead(page: Page, target: () => string | undefined) {
         }
         if (
           call.member === "abandonCloseCandidate" &&
-          ((control.closed && frame.result?.closed) ||
-            (control.open && frame.result?.closed === false))
+          ((control.closed && frame.value?.value?.closed) ||
+            (control.open && frame.value?.value?.closed === false))
         ) {
           held.push(() => socket.send(data));
           return;
