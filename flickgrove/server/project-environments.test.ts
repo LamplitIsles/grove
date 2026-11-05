@@ -26,7 +26,7 @@ import { DeliveryRejected } from "./runtime";
 import { CodexRuntime } from "./codex";
 import { viewSchema, jsonValue } from "../src/chord-contract";
 import { fileURLToPath } from "node:url";
-import type { RuntimeAgent } from "./runtime";
+import type { RuntimeAgent, RuntimeEvent } from "./runtime";
 
 const exec = promisify(execFile);
 const cleanup: Array<() => unknown> = [];
@@ -563,6 +563,546 @@ test("strict runtime wire binds creation, original resume, new turns, og and cen
       .map((s) => JSON.parse(s))
       .filter((r) => r.method === "turn/start"),
   ).toHaveLength(2);
+}, 20000);
+
+test("WSS disconnect notifications preserve native errors and ordinary MCP results", async () => {
+  const f = await fixture();
+  await writeFile(
+    f.config,
+    (await readFile(f.config, "utf8")) +
+      `\n[[project_environments]]\nid="owned-wss"\nname="Owned WSS"\ntransport="wss"\nog="/owned/og"\n`,
+  );
+  const nativeConfig = join(f.codex, "environments.toml");
+  await writeFile(
+    nativeConfig,
+    (await readFile(nativeConfig, "utf8")) +
+      `\n[[environments]]\nid="owned-wss"\nurl="wss://owned.invalid/exec"\nauth_bearer_token="private-token-must-not-leak"\n`,
+  );
+  await import("node:fs/promises").then(({ chmod }) =>
+    chmod(nativeConfig, 0o600),
+  );
+  const wssBinding = await f.environments.binding("owned-wss");
+  const control = join(f.root, ".fake-app-server-control.json");
+  const runtime = new CodexRuntime({
+    cwd: f.root,
+    origin: () => "http://127.0.0.1:12345",
+    codexPath: fileURLToPath(
+      new URL("../tests/fake-codex.mjs", import.meta.url),
+    ),
+    environments: f.environments,
+    env: {
+      ...Object.fromEntries(
+        Object.keys(process.env).map((key) => [key, undefined]),
+      ),
+      PATH: process.env.PATH,
+      HOME: f.root,
+      CODEX_HOME: f.codex,
+      FAKE_SERVER_ROOT: f.root,
+    },
+  });
+  const observed: RuntimeEvent[] = [];
+  const open = runtime.open.bind(runtime);
+  runtime.open = (agent, notify) =>
+    open(agent, (event) => {
+      observed.push(event);
+      notify(event);
+    });
+  const app = new Workspace({
+    ...f.options,
+    directory: join(f.root, "wire-state"),
+    runtime,
+    projects: async (id = "local") =>
+      id === "owned-wss"
+        ? [
+            {
+              alias: "same",
+              name: "WSS same",
+              path: f.local,
+              environment: wssBinding,
+            },
+          ]
+        : f.options.projects(id),
+  });
+  cleanup.push(
+    () => runtime.close(),
+    () => app.dispose(),
+  );
+  const notifications: Array<{ id: number; method: string; params: unknown }> =
+    [];
+  const push = (method: string, params: unknown) =>
+    notifications.push({ id: notifications.length + 1, method, params });
+  let interruptNoEvent = false;
+  const flush = () =>
+    writeFile(
+      control,
+      JSON.stringify({ hold: true, interruptNoEvent, notifications }),
+    );
+  const waitUntil = async (condition: () => boolean) => {
+    const deadline = Date.now() + 4000;
+    while (!condition()) {
+      if (Date.now() >= deadline) throw new Error("notification timed out");
+      await Bun.sleep(10);
+    }
+  };
+  const start = async (project: string) => {
+    const agent = await app.createOrc(project);
+    await app.send(agent.id, "begin", `operation-${agent.id}`);
+    const { threadId, turnId } = app.detail(agent.id);
+    expect(threadId).toBeTruthy();
+    expect(turnId).toBeTruthy();
+    return { id: agent.id, threadId: threadId!, turnId: turnId! };
+  };
+  const mcp = (
+    a: { threadId: string; turnId: string },
+    isError: boolean,
+    server = "og",
+    tool = "project_get",
+  ) => {
+    push("item/completed", {
+      threadId: a.threadId,
+      turnId: a.turnId,
+      completedAtMs: Date.now(),
+      item: {
+        type: "mcpToolCall",
+        id: `tool-${notifications.length}`,
+        server,
+        tool,
+        status: "failed",
+        arguments:
+          tool === "issue_create"
+            ? { project: "owned", title: "owned test issue" }
+            : { project: "owned" },
+        result: isError
+          ? {
+              content: [{ type: "text", text: "owned application error" }],
+              structuredContent: null,
+              _meta: null,
+            }
+          : null,
+        error: isError ? null : { message: "private-token-must-not-leak" },
+        durationMs: 0,
+        appContext: null,
+        pluginId: null,
+        readOnlyHint: tool !== "issue_create",
+      },
+    });
+  };
+  const connection = (
+    a: { threadId: string },
+    environmentId: string,
+    method = "thread/environment/disconnected",
+  ) => push(method, { threadId: a.threadId, environmentId });
+  const mcpSuccess = (a: { threadId: string; turnId: string }) =>
+    push("item/completed", {
+      threadId: a.threadId,
+      turnId: a.turnId,
+      completedAtMs: Date.now(),
+      item: {
+        type: "mcpToolCall",
+        id: `tool-${notifications.length}`,
+        server: "og",
+        tool: "project_list",
+        status: "completed",
+        arguments: {},
+        result: { content: [], structuredContent: null, _meta: null },
+        error: null,
+        durationMs: 0,
+        appContext: null,
+        pluginId: null,
+        readOnlyHint: true,
+      },
+    });
+  const complete = (
+    a: { threadId: string; turnId: string },
+    error: unknown = null,
+  ) =>
+    push("turn/completed", {
+      threadId: a.threadId,
+      turn: {
+        id: a.turnId,
+        status: error ? "failed" : "completed",
+        items: [],
+        error,
+      },
+    });
+  await flush();
+
+  // An isError result is a tool answer, including on the existing SSH path.
+  for (const project of ["mac:same", "owned-wss:same", "same"]) {
+    const a = await start(project);
+    if (project !== "same")
+      await app.enqueueFollowUp(a.id, "queued work", "owned-follow-up");
+    mcp(a, true);
+    if (project === "owned-wss:same") {
+      mcp(a, false, "other");
+      push("item/completed", {
+        threadId: a.threadId,
+        turnId: a.turnId,
+        completedAtMs: Date.now(),
+        item: {
+          type: "agentMessage",
+          id: `other-${a.id}`,
+          text: "Other tool handled",
+          phase: null,
+          delivery: null,
+          questions: null,
+          memoryCitation: null,
+        },
+      });
+      await flush();
+      await waitUntil(() =>
+        app.detail(a.id).messages.some((m) => m.text === "Other tool handled"),
+      );
+      expect(app.detail(a.id).error).toBeUndefined();
+    }
+    if (project !== "owned-wss:same") mcp(a, false);
+    push("item/completed", {
+      threadId: a.threadId,
+      turnId: a.turnId,
+      completedAtMs: Date.now(),
+      item: {
+        type: "agentMessage",
+        id: `answer-${a.id}`,
+        text: "Corrected after the tool result",
+        phase: "final_answer",
+        delivery: null,
+        questions: null,
+        memoryCitation: null,
+      },
+    });
+    connection(a, "other-environment");
+    connection({ threadId: "other-thread" }, "owned-wss");
+    if (project !== "owned-wss:same")
+      connection(a, project === "same" ? "local" : "mac");
+    await flush();
+    await waitUntil(() =>
+      app
+        .detail(a.id)
+        .messages.some((m) => m.text === "Corrected after the tool result"),
+    );
+    if (project !== "same") {
+      expect(app.lookupFollowUp(a.id, "owned-follow-up")?.status).toBe(
+        "waiting",
+      );
+      expect(app.detail(a.id).followUpPaused).not.toBe(true);
+      await app.cancelFollowUp(a.id, "owned-follow-up");
+    }
+    complete(a);
+    await flush();
+    await waitUntil(() => app.detail(a.id).turnId === undefined);
+    expect(app.detail(a.id).state).toBe("idle");
+    expect(app.detail(a.id).error).toBeUndefined();
+    expect(
+      app
+        .detail(a.id)
+        .messages.some((m) => m.text === "Corrected after the tool result"),
+    ).toBe(true);
+    expect(
+      observed.some((e) => e.type === "error" && e.turnId === a.turnId),
+    ).toBe(false);
+  }
+  // A different successful call does not resolve an earlier unknown outcome.
+  for (const tool of ["project_get", "issue_create"]) {
+    const a = await start("owned-wss:same");
+    await app.enqueueFollowUp(a.id, "queued work", `follow-${tool}`);
+    mcp(a, false, "og", tool);
+    await flush();
+    const warning =
+      "Remote og MCP call failed. Inspect the operation before continuing.";
+    await waitUntil(() => app.detail(a.id).error === warning);
+    expect(app.detail(a.id).state).toBe("working");
+    expect(JSON.stringify(app.detail(a.id))).not.toContain(
+      "private-token-must-not-leak",
+    );
+    mcpSuccess(a);
+    push("item/completed", {
+      threadId: a.threadId,
+      turnId: a.turnId,
+      completedAtMs: Date.now(),
+      item: {
+        type: "agentMessage",
+        id: `after-${tool}`,
+        text: "A different call completed",
+        phase: "final_answer",
+        delivery: null,
+        questions: null,
+        memoryCitation: null,
+      },
+    });
+    await flush();
+    await waitUntil(() =>
+      app
+        .detail(a.id)
+        .messages.some((m) => m.text === "A different call completed"),
+    );
+    expect(app.detail(a.id).error).toBe(warning);
+    expect(app.lookupFollowUp(a.id, `follow-${tool}`)?.status).toBe("waiting");
+    expect(app.detail(a.id).followUpPaused).not.toBe(true);
+    complete(a);
+    await flush();
+    await waitUntil(() => app.detail(a.id).turnId === undefined);
+    expect(app.detail(a.id).state).toBe("error");
+    expect(app.detail(a.id).error).toBe(warning);
+    expect(app.detail(a.id).followUpPaused).toBe(true);
+    expect(
+      observed.some(
+        (e) =>
+          e.type === "completed" &&
+          e.turnId === a.turnId &&
+          e.status === "completed",
+      ),
+    ).toBe(true);
+  }
+  // A failure without a later successful og call remains visible at terminal.
+  const failed = await start("owned-wss:same");
+  mcp(failed, false);
+  complete(failed);
+  await flush();
+  await waitUntil(() => app.detail(failed.id).turnId === undefined);
+  expect(app.detail(failed.id).state).toBe("error");
+  expect(app.detail(failed.id).error).toBe(
+    "Remote og MCP call failed. Inspect the operation before continuing.",
+  );
+  expect(
+    observed.some(
+      (e) =>
+        e.type === "completed" &&
+        e.turnId === failed.turnId &&
+        e.status === "completed",
+    ),
+  ).toBe(true);
+
+  // Native errors retain precedence over a separate og invocation failure.
+  const toolCapacity = await start("owned-wss:same");
+  mcp(toolCapacity, false);
+  complete(toolCapacity, {
+    message: "Selected model is at capacity",
+    codexErrorInfo: "serverOverloaded",
+    additionalDetails: null,
+  });
+  await flush();
+  await waitUntil(() => app.detail(toolCapacity.id).turnId === undefined);
+  expect(app.detail(toolCapacity.id).error).toBe(
+    "Selected model is at capacity",
+  );
+  expect(app.detail(toolCapacity.id).execution?.kind).toBe("capacity");
+  // A native capacity error wins even when disconnection preceded the MCP item.
+  const capacity = await start("owned-wss:same");
+  connection(capacity, "owned-wss");
+  mcp(capacity, false);
+  complete(capacity, {
+    message: "Selected model is at capacity",
+    codexErrorInfo: "serverOverloaded",
+    additionalDetails: null,
+  });
+  await flush();
+  await waitUntil(() => app.detail(capacity.id).turnId === undefined);
+  expect(app.detail(capacity.id).error).toBe("Selected model is at capacity");
+  expect(app.detail(capacity.id).execution?.kind).toBe("capacity");
+  connection(capacity, "owned-wss");
+  await flush();
+  await Bun.sleep(100);
+  expect(app.detail(capacity.id).error).toBe("Selected model is at capacity");
+  expect(app.detail(capacity.id).execution?.kind).toBe("capacity");
+
+  // MCP item first, then a confirmed WSS disconnect and successful native terminal.
+  const during = await start("owned-wss:same");
+  mcp(during, false);
+  connection(during, "owned-wss");
+  complete(during);
+  await flush();
+  await waitUntil(() => app.detail(during.id).turnId === undefined);
+  const message =
+    "Project device disconnected. Check the connection and retry.";
+  expect(app.detail(during.id).state).toBe("error");
+  expect(app.detail(during.id).error).toBe(message);
+  expect(
+    observed.some(
+      (e) =>
+        e.type === "completed" &&
+        e.turnId === during.turnId &&
+        e.status === "completed",
+    ),
+  ).toBe(true);
+
+  // A thread-scoped disconnect can also arrive after turn/completed.
+  const late = await start("owned-wss:same");
+  complete(late);
+  connection(late, "owned-wss");
+  await flush();
+  await waitUntil(() => app.detail(late.id).error === message);
+  expect(app.detail(late.id).turnId).toBeUndefined();
+  expect(app.detail(late.id).state).toBe("error");
+
+  // The real 0.165.0 probe observes disconnect before the next turn starts.
+  const next = { ...late, turnId: "owned-after-disconnect" };
+  push("turn/started", {
+    threadId: next.threadId,
+    turn: {
+      id: next.turnId,
+      status: "inProgress",
+      items: [],
+      itemsView: "full",
+      error: null,
+      startedAt: Math.floor(Date.now() / 1000),
+      completedAt: null,
+    },
+  });
+  mcp(next, false);
+  complete(next);
+  await flush();
+  await waitUntil(() =>
+    observed.some((e) => e.type === "completed" && e.turnId === next.turnId),
+  );
+  expect(app.detail(next.id).state).toBe("error");
+  expect(app.detail(next.id).error).toBe(message);
+
+  // A connected notification clears the connection state for later turns.
+  const recovered = { ...late, turnId: "owned-after-reconnect" };
+  connection(recovered, "owned-wss", "thread/environment/connected");
+  push("turn/started", {
+    threadId: recovered.threadId,
+    turn: {
+      id: recovered.turnId,
+      status: "inProgress",
+      items: [],
+      itemsView: "full",
+      error: null,
+      startedAt: Math.floor(Date.now() / 1000),
+      completedAt: null,
+    },
+  });
+  mcp(recovered, true);
+  complete(recovered);
+  await flush();
+  await waitUntil(() =>
+    observed.some(
+      (e) => e.type === "completed" && e.turnId === recovered.turnId,
+    ),
+  );
+  expect(app.detail(recovered.id).state).toBe("idle");
+  expect(app.detail(recovered.id).error).toBeUndefined();
+
+  // Stop confirms the native interruption without discarding an unknown write.
+  const stoppedWrite = await start("owned-wss:same");
+  await app.enqueueFollowUp(
+    stoppedWrite.id,
+    "queued work",
+    "stop-write-follow",
+  );
+  mcp(stoppedWrite, false, "og", "issue_create");
+  await flush();
+  const toolWarning =
+    "Remote og MCP call failed. Inspect the operation before continuing.";
+  await waitUntil(() => app.detail(stoppedWrite.id).error === toolWarning);
+  await app.stop(stoppedWrite.id, stoppedWrite.turnId);
+  await waitUntil(
+    () => app.detail(stoppedWrite.id).stop?.status === "confirmed",
+  );
+  expect(app.detail(stoppedWrite.id).state).toBe("error");
+  expect(app.detail(stoppedWrite.id).error).toBe(toolWarning);
+  expect(app.detail(stoppedWrite.id).followUpPaused).toBe(true);
+  expect(app.lookupFollowUp(stoppedWrite.id, "stop-write-follow")?.status).toBe(
+    "waiting",
+  );
+  expect(
+    observed.some(
+      (e) =>
+        e.type === "completed" &&
+        e.turnId === stoppedWrite.turnId &&
+        e.status === "interrupted" &&
+        e.toolFailure === true,
+    ),
+  ).toBe(true);
+
+  // Disconnect after Stop starts but before its interrupted terminal event.
+  const stoppedEnvironment = await start("owned-wss:same");
+  await app.enqueueFollowUp(
+    stoppedEnvironment.id,
+    "queued work",
+    "stop-env-follow",
+  );
+  interruptNoEvent = true;
+  await flush();
+  expect(
+    (await app.stop(stoppedEnvironment.id, stoppedEnvironment.turnId)).stop
+      ?.status,
+  ).toBe("pending");
+  connection(stoppedEnvironment, "owned-wss");
+  push("turn/completed", {
+    threadId: stoppedEnvironment.threadId,
+    turn: {
+      id: stoppedEnvironment.turnId,
+      status: "interrupted",
+      items: [],
+      error: null,
+    },
+  });
+  await flush();
+  await waitUntil(
+    () => app.detail(stoppedEnvironment.id).stop?.status === "confirmed",
+  );
+  expect(app.detail(stoppedEnvironment.id).state).toBe("error");
+  expect(app.detail(stoppedEnvironment.id).error).toBe(message);
+  expect(app.detail(stoppedEnvironment.id).followUpPaused).toBe(true);
+  expect(
+    app.lookupFollowUp(stoppedEnvironment.id, "stop-env-follow")?.status,
+  ).toBe("waiting");
+  expect(
+    observed.some(
+      (e) =>
+        e.type === "completed" &&
+        e.turnId === stoppedEnvironment.turnId &&
+        e.status === "interrupted" &&
+        e.environmentFailure === true,
+    ),
+  ).toBe(true);
+
+  // A native terminal error and kind still win when Stop is confirmed.
+  const stoppedCapacity = await start("owned-wss:same");
+  mcp(stoppedCapacity, false, "og", "issue_create");
+  await flush();
+  await waitUntil(() => app.detail(stoppedCapacity.id).error === toolWarning);
+  expect(
+    (await app.stop(stoppedCapacity.id, stoppedCapacity.turnId)).stop?.status,
+  ).toBe("pending");
+  push("turn/completed", {
+    threadId: stoppedCapacity.threadId,
+    turn: {
+      id: stoppedCapacity.turnId,
+      status: "interrupted",
+      items: [],
+      error: {
+        message: "Selected model is at capacity",
+        codexErrorInfo: "serverOverloaded",
+        additionalDetails: null,
+      },
+    },
+  });
+  await flush();
+  await waitUntil(
+    () => app.detail(stoppedCapacity.id).stop?.status === "confirmed",
+  );
+  expect(app.detail(stoppedCapacity.id).state).toBe("error");
+  expect(app.detail(stoppedCapacity.id).error).toBe(
+    "Selected model is at capacity",
+  );
+  expect(app.detail(stoppedCapacity.id).execution?.kind).toBe("capacity");
+
+  // Stop without either failure keeps the existing idle result.
+  interruptNoEvent = false;
+  await flush();
+  const stoppedNormally = await start("owned-wss:same");
+  await app.stop(stoppedNormally.id, stoppedNormally.turnId);
+  await waitUntil(
+    () => app.detail(stoppedNormally.id).stop?.status === "confirmed",
+  );
+  expect(app.detail(stoppedNormally.id).state).toBe("idle");
+  expect(app.detail(stoppedNormally.id).error).toBeUndefined();
+  expect(JSON.stringify(observed)).not.toContain("private-token-must-not-leak");
+  expect(JSON.stringify(app.detail(late.id))).not.toContain(
+    "private-token-must-not-leak",
+  );
 }, 20000);
 
 test("remote uncertainty is never replayed after restart, and device disconnection cannot grant local reads", async () => {

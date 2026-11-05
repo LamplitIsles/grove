@@ -354,8 +354,14 @@ export class Workspace {
       view: NonNullable<Agent["currentExecution"]>;
     }
   >();
-  private readonly currentExecutionVersions = new WeakMap<RuntimeAgent, number>();
-  private readonly currentExecutionReads = new Map<string, { again: boolean }>();
+  private readonly currentExecutionVersions = new WeakMap<
+    RuntimeAgent,
+    number
+  >();
+  private readonly currentExecutionReads = new Map<
+    string,
+    { again: boolean }
+  >();
 
   private invalidateCurrentExecution(a: RuntimeAgent) {
     this.currentExecutionVersions.set(
@@ -366,7 +372,12 @@ export class Workspace {
   }
   private refreshCurrentExecution(a: RuntimeAgent) {
     const handle = this.handles.get(a.id);
-    if (!localCodex(a) || !handle?.currentExecution || a.closed || this.disposed)
+    if (
+      !localCodex(a) ||
+      !handle?.currentExecution ||
+      a.closed ||
+      this.disposed
+    )
       return;
     const inFlight = this.currentExecutionReads.get(a.id);
     if (inFlight) {
@@ -388,7 +399,9 @@ export class Workspace {
           a.threadId !== threadId ||
           handle.threadId !== threadId ||
           (this.currentExecutionVersions.get(a) ?? 0) !== version ||
-          a.deliveries.some((d) => d.status === "sending" || d.status === "queued")
+          a.deliveries.some(
+            (d) => d.status === "sending" || d.status === "queued",
+          )
         )
           return;
         this.currentExecutions.set(a.id, { handle, threadId: threadId!, view });
@@ -691,12 +704,15 @@ export class Workspace {
     }
     if (
       event.type !== "disconnected" &&
+      event.type !== "environment-disconnected" &&
       !(event.type === "item" && event.item.type === "userMessage") &&
       this.completedTurns.has(`${a.id}/${event.turnId}`)
     )
       return;
     if (
-      (event.type === "error" || event.type === "progress") &&
+      (event.type === "error" ||
+        event.type === "progress" ||
+        event.type === "tool-warning") &&
       event.turnId !== a.turnId
     ) {
       if (a.piMemberTerminalVerified && !event.replayed) {
@@ -747,6 +763,8 @@ export class Workspace {
       if (!a.execution?.retrying) return;
       a.execution = undefined;
       a.error = undefined;
+    } else if (event.type === "tool-warning") {
+      if (!a.error) a.error = event.error;
     } else if (event.type === "item") {
       if (
         a.piMemberTerminalVerified &&
@@ -962,7 +980,9 @@ export class Workspace {
           event.status === "interrupted" &&
           event.verified !== false;
         a.state =
-          stopped || event.status === "completed" || interrupted
+          !event.environmentFailure &&
+          !event.toolFailure &&
+          (stopped || event.status === "completed" || interrupted)
             ? "idle"
             : "error";
         a.error =
@@ -1008,6 +1028,20 @@ export class Workspace {
         )
           a.followUpPaused = true;
       }
+    } else if (event.type === "environment-disconnected") {
+      // This notification has no turn id and may arrive after the native
+      // terminal event. Preserve an existing terminal error and its kind.
+      if (a.state !== "error") {
+        a.state = "error";
+        a.error = event.error;
+        a.execution = { kind: "error", retrying: false };
+      }
+      if (
+        a.deliveries.some(
+          (d) => d.mode === "follow_up" && d.status === "waiting",
+        )
+      )
+        a.followUpPaused = true;
     } else {
       this.cancelHandoff(a.ownerId ?? a.id);
       a.piMemberTerminalVerified = undefined;
@@ -1138,7 +1172,9 @@ export class Workspace {
         this.currentExecutions.get(a.id)?.threadId === a.threadId &&
         !a.closed &&
         !this.disposed &&
-        !a.deliveries.some((d) => d.status === "sending" || d.status === "queued")
+        !a.deliveries.some(
+          (d) => d.status === "sending" || d.status === "queued",
+        )
           ? this.currentExecutions.get(a.id)?.view
           : undefined,
       lastInterrupted: interrupted ? true : undefined,

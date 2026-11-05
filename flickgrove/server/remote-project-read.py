@@ -21,8 +21,12 @@ signal.signal(signal.SIGTERM, interrupted)
 
 
 def tool(argv, env=None, timeout=8, budget=512 * 1024):
+    # Native exec-server owns the entire process group. Keep its tool children
+    # in that group so process/terminate also stops them. SSH keeps its
+    # existing separate group and signal-driven cleanup.
+    own_group = not request.get('execGroup', False)
     process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               env=env, start_new_session=True)
+                               env=env, start_new_session=own_group)
     streams = {process.stdout: bytearray(), process.stderr: bytearray()}
     selector = selectors.DefaultSelector()
     deadline = time.monotonic() + timeout
@@ -46,8 +50,16 @@ def tool(argv, env=None, timeout=8, budget=512 * 1024):
         return subprocess.CompletedProcess(argv, code, bytes(streams[process.stdout]), bytes(streams[process.stderr]))
     finally:
         selector.close()
+        if not own_group and sys.exc_info()[0] is not None:
+            # An executor-owned group can contain tool grandchildren that keep
+            # its pipes open. On failure, stop the whole group, including this
+            # reader, rather than returning while descendants remain alive.
+            os.killpg(os.getpgrp(), signal.SIGKILL)
         try:
-            os.killpg(process.pid, signal.SIGKILL)
+            if own_group:
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
         except ProcessLookupError:
             pass
         process.wait()

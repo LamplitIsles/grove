@@ -43,10 +43,13 @@ export type RuntimeEvent = { threadId?: string; replayed?: boolean } & (
       status: string;
       verified?: boolean;
       recoveredActivityAt?: number;
+      environmentFailure?: boolean;
+      toolFailure?: boolean;
       error?: string;
       errorKind?: "capacity" | "error";
     }
   | { type: "progress"; turnId: string }
+  | { type: "tool-warning"; turnId: string; error: string }
   | {
       type: "error";
       turnId: string;
@@ -55,6 +58,7 @@ export type RuntimeEvent = { threadId?: string; replayed?: boolean } & (
       errorKind?: "capacity" | "error";
     }
   | { type: "disconnected"; error: string }
+  | { type: "environment-disconnected"; error: string }
 );
 export interface RuntimeDelivery extends Delivery {
   /** Original steer target and observed terminal, not an admission receipt. */

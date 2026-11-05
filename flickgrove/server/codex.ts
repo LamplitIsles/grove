@@ -558,6 +558,9 @@ export class CodexRuntime implements Runtime {
     await this.options.environments?.assert(agent.project.environment);
     const client = await this.getCatalog();
     const selectedEnvironment = environmentId(agent.project);
+    const wssEnvironment =
+      selectedEnvironment !== "local" &&
+      (await this.options.environments!.isWss(agent.project.environment!));
     const checkTarget = async () => {
       await this.options.environments?.assert(agent.project.environment);
       if (
@@ -652,10 +655,28 @@ export class CodexRuntime implements Runtime {
     let threadName: string | null = null;
     let resumedPersistent = false;
     let titleGeneration: AbortController | undefined;
+    const disconnectedTurns = new Map<string, string>();
+    const failedOgTurns = new Set<string>();
+    let activeTurn: string | undefined;
+    let environmentDisconnected = false;
+    const disconnectMessage =
+      "Project device disconnected. Check the connection and retry.";
+    const ogFailureMessage =
+      "Remote og MCP call failed. Inspect the operation before continuing.";
     const dispatch = (event: RuntimeEvent) => {
       if (threadId && event.type !== "thread-status")
         this.emptyThreads.delete(threadId);
       if (!closed) notify({ ...event, threadId });
+    };
+    const reportDisconnect = (turnId: string) => {
+      if (disconnectedTurns.has(turnId)) return;
+      disconnectedTurns.set(turnId, disconnectMessage);
+      dispatch({
+        type: "error",
+        turnId,
+        error: disconnectMessage,
+        willRetry: false,
+      });
     };
     const off = [
       client.onNotification("thread/closed", (p) => {
@@ -681,8 +702,34 @@ export class CodexRuntime implements Runtime {
         }
       }),
       client.onNotification("turn/started", (p) => {
-        if (p.threadId === threadId)
+        if (p.threadId === threadId) {
+          activeTurn = p.turn.id;
           dispatch({ type: "working", turnId: p.turn.id });
+          if (environmentDisconnected) reportDisconnect(p.turn.id);
+        }
+      }),
+      client.onNotification("thread/environment/disconnected", (p) => {
+        if (
+          !wssEnvironment ||
+          p.threadId !== threadId ||
+          p.environmentId !== selectedEnvironment
+        )
+          return;
+        environmentDisconnected = true;
+        if (activeTurn) reportDisconnect(activeTurn);
+        else
+          dispatch({
+            type: "environment-disconnected",
+            error: disconnectMessage,
+          });
+      }),
+      client.onNotification("thread/environment/connected", (p) => {
+        if (
+          wssEnvironment &&
+          p.threadId === threadId &&
+          p.environmentId === selectedEnvironment
+        )
+          environmentDisconnected = false;
       }),
       client.onNotification("thread/status/changed", (p) => {
         if (p.threadId === threadId) dispatch({ type: "thread-status" });
@@ -699,6 +746,28 @@ export class CodexRuntime implements Runtime {
           });
       }),
       client.onNotification("item/completed", (p) => {
+        if (
+          p.threadId === threadId &&
+          p.turnId === activeTurn &&
+          wssEnvironment &&
+          p.item.type === "mcpToolCall" &&
+          p.item.server === "og"
+        ) {
+          if (
+            p.item.status === "failed" &&
+            p.item.result === null &&
+            p.item.error !== null
+          ) {
+            if (!failedOgTurns.has(p.turnId)) {
+              failedOgTurns.add(p.turnId);
+              dispatch({
+                type: "tool-warning",
+                turnId: p.turnId,
+                error: ogFailureMessage,
+              });
+            }
+          }
+        }
         if (
           p.threadId !== threadId ||
           !["agentMessage", "userMessage"].includes(p.item.type)
@@ -739,20 +808,38 @@ export class CodexRuntime implements Runtime {
         });
       }),
       client.onNotification("turn/completed", (p) => {
-        if (p.threadId === threadId)
+        if (p.threadId === threadId) {
+          const disconnectFailure = disconnectedTurns.get(p.turn.id);
+          disconnectedTurns.delete(p.turn.id);
+          const ogFailure = failedOgTurns.delete(p.turn.id)
+            ? ogFailureMessage
+            : undefined;
+          if (activeTurn === p.turn.id) activeTurn = undefined;
+          if (ogFailure && !disconnectFailure && !p.turn.error)
+            dispatch({
+              type: "error",
+              turnId: p.turn.id,
+              error: ogFailure,
+              willRetry: false,
+            });
           dispatch({
             type: "completed",
             turnId: p.turn.id,
             status: p.turn.status,
+            ...(disconnectFailure ? { environmentFailure: true } : {}),
+            ...(ogFailure ? { toolFailure: true } : {}),
             error: p.turn.error
               ? [p.turn.error.message, p.turn.error.additionalDetails]
                   .filter(Boolean)
                   .join("\n\n")
-              : undefined,
+              : (disconnectFailure ?? ogFailure),
             errorKind: p.turn.error
               ? executionErrorKind(p.turn.error)
-              : undefined,
+              : disconnectFailure || ogFailure
+                ? "error"
+                : undefined,
           });
+        }
       }),
       client.onNotification("error", (p) => {
         if (p.threadId === threadId)
@@ -903,8 +990,11 @@ export class CodexRuntime implements Runtime {
                 { timeoutMs: 2500 },
               );
               if (
-                closed || nativeReleased || this.threads.get(id) !== client ||
-                current.thread.id !== id || current.thread.ephemeral
+                closed ||
+                nativeReleased ||
+                this.threads.get(id) !== client ||
+                current.thread.id !== id ||
+                current.thread.ephemeral
               )
                 return undefined;
               if (current.thread.status.type === "active")
@@ -912,7 +1002,10 @@ export class CodexRuntime implements Runtime {
               const latest = page.data[0];
               if (
                 current.thread.status.type !== "idle" ||
-                (latest && !["completed", "failed", "interrupted"].includes(latest.status))
+                (latest &&
+                  !["completed", "failed", "interrupted"].includes(
+                    latest.status,
+                  ))
               )
                 return undefined;
               return {

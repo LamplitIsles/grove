@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -8,19 +8,26 @@ import { z } from "zod";
 import type { Project, ProjectEnvironment } from "../src/contracts";
 import { projectCatalogue, registeredProjects } from "./projects";
 import { environmentId } from "../src/project-identity";
+import { execProjectRead } from "./exec-project-read";
 
 const exec = promisify(execFile);
-const remoteSchema = z
-  .object({
-    id: z
-      .string()
-      .regex(/^[a-z][a-z0-9_-]{0,63}$/)
-      .refine((v) => v !== "local"),
-    name: z.string().trim().min(1).max(120),
-    ssh: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/),
-    og: z.string().min(1).default("og"),
-  })
-  .strict();
+const remoteFields = {
+  id: z
+    .string()
+    .regex(/^[a-z][a-z0-9_-]{0,63}$/)
+    .refine((v) => v !== "local"),
+  name: z.string().trim().min(1).max(120),
+  og: z.string().min(1).default("og"),
+};
+const remoteSchema = z.union([
+  z
+    .object({
+      ...remoteFields,
+      ssh: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/),
+    })
+    .strict(),
+  z.object({ ...remoteFields, transport: z.literal("wss") }).strict(),
+]);
 type Remote = z.infer<typeof remoteSchema>;
 const quote = (value: string) => "'" + value.replaceAll("'", "'\\''") + "'";
 // OpenSSH prints quoted path words for these configuration fields. Decode only
@@ -122,6 +129,10 @@ export class ProjectEnvironments {
     }
   }
   private async capture(entry: Remote): Promise<ProjectEnvironment> {
+    if ("transport" in entry) {
+      const { target } = await this.wss(entry);
+      return { id: entry.id, name: entry.name, target };
+    }
     const native = z
       .object({ environments: z.unknown().optional() })
       .parse(
@@ -242,6 +253,71 @@ export class ProjectEnvironments {
       .digest("hex");
     return { id: entry.id, name: entry.name, target };
   }
+  private async wss(entry: Extract<Remote, { transport: "wss" }>) {
+    try {
+      const path = join(this.codexHome, "environments.toml");
+      const file = await open(path, "r");
+      let contents: string;
+      try {
+        const info = await file.stat();
+        if (
+          !info.isFile() ||
+          (info.mode & 0o077) !== 0 ||
+          (typeof process.getuid === "function" &&
+            info.uid !== process.getuid())
+        )
+          throw new Error();
+        contents = await file.readFile("utf8");
+      } finally {
+        await file.close();
+      }
+      const native = z
+        .object({
+          environments: z.array(
+            z
+              .object({
+                id: z.string(),
+                url: z.string().optional(),
+                auth_bearer_token: z.string().optional(),
+                program: z.unknown().optional(),
+                args: z.unknown().optional(),
+              })
+              .passthrough(),
+          ),
+        })
+        .parse(Bun.TOML.parse(contents));
+      const matches = native.environments.filter(
+        (value) => value.id === entry.id,
+      );
+      const selected = matches[0];
+      if (
+        matches.length !== 1 ||
+        !selected.url ||
+        !selected.auth_bearer_token ||
+        selected.program !== undefined ||
+        selected.args !== undefined ||
+        !/^[\x21-\x7e]+$/.test(selected.auth_bearer_token)
+      )
+        throw new Error();
+      const url = new URL(selected.url);
+      if (
+        url.protocol !== "wss:" ||
+        url.username ||
+        url.password ||
+        url.search ||
+        url.hash
+      )
+        throw new Error();
+      const target = createHash("sha256")
+        .update(JSON.stringify([entry, url.href]))
+        .digest("hex");
+      return { target, url: url.href, token: selected.auth_bearer_token };
+    } catch {
+      throw new Error(
+        `${entry.name}: configure a matching WSS environment and bearer token in an owner-only environments.toml`,
+      );
+    }
+  }
   async list() {
     return [
       LOCAL,
@@ -283,11 +359,17 @@ export class ProjectEnvironments {
       ),
     );
   }
-  async og(binding: ProjectEnvironment) {
+  private async boundEntry(binding: ProjectEnvironment) {
     const entry = (await this.configured()).find((e) => e.id === binding.id);
     if (!entry || (await this.capture(entry)).target !== binding.target)
       throw new Error("Original project execution target is unavailable");
-    return entry.og;
+    return entry;
+  }
+  async og(binding: ProjectEnvironment) {
+    return (await this.boundEntry(binding)).og;
+  }
+  async isWss(binding: ProjectEnvironment) {
+    return "transport" in (await this.boundEntry(binding));
   }
   async projects(id = "local"): Promise<Project[]> {
     const environment = await this.binding(id);
@@ -331,7 +413,8 @@ export class ProjectEnvironments {
   ): Promise<any> {
     const entry = (await this.configured()).find((e) => e.id === binding.id);
     if (!entry) throw new Error("Remote execution environment is unavailable");
-    if ((await this.capture(entry)).target !== binding.target)
+    const wss = "transport" in entry ? await this.wss(entry) : undefined;
+    if ((wss?.target ?? (await this.capture(entry)).target) !== binding.target)
       throw new Error(
         `${binding.name}: execution target changed; retry from the original device configuration`,
       );
@@ -340,29 +423,50 @@ export class ProjectEnvironments {
       "utf8",
     );
     const data = Buffer.from(
-      JSON.stringify({ ...payload, og: entry.og }),
+      JSON.stringify({ ...payload, og: entry.og, execGroup: !!wss }),
     ).toString("base64");
     try {
-      const { stdout } = await this.command(
-        "ssh",
-        [
-          "-T",
-          "-o",
-          "BatchMode=yes",
-          "-o",
-          "StrictHostKeyChecking=yes",
-          "-o",
-          "ConnectTimeout=5",
-          entry.ssh,
-          `python3 -c ${quote(script)} ${quote(data)}`,
-        ],
-        {
-          signal,
-          timeout: 15000,
-          killSignal: "SIGKILL",
-          maxBuffer: 29 * 1024 * 1024,
-        },
-      );
+      // A detached native session may retain its child after a broken socket.
+      // Bound the remote lifetime even when terminate cannot reach the server.
+      const boundedScript =
+        "import signal,sys\nsignal.signal(signal.SIGALRM, lambda *_: sys.exit(1))\nsignal.alarm(15)\n" +
+        script;
+      const stdout =
+        "transport" in entry
+          ? await execProjectRead(
+              wss!.url,
+              wss!.token,
+              boundedScript,
+              data,
+              signal,
+            ).catch(() => {
+              throw Object.assign(
+                new Error("Remote project transport failed"),
+                { code: "REMOTE_READ" },
+              );
+            })
+          : (
+              await this.command(
+                "ssh",
+                [
+                  "-T",
+                  "-o",
+                  "BatchMode=yes",
+                  "-o",
+                  "StrictHostKeyChecking=yes",
+                  "-o",
+                  "ConnectTimeout=5",
+                  entry.ssh,
+                  `python3 -c ${quote(script)} ${quote(data)}`,
+                ],
+                {
+                  signal,
+                  timeout: 15000,
+                  killSignal: "SIGKILL",
+                  maxBuffer: 29 * 1024 * 1024,
+                },
+              )
+            ).stdout;
       let value;
       try {
         value = JSON.parse(stdout);
@@ -381,7 +485,7 @@ export class ProjectEnvironments {
     } catch (error) {
       if (error instanceof Error && "code" in error)
         throw new Error(
-          `${binding.name}: could not read the project device. Check SSH, python3 and og, then retry.`,
+          `${binding.name}: could not read the project device. Check ${wss ? "WSS" : "SSH"}, python3 and og, then retry.`,
         );
       throw error;
     }
