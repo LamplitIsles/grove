@@ -104,9 +104,10 @@ function threadRecord(cwd, model) {
     projectId: null,
     sessionId: "session-fake",
     source: "appServer",
-    status: control().trackThreadStatus && state.active
-      ? { type: "active", activeFlags: [] }
-      : { type: control().readStatus ?? "idle" },
+    status:
+      control().trackThreadStatus && state.active
+        ? { type: "active", activeFlags: [] }
+        : { type: control().readStatus ?? "idle" },
     path: state.rolloutPath ?? join(root, "thread-fake.jsonl"),
     extra: null,
     forkedFromId: null,
@@ -1205,8 +1206,11 @@ async function handle(request) {
       }
       const turns = state.turns.map((turn) => {
         const view = turnView(turn, p.itemsView);
-        if (control().projectInterrupted && view.status === "inProgress" &&
-            (!control().trackThreadStatus || !state.active))
+        if (
+          control().projectInterrupted &&
+          view.status === "inProgress" &&
+          (!control().trackThreadStatus || !state.active)
+        )
           view.status = "interrupted";
         return view;
       });

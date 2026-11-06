@@ -72,8 +72,23 @@ test("persists steer evidence per original delivery without changing its receipt
     agent("parent", {
       turnEnded: false,
       deliveries: [
-        { id: "steer", text: "input", source: "user", status: "uncertain", questionIds: [], at: 1 },
-        { id: "legacy", text: "old", source: "user", status: "uncertain", turnId: "old-turn", questionIds: [], at: 2 },
+        {
+          id: "steer",
+          text: "input",
+          source: "user",
+          status: "uncertain",
+          questionIds: [],
+          at: 1,
+        },
+        {
+          id: "legacy",
+          text: "old",
+          source: "user",
+          status: "uncertain",
+          turnId: "old-turn",
+          questionIds: [],
+          at: 2,
+        },
       ],
     }),
     true,

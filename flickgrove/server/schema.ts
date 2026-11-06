@@ -38,7 +38,8 @@ export type DeliveryContext = Pick<
   | "reportingResearcherId"
   | "reviewTarget"
   | "researchQuestion"
-> & Pick<RuntimeDelivery, "steerEvidence">;
+> &
+  Pick<RuntimeDelivery, "steerEvidence">;
 const json = <T>(name: string) => text(name, { mode: "json" }).$type<T>();
 // Better Auth's SQLite adapter owns the encoding of its DATE columns.
 const authDate = customType<{ data: string }>({ dataType: () => "date" });

@@ -193,7 +193,9 @@ test("a late detail update cannot reopen a dismissed mobile conversation", async
   await expect(page.locator(".session-list")).toBeVisible();
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await expect(page.getByRole("dialog", { name: "Settings", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("dialog", { name: "Settings", exact: true }),
+  ).toBeVisible();
   await expect(page.locator(".agent-detail")).toHaveCount(0);
 });
 

@@ -14,7 +14,12 @@ async function start(page: Page, request: APIRequestContext, width = 1440) {
   await request.post(origin + "/fixture/reset", { data: { mode: "working" } });
   await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
   await page.goto(origin);
-  await page.getByRole("button", { name: "Open Streaming voice input Orc", exact: true }).click();
+  await page
+    .getByRole("button", {
+      name: "Open Streaming voice input Orc",
+      exact: true,
+    })
+    .click();
   await expect(input(page)).toBeVisible();
 }
 for (const width of [1440, 390])

@@ -933,7 +933,14 @@ test("image validation infrastructure errors stay unknown", async () => {
       text: "test",
       operationId: "image-error",
       images: [
-        { id: "0".repeat(64), name: "test.png", width: 1, height: 1, bytes: 1, mediaType: "image/png" },
+        {
+          id: "0".repeat(64),
+          name: "test.png",
+          width: 1,
+          height: 1,
+          bytes: 1,
+          mediaType: "image/png",
+        },
       ],
     })
     .catch((e: unknown) => e);
@@ -951,18 +958,25 @@ test("unreadable native history leaves the prior rejection authoritative without
   f.runtime.sendOverride = async () => {
     throw new DeliveryRejected("First rejected");
   };
-  await client.call("send", { id, text: "original", operationId: "history-op" });
+  await client.call("send", {
+    id,
+    text: "original",
+    operationId: "history-op",
+  });
   expect(f.app.lookup(agent.id, "history-op")?.state).toBe("rejected");
   const history = f.runtime.historyMessages.bind(f.runtime);
   f.runtime.historyMessages = async () => {
     throw new Error("History unavailable");
   };
-  const result = await client.call<Detail & { retryNotAdmitted?: string }>("send", {
-    id,
-    text: "original",
-    operationId: "history-op",
-    retry: { after: "history-op", attempt: "history-retry" },
-  });
+  const result = await client.call<Detail & { retryNotAdmitted?: string }>(
+    "send",
+    {
+      id,
+      text: "original",
+      operationId: "history-op",
+      retry: { after: "history-op", attempt: "history-retry" },
+    },
+  );
   expect(result.retryNotAdmitted).toBe("history-retry");
   expect(result.deliveries.find((d) => d.id === "history-op")).toMatchObject({
     status: "failed",
@@ -972,17 +986,22 @@ test("unreadable native history leaves the prior rejection authoritative without
     state: "rejected",
     attemptId: undefined,
   });
-  expect(f.runtime.inputs.map((input) => input.clientId)).toEqual(["history-op"]);
+  expect(f.runtime.inputs.map((input) => input.clientId)).toEqual([
+    "history-op",
+  ]);
   f.runtime.historyMessages = history;
   f.runtime.sendOverride = async () => {
     throw new Error("Synthetic unknown admission");
   };
-  const retried = await client.call<Detail & { retryNotAdmitted?: string }>("send", {
-    id,
-    text: "original",
-    operationId: "history-op",
-    retry: { after: "history-op", attempt: "later-retry" },
-  });
+  const retried = await client.call<Detail & { retryNotAdmitted?: string }>(
+    "send",
+    {
+      id,
+      text: "original",
+      operationId: "history-op",
+      retry: { after: "history-op", attempt: "later-retry" },
+    },
+  );
   expect(retried.retryNotAdmitted).toBeUndefined();
   expect(retried.deliveries.find((d) => d.id === "history-op")).toMatchObject({
     status: "uncertain",
@@ -1002,9 +1021,19 @@ test("native acceptance and failed persistence never become a retry rejection", 
   f.runtime.sendOverride = async () => {
     throw new DeliveryRejected("First rejected");
   };
-  await client.call("send", { id, text: "original", operationId: "accepted-op" });
+  await client.call("send", {
+    id,
+    text: "original",
+    operationId: "accepted-op",
+  });
   f.runtime.historyItems.set(agent.threadId!, [
-    { id: "native-item", clientId: "accepted-op", role: "user", text: "original", at: 1 },
+    {
+      id: "native-item",
+      clientId: "accepted-op",
+      role: "user",
+      text: "original",
+      at: 1,
+    },
   ]);
   const save = (f.app as any).save;
   (f.app as any).save = () => {
@@ -1038,7 +1067,13 @@ test("native history acceptance prevents retry and remains authoritative", async
   };
   await client.call("send", { id, text: "original", operationId: "native-op" });
   f.runtime.historyItems.set(agent.threadId!, [
-    { id: "native-item", clientId: "native-op", role: "user", text: "original", at: 1 },
+    {
+      id: "native-item",
+      clientId: "native-op",
+      role: "user",
+      text: "original",
+      at: 1,
+    },
   ]);
   const error = await client
     .call("send", {
@@ -1051,7 +1086,9 @@ test("native history acceptance prevents retry and remains authoritative", async
   expect(error).toBeInstanceOf(Error);
   expect(error).not.toBeInstanceOf(RequestRejected);
   expect(f.app.lookup(agent.id, "native-op")?.state).toBe("accepted");
-  expect(f.runtime.inputs.map((input) => input.clientId)).toEqual(["native-op"]);
+  expect(f.runtime.inputs.map((input) => input.clientId)).toEqual([
+    "native-op",
+  ]);
 });
 
 test("native acceptance observed during a retry history read prevents another admission", async () => {
@@ -1095,7 +1132,9 @@ test("native acceptance observed during a retry history read prevents another ad
     expect(result.retryNotAdmitted).toBe("race-retry");
     expect(result.messages.some((m) => m.clientId === "race-op")).toBe(true);
     expect(f.app.lookup(agent.id, "race-op")?.state).toBe("accepted");
-    expect(f.runtime.inputs.map((input) => input.clientId)).toEqual(["race-op"]);
+    expect(f.runtime.inputs.map((input) => input.clientId)).toEqual([
+      "race-op",
+    ]);
   } finally {
     history.resolve({ messages: [], nextCursor: null });
   }

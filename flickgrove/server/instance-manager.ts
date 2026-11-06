@@ -70,8 +70,9 @@ function userService(cgroup: string, uid: number) {
     unit.length > 255 ||
     !unit.endsWith(".service") ||
     !safeName.test(unit) ||
-    parts.some((part) =>
-      part.length > 255 || !part.endsWith(".slice") || !safeName.test(part),
+    parts.some(
+      (part) =>
+        part.length > 255 || !part.endsWith(".slice") || !safeName.test(part),
     )
   )
     return null;
@@ -94,7 +95,11 @@ export function instanceManager(target: ManagerHost = host): InstanceManager {
   type Verified = { unit: string; group: string };
   let verified: Verified | null = null;
   async function verify(): Promise<Verified | null> {
-    if ((!linux && !mac) || !Number.isSafeInteger(target.pid) || target.pid <= 0)
+    if (
+      (!linux && !mac) ||
+      !Number.isSafeInteger(target.pid) ||
+      target.pid <= 0
+    )
       return null;
     try {
       if (linux) {

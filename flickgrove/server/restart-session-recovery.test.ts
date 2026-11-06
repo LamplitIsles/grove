@@ -63,7 +63,11 @@ test("restart then shared native disconnect preserves confirmed idle and unknown
     await writeFile(control, "{}");
     const owner = await fixture.app.createOrc("fixture");
     const token = fixture.app.store.byId(owner.id)!.token;
-    const target = { spec: "fixture", fixedPoint: "base", reviewedHead: "head" };
+    const target = {
+      spec: "fixture",
+      fixedPoint: "base",
+      reviewedHead: "head",
+    };
     const idle = (await fixture.app.tool(token, "worker_start", {
       project: "fixture",
       title: "idle",
@@ -91,11 +95,19 @@ test("restart then shared native disconnect preserves confirmed idle and unknown
     ]);
     const identities = members.map((m) => {
       const detail = fixture.app.detail(m.id);
-      return { id: detail.id, ownerId: detail.ownerId, threadId: detail.threadId };
+      return {
+        id: detail.id,
+        ownerId: detail.ownerId,
+        threadId: detail.threadId,
+      };
     });
     await writeFile(
       control,
-      JSON.stringify({ hold: true, projectInterrupted: true, trackThreadStatus: true }),
+      JSON.stringify({
+        hold: true,
+        projectInterrupted: true,
+        trackThreadStatus: true,
+      }),
     );
     await fixture.app.tool(token, "reviewer_send", {
       reviewerId: unknown.id,
@@ -121,7 +133,11 @@ test("restart then shared native disconnect preserves confirmed idle and unknown
     expect(
       members.map((m) => {
         const detail = fixture.app.detail(m.id);
-        return { id: detail.id, ownerId: detail.ownerId, threadId: detail.threadId };
+        return {
+          id: detail.id,
+          ownerId: detail.ownerId,
+          threadId: detail.threadId,
+        };
       }),
     ).toEqual(identities);
     expect(fixture.app.detail(idle.id)).toMatchObject({

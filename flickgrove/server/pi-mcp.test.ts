@@ -193,3 +193,255 @@ test("official HTTP MCP static auth/resources, OAuth rejection, redaction, and t
     await rm(home, { recursive: true, force: true });
   }
 }, 15000);
+
+test("expired Streamable HTTP session is retried once, then reported and reconnected", async () => {
+  const home = await mkdtemp(join(tmpdir(), "grove-mcp-expiry-")),
+    agentDir = join(home, "agent"),
+    cwd = join(home, "repo");
+  await mkdir(agentDir);
+  await mkdir(cwd);
+  const transports = new Map<
+    string,
+    WebStandardStreamableHTTPServerTransport
+  >();
+  const servers: McpServer[] = [];
+  const forgotten = new Set<string>();
+  let forgetEverySession = false,
+    calls = 0;
+  const handle = async (req: Request) => {
+    const session = req.headers.get("mcp-session-id");
+    if (session) {
+      const transport =
+        forgetEverySession || forgotten.has(session)
+          ? undefined
+          : transports.get(session);
+      return transport
+        ? transport.handleRequest(req)
+        : new Response("Session not found", { status: 404 });
+    }
+    const transport: WebStandardStreamableHTTPServerTransport =
+      new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: () => crypto.randomUUID(),
+        enableJsonResponse: true,
+        onsessioninitialized: (id) => {
+          transports.set(id, transport);
+        },
+      });
+    const server = new McpServer({ name: "expiring", version: "1" });
+    server.registerTool(
+      "echo",
+      { inputSchema: { value: z.string() } },
+      async ({ value }) => {
+        calls++;
+        return { content: [{ type: "text", text: value }] };
+      },
+    );
+    await server.connect(transport);
+    servers.push(server);
+    return transport.handleRequest(req);
+  };
+  const endpoint = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: handle,
+  });
+  await writeFile(
+    join(agentDir, "mcp.json"),
+    JSON.stringify({
+      mcpServers: {
+        expiring: { url: `http://127.0.0.1:${endpoint.port}/mcp` },
+      },
+    }),
+  );
+  let host: Awaited<ReturnType<typeof openPiMcp>> | undefined;
+  try {
+    host = await openPiMcp({ agentDir, cwd, trusted: false });
+    expect(host.issues).toEqual([]);
+    const invoke = (value: string) => {
+      const tool = host!.extension.tools?.find(
+        (t) => t.name === "mcp__expiring__echo",
+      );
+      if (!tool) throw new Error("Fixture tool missing");
+      return tool.execute(
+        { value },
+        {} as ToolExecutionApi,
+        BACKGROUND_CONTEXT,
+      );
+    };
+    expect(JSON.stringify(await invoke("first"))).toContain("first");
+    expect(calls).toBe(1);
+    // The server forgot this session, so the call was not run and is retried on a new one.
+    for (const id of transports.keys()) forgotten.add(id);
+    expect(JSON.stringify(await invoke("second"))).toContain("second");
+    expect(calls).toBe(2);
+    expect(await mcpStatus(host)).toBeUndefined();
+    // When even the retried session is gone, the loss is reported instead of looping.
+    forgetEverySession = true;
+    const lost = await invoke("third");
+    expect(lost.isError).toBe(true);
+    expect(JSON.stringify(lost)).toContain("connection was lost");
+    expect(calls).toBe(2);
+    forgetEverySession = false;
+    expect(JSON.stringify(await invoke("fourth"))).toContain("fourth");
+    expect(calls).toBe(3);
+  } finally {
+    await host?.close();
+    await Promise.all(servers.map((server) => server.close()));
+    endpoint.stop(true);
+    await rm(home, { recursive: true, force: true });
+  }
+}, 15000);
+
+/** The rendered MCP status section, which carries both open issues and persistent degradation. */
+async function mcpStatus(
+  host: Awaited<ReturnType<typeof openPiMcp>>,
+): Promise<string | undefined> {
+  const section = host.extension.sections?.find(
+    (entry) => entry.key === "mcp_status",
+  );
+  if (!section) throw new Error("Fixture section missing");
+  return (await section.render({} as never, BACKGROUND_CONTEXT)) ?? undefined;
+}
+
+/** Owned MCP server whose new sessions can refuse or forget existing ones. */
+async function ownedServer() {
+  const home = await mkdtemp(join(tmpdir(), "grove-mcp-owner-")),
+    agentDir = join(home, "agent"),
+    cwd = join(home, "repo");
+  await mkdir(agentDir);
+  await mkdir(cwd);
+  const transports = new Map<
+    string,
+    WebStandardStreamableHTTPServerTransport
+  >();
+  const servers: McpServer[] = [];
+  const forgotten = new Set<string>();
+  const state = {
+    /** Number of new sessions still to refuse with a transient HTTP error. */
+    refusing: 0,
+    /** Answer every known session with "Session not found". */
+    forgetting: false,
+    calls: 0,
+  };
+  const handle = async (req: Request) => {
+    const session = req.headers.get("mcp-session-id");
+    if (session) {
+      const transport =
+        state.forgetting || forgotten.has(session)
+          ? undefined
+          : transports.get(session);
+      return transport
+        ? transport.handleRequest(req)
+        : new Response("Session not found", { status: 404 });
+    }
+    if (state.refusing > 0) {
+      state.refusing--;
+      return new Response("Starting", { status: 503 });
+    }
+    const transport: WebStandardStreamableHTTPServerTransport =
+      new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: () => crypto.randomUUID(),
+        enableJsonResponse: true,
+        onsessioninitialized: (id) => {
+          transports.set(id, transport);
+        },
+      });
+    const server = new McpServer({ name: "owned", version: "1" });
+    server.registerTool(
+      "echo",
+      { inputSchema: { value: z.string() } },
+      async ({ value }) => {
+        state.calls++;
+        return { content: [{ type: "text", text: value }] };
+      },
+    );
+    await server.connect(transport);
+    servers.push(server);
+    return transport.handleRequest(req);
+  };
+  const endpoint = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: handle });
+  await writeFile(
+    join(agentDir, "mcp.json"),
+    JSON.stringify({
+      mcpServers: { owned: { url: `http://127.0.0.1:${endpoint.port}/mcp` } },
+    }),
+  );
+  return {
+    agentDir,
+    cwd,
+    state,
+    forgotten,
+    transports,
+    async cleanup(host: Awaited<ReturnType<typeof openPiMcp>> | undefined) {
+      await host?.close();
+      await Promise.all(servers.map((server) => server.close()));
+      endpoint.stop(true);
+      await rm(home, { recursive: true, force: true });
+    },
+  };
+}
+
+test("connect retries a transient failure instead of losing the server", async () => {
+  const owned = await ownedServer();
+  owned.state.refusing = 1;
+  let host: Awaited<ReturnType<typeof openPiMcp>> | undefined;
+  try {
+    host = await openPiMcp({
+      agentDir: owned.agentDir,
+      cwd: owned.cwd,
+      trusted: false,
+    });
+    expect(host.issues).toEqual([]);
+    const tool = host.extension.tools?.find(
+      (entry) => entry.name === "mcp__owned__echo",
+    );
+    if (!tool) throw new Error("Fixture tool missing");
+    expect(
+      JSON.stringify(
+        await tool.execute(
+          { value: "after retry" },
+          {} as ToolExecutionApi,
+          BACKGROUND_CONTEXT,
+        ),
+      ),
+    ).toContain("after retry");
+  } finally {
+    await owned.cleanup(host);
+  }
+}, 15000);
+
+test("a server that stays unreachable is reported in the MCP status until it recovers", async () => {
+  const owned = await ownedServer();
+  let host: Awaited<ReturnType<typeof openPiMcp>> | undefined;
+  try {
+    host = await openPiMcp({
+      agentDir: owned.agentDir,
+      cwd: owned.cwd,
+      trusted: false,
+    });
+    const tool = host.extension.tools?.find(
+      (entry) => entry.name === "mcp__owned__echo",
+    );
+    if (!tool) throw new Error("Fixture tool missing");
+    const invoke = (value: string) =>
+      tool.execute({ value }, {} as ToolExecutionApi, BACKGROUND_CONTEXT);
+    expect(JSON.stringify(await invoke("first"))).toContain("first");
+    expect(await mcpStatus(host)).toBeUndefined();
+    // The session is gone and no new one can be opened, so the loss persists.
+    owned.forgotten.clear();
+    for (const id of owned.transports.keys()) owned.forgotten.add(id);
+    owned.state.forgetting = true;
+    owned.state.refusing = 10;
+    const lost = await invoke("second");
+    expect(lost.isError).toBe(true);
+    expect(String(await mcpStatus(host))).toContain(
+      "is unavailable after its connection was lost",
+    );
+    owned.state.forgetting = false;
+    owned.state.refusing = 0;
+    expect(JSON.stringify(await invoke("third"))).toContain("third");
+    expect(await mcpStatus(host)).toBeUndefined();
+  } finally {
+    await owned.cleanup(host);
+  }
+}, 20000);

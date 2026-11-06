@@ -56,7 +56,10 @@ for (const unit of ["grove-isolated.service", "flickgrove.service"]) {
       branches: { read: async () => null },
     });
     const origin = "http://localhost:4318";
-    const service = new HostService(app, { directory: dir, origin: () => origin });
+    const service = new HostService(app, {
+      directory: dir,
+      origin: () => origin,
+    });
     const auth = {
       session: async () => ({ user: { id: "fixture-human" } }),
     } as unknown as import("./auth").GroveAuth;
@@ -122,7 +125,8 @@ test("rejects unowned, unsafe, ambiguous or mismatched user services", async () 
     (s: ReturnType<typeof fixture>["state"]) =>
       (s.cgroup = "0::/system.slice/grove-isolated.service\n"),
     (s: ReturnType<typeof fixture>["state"]) =>
-      (s.cgroup = "0::/user.slice/user-1001.slice/user@1001.service/app.slice/grove-isolated.service\n"),
+      (s.cgroup =
+        "0::/user.slice/user-1001.slice/user@1001.service/app.slice/grove-isolated.service\n"),
     (s: ReturnType<typeof fixture>["state"]) =>
       (s.cgroup = `0::${group("-unsafe.service")}\n`),
     (s: ReturnType<typeof fixture>["state"]) =>
