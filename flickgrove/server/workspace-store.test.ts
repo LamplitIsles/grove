@@ -269,14 +269,14 @@ test("real Bun migrator converts all durable roles, envelopes and order atomical
   ).toBeNull();
   expect(
     db.sqlite.query("SELECT count(*) AS n FROM __drizzle_migrations").get(),
-  ).toEqual({ n: 6 });
+  ).toEqual({ n: 7 });
   const reopened = store(path);
   expect(reopened.byId("parent")?.deliveries).toEqual(parent.deliveries);
   expect(
     reopened.sqlite
       .query("SELECT count(*) AS n FROM __drizzle_migrations")
       .get(),
-  ).toEqual({ n: 6 });
+  ).toEqual({ n: 7 });
 });
 test("conversion failure rolls back schema, data and success log and refuses Workspace startup", () => {
   const { path, directory } = fixture();
@@ -317,6 +317,30 @@ test("fresh empty startup and unknown applied migrations are distinct", () => {
     )
     .run();
   expect(() => new WorkspaceStore(path)).toThrow("unknown migrations");
+});
+test("submission fences survive reopening and remain scoped to their session", () => {
+  const { path } = fixture();
+  legacy(path, [agent("fence-owner"), agent("other-owner")]);
+  const db = store(path);
+  const insert = db.sqlite.query(
+    "INSERT INTO submission_fences(session_id, operation_id, envelope_hash) VALUES (?, ?, ?)",
+  );
+  insert.run("fence-owner", "op", "v1:original");
+  insert.run("other-owner", "op", "v1:other");
+  expect(() => insert.run("fence-owner", "op", "v1:different")).toThrow();
+  expect(() => insert.run("missing-owner", "op", "v1:original")).toThrow();
+  const reopened = store(path);
+  expect(
+    reopened.sqlite
+      .query(
+        "SELECT envelope_hash FROM submission_fences WHERE session_id=? AND operation_id=?",
+      )
+      .get("fence-owner", "op"),
+  ).toEqual({ envelope_hash: "v1:original" });
+  reopened.sqlite.query("DELETE FROM sessions WHERE id=?").run("fence-owner");
+  expect(
+    reopened.sqlite.query("SELECT session_id FROM submission_fences").all(),
+  ).toEqual([{ session_id: "other-owner" }]);
 });
 test("one changed row never rewrites cold sessions or a long active ledger; failed commit publishes nothing", async () => {
   const { path, directory } = fixture();
@@ -411,6 +435,7 @@ test("native acceptance outside an empty memory window prevents failed deletion 
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    branches: { read: async () => null },
   });
   cleanup.push(() => app.dispose());
   const a = await app.createOrc("alpha");
@@ -443,12 +468,10 @@ test("native acceptance outside an empty memory window prevents failed deletion 
     },
   ]);
   const count = runtime.inputs.length;
-  await expect(
-    app.send(b.id, "retry", "operation", undefined, {
-      after: "operation",
-      attempt: "retry-attempt",
-    }),
-  ).rejects.toThrow("Native history confirms");
+  await expect(app.reserveRetry(b.id, "operation")).rejects.toThrow(
+    "Native history confirms",
+  );
+  expect(app.lookup(b.id, "operation")?.state).toBe("accepted");
   expect(runtime.inputs).toHaveLength(count);
 });
 test("NULL delegated answers use immutable delivery text while explicit empty answers survive confirmation and restart", async () => {

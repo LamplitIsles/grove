@@ -5,15 +5,67 @@ import type { Detail, Answer } from "./contracts";
 import {
   imageSchema,
   answerSchema,
+  submissionEnvelopeSchema,
   lookupSchema,
   type Receipt,
 } from "./chord-contract";
 const prefix = `flickgrove/${location.origin}/outgoing/`;
+const dismissalPrefix = `flickgrove/${location.origin}/dismissed-pending/`;
+const dismissalKey = (agentId: string, id: string) =>
+  `${dismissalPrefix}${encodeURIComponent(agentId)}/${encodeURIComponent(id)}`;
+const dismissals = $state({ revision: 0 });
+const dismissal = z.object({ questionIds: z.array(z.string()) });
+function readDismissal(agentId: string, id: string) {
+  try {
+    const parsed = dismissal.safeParse(
+      JSON.parse(localStorage.getItem(dismissalKey(agentId, id)) ?? "null"),
+    );
+    return parsed.success ? parsed.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+export function dismissedAnswerOperations(agentId: string) {
+  void dismissals.revision;
+  const scope = `${dismissalPrefix}${encodeURIComponent(agentId)}/`;
+  return Object.keys(localStorage).flatMap((key) => {
+    if (!key.startsWith(scope)) return [];
+    try {
+      const id = decodeURIComponent(key.slice(scope.length));
+      const saved = readDismissal(agentId, id);
+      return saved?.questionIds.length && dismissalKey(agentId, id) === key
+        ? [{ id, questionIds: saved.questionIds }]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+}
+export function hasDismissedAnswer(agentId: string, questionIds: string[]) {
+  return dismissedAnswerOperations(agentId).some((operation) =>
+    operation.questionIds.some((id) => questionIds.includes(id)),
+  );
+}
+export function isDismissedPending(
+  agentId: string,
+  id: string,
+  status: import("./contracts").Delivery["status"],
+) {
+  void dismissals.revision;
+  return (
+    submissionResult({ status }) === "pending" &&
+    !receiptAlreadyAccepted(agentId, id) &&
+    !!readDismissal(agentId, id)
+  );
+}
 const confirmed = new Set<string>();
 const key = (o: Outgoing) =>
   `${prefix}${encodeURIComponent(o.agentId)}/${encodeURIComponent(o.id)}`;
 const entry = z.object({
   attemptId: z.string().optional(),
+  admissionVersion: z.literal(1).optional(),
+  retryOf: z.string().optional(),
+  predecessor: submissionEnvelopeSchema.optional(),
   agentId: z.string(),
   id: z.string(),
   text: z.string(),
@@ -62,6 +114,15 @@ for (const storageKey of Object.keys(localStorage)) {
   }
 }
 export const outgoing = $state<{ entries: Outgoing[] }>({ entries: saved });
+// Read-only relationships are rechecked with the owning Peer after a reload.
+const retryLinks = $state<Record<string, string>>({});
+export function observeRetryLink(
+  agentId: string,
+  operationId: string,
+  successor: string,
+) {
+  retryLinks[`${agentId}/${operationId}`] = successor;
+}
 function persist(o: Outgoing, required = false) {
   // Each operation owns its record; an unrelated tab cannot erase its journal.
   if (receiptAlreadyAccepted(o.agentId, o.id)) {
@@ -102,6 +163,7 @@ export function addOutgoing(
   answers?: Answer[],
   images?: import("./contracts").MessageImage[],
   localImageIds?: string[],
+  retry?: { of: string; predecessor: z.infer<typeof submissionEnvelopeSchema> },
 ) {
   const previous = outgoing.entries.find(
     (o) => o.agentId === agentId && o.id === id,
@@ -112,7 +174,10 @@ export function addOutgoing(
       JSON.stringify(previous.answers) !== JSON.stringify(answers) ||
       JSON.stringify(previous.images ?? []) !== JSON.stringify(images ?? []) ||
       JSON.stringify(previous.localImageIds ?? []) !==
-        JSON.stringify(localImageIds ?? [])
+        JSON.stringify(localImageIds ?? []) ||
+      previous.retryOf !== retry?.of ||
+      JSON.stringify(previous.predecessor) !==
+        JSON.stringify(retry?.predecessor)
     )
       throw new Error("Operation ID is bound to different content");
     if (previous.status === "accepted" || receiptAlreadyAccepted(agentId, id))
@@ -128,12 +193,45 @@ export function addOutgoing(
     id,
     at: Date.now(),
     status: "pending",
+    admissionVersion: 1,
+    ...(retry
+      ? { retryOf: retry.of, predecessor: structuredClone(retry.predecessor) }
+      : {}),
     images: images ? structuredClone(images) : undefined,
     localImageIds: localImageIds ? [...localImageIds] : undefined,
     ...(answers ? { answers: structuredClone(answers) } : {}),
   };
   persist(o);
   outgoing.entries.push(o);
+}
+export function observeRetry(
+  agentId: string,
+  text: string,
+  id: string,
+  answers: Answer[] | undefined,
+  retry: { of: string; predecessor: z.infer<typeof submissionEnvelopeSchema> },
+) {
+  const local = outgoing.entries.find(
+    (o) => o.agentId === agentId && o.id === id,
+  );
+  if (local) return;
+  const raw = localStorage.getItem(
+    `${prefix}${encodeURIComponent(agentId)}/${encodeURIComponent(id)}`,
+  );
+  if (raw) {
+    const saved = entry.parse(JSON.parse(raw));
+    if (
+      saved.agentId !== agentId ||
+      saved.id !== id ||
+      saved.retryOf !== retry.of ||
+      JSON.stringify(saved.predecessor) !== JSON.stringify(retry.predecessor)
+    )
+      throw new Error("Retry identity changed");
+    if (saved.status !== "sent")
+      outgoing.entries.push({ ...saved, status: submissionResult(saved) });
+    return;
+  }
+  addOutgoing(agentId, text, id, answers, undefined, undefined, retry);
 }
 export function receiptAlreadyAccepted(agentId: string, id: string) {
   const key = `flickgrove/${location.origin}/accepted/${encodeURIComponent(agentId)}/${encodeURIComponent(id)}`;
@@ -186,29 +284,6 @@ export function observeOutgoing(detail: Detail) {
     return o.status !== "accepted";
   });
 }
-// A declined explicit retry can adopt the owner's current rejection. Unsolicited
-// receipts keep their attempt filter; late results cannot replace a newer call.
-export function observeSendResult(
-  detail: import("./chord-contract").SendResult,
-  operationId: string,
-  attemptId?: string,
-) {
-  const local = outgoing.entries.find(
-    (o) => o.agentId === detail.id && o.id === operationId,
-  );
-  const current = detail.deliveries.find((d) => d.id === operationId);
-  if (
-    attemptId &&
-    detail.retryNotAdmitted === attemptId &&
-    local?.attemptId === attemptId &&
-    local.status === "pending" &&
-    current?.source === "user" &&
-    current.status === "failed" &&
-    !receiptAlreadyAccepted(detail.id, operationId)
-  )
-    local.attemptId = current.attemptId;
-  observeOutgoing(detail);
-}
 export function acceptReceipt(agentId: string, raw: Receipt | null) {
   const receipt = lookupSchema.parse(raw);
   if (!receipt) return;
@@ -219,6 +294,13 @@ export function acceptReceipt(agentId: string, raw: Receipt | null) {
     receiptAlreadyAccepted(agentId, receipt.operationId)
   )
     return;
+  if (
+    receipt.state === "rejected" &&
+    readDismissal(agentId, receipt.operationId)
+  ) {
+    localStorage.removeItem(dismissalKey(agentId, receipt.operationId));
+    dismissals.revision++;
+  }
   const o = outgoing.entries.find(
     (o) => o.agentId === agentId && o.id === receipt.operationId,
   );
@@ -234,21 +316,6 @@ export function acceptReceipt(agentId: string, raw: Receipt | null) {
   persist(o);
   if (o.status === "accepted")
     outgoing.entries = outgoing.entries.filter((entry) => entry !== o);
-}
-export function beginRetry(agentId: string, id: string, attemptId: string) {
-  const o = outgoing.entries.find((o) => o.agentId === agentId && o.id === id);
-  if (!o || o.status !== "rejected" || receiptAlreadyAccepted(agentId, id))
-    throw new Error("Only a rejected user submission can be retried");
-  const previous = { ...o };
-  o.attemptId = attemptId;
-  o.status = "pending";
-  o.error = undefined;
-  try {
-    persist(o, true);
-  } catch (error) {
-    Object.assign(o, previous);
-    throw error;
-  }
 }
 export function unknownOutgoing(agentId: string, id: string, error: string) {
   const o = outgoing.entries.find((o) => o.agentId === agentId && o.id === id);
@@ -268,6 +335,7 @@ export function withOutgoing(detail: Detail): Detail {
   const unobserved = detail.deliveries.filter(
     (d) =>
       d.status !== "sent" &&
+      !isDismissedPending(detail.id, d.id, d.status) &&
       !receiptAlreadyAccepted(detail.id, d.id) &&
       !detail.messages.some((m) => m.id === d.id || m.clientId === d.id) &&
       !local.some((o) => o.id === d.id),
@@ -318,7 +386,11 @@ export function withOutgoing(detail: Detail): Detail {
     ],
     deliveries: [
       ...detail.deliveries
-        .filter((d) => !local.some((o) => o.id === d.id))
+        .filter(
+          (d) =>
+            !local.some((o) => o.id === d.id) &&
+            !isDismissedPending(detail.id, d.id, d.status),
+        )
         .map((d) =>
           receiptAlreadyAccepted(detail.id, d.id)
             ? {
@@ -330,6 +402,9 @@ export function withOutgoing(detail: Detail): Detail {
         ),
       ...local.map((o) => ({
         id: o.id,
+        supersededBy:
+          detail.deliveries.find((d) => d.id === o.id)?.supersededBy ??
+          retryLinks[`${detail.id}/${o.id}`],
         attemptId: o.attemptId,
         text: o.text,
         images: o.images,
@@ -345,14 +420,25 @@ export function withOutgoing(detail: Detail): Detail {
 }
 
 window.addEventListener("storage", (event) => {
+  if (event.key?.startsWith(dismissalPrefix)) {
+    dismissals.revision++;
+    return;
+  }
   if (!event.key?.startsWith(prefix)) return;
   if (!event.newValue && event.oldValue) {
     const previous = entry.safeParse(JSON.parse(event.oldValue));
-    if (previous.success && previous.data.status === "failed")
+    if (
+      previous.success &&
+      (previous.data.status === "failed" ||
+        (!previous.data.admissionVersion &&
+          ["sending", "uncertain"].includes(previous.data.status)))
+    )
       outgoing.entries = outgoing.entries.filter(
         (o) =>
           key(o) !== event.key ||
-          o.status !== "rejected" ||
+          (previous.data.status === "failed"
+            ? o.status !== "rejected"
+            : o.status !== "pending") ||
           receiptAlreadyAccepted(o.agentId, o.id),
       );
   }
@@ -379,8 +465,14 @@ export function setOutgoingImages(
   if (o) {
     if (o.images && JSON.stringify(o.images) !== JSON.stringify(images))
       throw new Error("Operation ID is bound to different images");
+    const previous = o.images;
     o.images = structuredClone(images);
-    persist(o);
+    try {
+      persist(o, true);
+    } catch (error) {
+      o.images = previous;
+      throw error;
+    }
   }
 }
 
@@ -404,6 +496,43 @@ export function deleteRejectedOutgoing(agentId: string, id: string) {
     )
       throw new Error("Only a rejected user submission can be deleted");
   }
+  localStorage.removeItem(storageKey);
+  outgoing.entries = outgoing.entries.filter(
+    (o) => o.agentId !== agentId || o.id !== id,
+  );
+}
+
+// An old device journal may have no corresponding server record. Removing it
+// is a local presentation choice, not evidence of cancellation or rejection.
+export function forgetLegacyPending(agentId: string, id: string) {
+  const local = outgoing.entries.find(
+    (o) => o.agentId === agentId && o.id === id,
+  );
+  if (
+    !local ||
+    local.status !== "pending" ||
+    local.admissionVersion ||
+    receiptAlreadyAccepted(agentId, id)
+  )
+    throw new Error("This submission is no longer awaiting confirmation");
+  const storageKey = key(local);
+  const raw = localStorage.getItem(storageKey);
+  if (!raw) throw new Error("The saved submission is no longer available");
+  const stored = entry.parse(JSON.parse(raw));
+  if (
+    stored.agentId !== agentId ||
+    stored.id !== id ||
+    stored.admissionVersion ||
+    !["sending", "uncertain"].includes(stored.status)
+  )
+    throw new Error("This submission is no longer awaiting confirmation");
+  readingCache.writeDevice(
+    dismissalKey(agentId, id),
+    JSON.stringify({
+      questionIds: stored.answers?.map((answer) => answer.questionId) ?? [],
+    }),
+  );
+  dismissals.revision++;
   localStorage.removeItem(storageKey);
   outgoing.entries = outgoing.entries.filter(
     (o) => o.agentId !== agentId || o.id !== id,

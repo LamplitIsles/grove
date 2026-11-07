@@ -2,7 +2,6 @@ import { expect, test, type Page } from "@playwright/test";
 import sharp from "sharp";
 
 const origin = "http://127.0.0.1:14319";
-const evidence = "../.scratch/conversation-region-spinner";
 const input = (page: Page) =>
   page.getByRole("textbox", { name: "Message Orc", exact: true });
 const bubble = (page: Page, text: string) =>
@@ -92,9 +91,8 @@ async function media(page: Page) {
   });
 }
 
-test("explicit retry with a stale predecessor converges to the rejected owner attempt without resending", async ({
-  page: first,
-  context,
+test("explicit retries preserve a newer draft across repeated rejections", async ({
+  page,
   request,
 }) => {
   await request.post(origin + "/fixture/reset", {
@@ -105,113 +103,98 @@ test("explicit retry with a stale predecessor converges to the rejected owner at
   });
   const native = async () =>
     (await (await request.get(origin + "/fixture/info")).json()).inputs;
-  const text = "Shared rejected original",
-    draft = "Newer page two draft";
-  const one = observe(first);
-  await open(first);
-  await input(first).fill(text);
-  await input(first).press("Enter");
-  await expect(retry(first, text)).toBeVisible();
-  const A = one.sends[0].operationId;
-  const second = await context.newPage(),
-    two = observe(second);
-  await open(second);
-  await expect(retry(second, text)).toBeVisible();
-  await input(second).fill(draft);
-  await input(second).evaluate((el: HTMLTextAreaElement) => {
+  const wire = observe(page),
+    text = "Shared rejected original",
+    draft = "Newer page draft";
+  await open(page);
+  await input(page).fill(text);
+  await input(page).press("Enter");
+  await expect(retry(page, text)).toBeVisible();
+  await input(page).fill(draft);
+  await input(page).evaluate((el: HTMLTextAreaElement) => {
     el.focus();
     el.setSelectionRange(2, 7);
   });
-  await retry(first, text).click();
-  await expect
-    .poll(() => one.results.filter((r) => r.request.retry).length)
-    .toBe(1);
-  const B = one.sends[1].retry.attempt;
-  expect(await native()).toHaveLength(2);
-  await expect(retry(second, text)).toBeVisible();
-  await retry(second, text).evaluate((el) => (el as HTMLButtonElement).click());
-  await expect.poll(() => two.results.length).toBe(1);
-  const C = two.sends[0].retry.attempt;
-  expect(two.sends[0]).toMatchObject({
-    operationId: A,
-    text,
-    retry: { after: A },
-  });
-  expect(C).not.toBe(B);
+  await retry(page, text).click();
+  await expect.poll(async () => (await native()).length).toBe(2);
+  await expect(retry(page, text)).toHaveCount(2);
+  expect(wire.sends[1].operationId).not.toBe(wire.sends[0].operationId);
+  await expect(input(page)).toHaveValue(draft);
   expect(
-    two.results[0].result.deliveries.find((d: any) => d.id === A),
-  ).toMatchObject({ attemptId: B, status: "failed" });
-  // The response to this explicit C must restore B, not strand C as pending.
-  await expect(bubble(second, text).locator("small.failed")).toContainText(
-    "Synthetic rejection",
-  );
-  await expect(retry(second, text)).toBeVisible();
-  expect((await records(second)).find((o) => o.id === A)).toMatchObject({
-    attemptId: B,
-    status: "failed",
-  });
-  expect(await native()).toHaveLength(2);
-  await expect(bubble(second, text)).toHaveCount(1);
-  await expect(input(second)).toHaveValue(draft);
-  expect(
-    await input(second).evaluate((el: HTMLTextAreaElement) => [
+    await input(page).evaluate((el: HTMLTextAreaElement) => [
       el.selectionStart,
       el.selectionEnd,
     ]),
   ).toEqual([2, 7]);
-  await second.screenshot({ path: `${evidence}/repaired-stale-attempt.png` });
-  await first.close(); // No other page can rewrite the shared journal during reload.
-  await second.reload();
-  await expect(retry(second, text)).toBeVisible();
-  await expect(input(second)).toHaveValue(draft);
-  expect(await native()).toHaveLength(2);
-  await second.screenshot({
-    path: `${evidence}/repaired-stale-attempt-reload.png`,
-  });
   await request.post(origin + "/fixture/change", {
     data: { sendMode: "accepted" },
   });
-  await input(second).evaluate((el: HTMLTextAreaElement) => {
-    el.focus();
-    el.setSelectionRange(2, 7);
-  });
-  await retry(second, text).evaluate((el) => {
-    (el as HTMLButtonElement).click();
-    (el as HTMLButtonElement).click();
-  });
+  await retry(page, text).last().click();
   await expect.poll(async () => (await native()).length).toBe(3);
-  await expect.poll(() => two.results.length).toBe(2);
-  expect(two.sends[1]).toMatchObject({
-    operationId: A,
-    text,
-    retry: { after: B },
-  });
-  expect(two.sends).toHaveLength(2);
-  await expect(bubble(second, text)).toHaveCount(1);
-  await expect(retry(second, text)).toHaveCount(0);
-  await expect(input(second)).toHaveValue(draft);
-  expect(
-    await input(second).evaluate((el: HTMLTextAreaElement) => [
-      el.selectionStart,
-      el.selectionEnd,
-    ]),
-  ).toEqual([2, 7]);
-  await second.reload();
-  await expect(bubble(second, text)).toHaveCount(1);
-  await expect(input(second)).toHaveValue(draft);
+  await expect(bubble(page, text)).toHaveCount(1);
+  await expect(retry(page, text)).toHaveCount(0);
+  expect(new Set(wire.sends.map((s) => s.operationId)).size).toBe(3);
+  await expect(input(page)).toHaveValue(draft);
+  await page.reload();
+  await expect(bubble(page, text)).toHaveCount(1);
+  await expect(input(page)).toHaveValue(draft);
   expect(await native()).toHaveLength(3);
-  console.log(
-    JSON.stringify({
-      case: "stale predecessor repaired",
-      A,
-      B,
-      C,
-      nativeCounts: [1, 2, 2, 2, 3, 3],
-    }),
-  );
 });
 
-test("draft cleanup abort after durable preparation retains a rejected original for explicit image retry", async ({
+test("failed image upload remains pending until the host rejects the reservation", async ({
+  page,
+  request,
+}) => {
+  await request.post(origin + "/fixture/reset", {
+    data: { mode: "no-workers" },
+  });
+  const wire = observe(page);
+  await open(page);
+  await page.getByLabel("Choose message images").setInputFiles({
+    name: "owned.png",
+    mimeType: "image/png",
+    buffer: await sharp({
+      create: { width: 32, height: 32, channels: 4, background: "#3377aa" },
+    })
+      .png()
+      .toBuffer(),
+  });
+  await expect(page.locator(".image-draft")).toHaveCount(1);
+  await page.route("**/api/images?*", (route) => route.abort());
+  const caption = "Upload interrupted";
+  await input(page).fill(caption);
+  await input(page).press("Enter");
+  await expect.poll(async () => (await records(page))[0]?.error).toBeTruthy();
+  const [entry] = await records(page);
+  expect(entry.status).toBe("sending");
+  await expect(retry(page, caption)).toHaveCount(0);
+  expect(wire.sends).toHaveLength(0);
+  expect(
+    (await (await request.get(origin + "/fixture/info")).json()).inputs,
+  ).toHaveLength(0);
+  await page.unroute("**/api/images?*");
+  await page.evaluate((id) => {
+    const key = Object.keys(localStorage).find(
+      (k) =>
+        k.includes("/outgoing/") &&
+        JSON.parse(localStorage.getItem(k)!).id === id,
+    )!;
+    const stored = JSON.parse(localStorage.getItem(key)!);
+    stored.at = Date.now() - 61_000;
+    localStorage.setItem(key, JSON.stringify(stored));
+  }, entry.id);
+  await page.reload();
+  await expect(retry(page, caption)).toBeVisible({ timeout: 20_000 });
+  expect((await records(page)).find((o) => o.id === entry.id).status).toBe(
+    "failed",
+  );
+  expect(wire.sends).toHaveLength(0);
+  expect(
+    (await (await request.get(origin + "/fixture/info")).json()).inputs,
+  ).toHaveLength(0);
+});
+
+test("draft cleanup abort stays pending until the host rejects the original image submission", async ({
   page,
   request,
 }) => {
@@ -269,28 +252,35 @@ test("draft cleanup abort after durable preparation retains a rejected original 
   expect(
     (await media(page)).find((r) => r.key.endsWith("/" + A)),
   ).toMatchObject({ text: caption, images: originalMedia });
-  await expect(bubble(page, caption).locator("small.failed")).toContainText(
-    "Image storage full or unavailable",
-  );
-  await expect(retry(page, caption)).toBeVisible();
+  await expect(bubble(page, caption).locator("small.failed")).toHaveCount(0);
+  await expect(retry(page, caption)).toHaveCount(0);
   await expect(page.locator(".detail-status")).not.toContainText("Working");
   expect((await records(page)).find((o) => o.id === A)).toMatchObject({
-    status: "failed",
+    status: "sending",
   });
   await expect(input(page)).toHaveValue(caption);
   await expect(page.locator(".image-draft")).toHaveCount(1);
   await input(page).fill(draft);
+  await page.evaluate((id) => {
+    const key = Object.keys(localStorage).find((k) => {
+      if (!k.includes("/outgoing/")) return false;
+      return JSON.parse(localStorage.getItem(k)!).id === id;
+    })!;
+    const entry = JSON.parse(localStorage.getItem(key)!);
+    entry.at = Date.now() - 61_000;
+    localStorage.setItem(key, JSON.stringify(entry));
+  }, A);
   await page.reload();
-  await expect(retry(page, caption)).toBeVisible();
+  await expect(retry(page, caption)).toBeVisible({ timeout: 20_000 });
+  expect((await records(page)).find((o) => o.id === A)).toMatchObject({
+    status: "failed",
+  });
   await expect(input(page)).toHaveValue(draft);
   await expect(page.locator(".image-draft")).toHaveCount(1);
   expect(await native()).toHaveLength(0);
   expect(
     (await media(page)).find((r) => r.key.endsWith("/" + A)),
   ).toMatchObject({ text: caption, images: originalMedia });
-  await page.screenshot({
-    path: `${evidence}/repaired-draft-cleanup-reload.png`,
-  });
   await request.post(origin + "/fixture/change", {
     data: { sendMode: "held" },
   });
@@ -304,7 +294,8 @@ test("draft cleanup abort after durable preparation retains a rejected original 
   });
   await expect.poll(async () => (await native()).length).toBe(1);
   expect(wire.sends).toHaveLength(1);
-  expect(wire.sends[0]).toMatchObject({ operationId: A, text: caption });
+  expect(wire.sends[0]).toMatchObject({ text: caption });
+  expect(wire.sends[0].operationId).not.toBe(A);
   expect(wire.sends[0].images).toHaveLength(1);
   const duringRetry = await media(page);
   expect(duringRetry.find((r) => r.key.endsWith("/" + A))).toMatchObject({

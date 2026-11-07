@@ -90,17 +90,21 @@ test("local browser executes directly and preserves receipt ownership", async ()
     settings,
   });
   expect(agent.id.startsWith(f.service.identity.id + ":")).toBe(true);
+  const { operationId } = await c.call<{ operationId: string }>(
+    "reserveSubmission",
+    { id: agent.id },
+  );
   await c.call("send", {
     id: agent.id,
     text: "Direct input",
-    operationId: "one",
+    operationId,
   });
   expect(f.runtime.inputs.map((i) => i.text)).toEqual(["Direct input"]);
   expect(
     (
       await c.call<{ state: string }>("lookup", {
         id: agent.id,
-        operationId: "one",
+        operationId,
       })
     ).state,
   ).toBe("accepted");
@@ -125,6 +129,80 @@ test("Peer identity survives restart and owns only local state", async () => {
   ).toEqual({ id: f.service.identity.id });
   await expect(other.service.detail(first.id)).rejects.toThrow("another Peer");
 });
+test("independent Bun caller cannot cross Peer and does not replay its own input", async () => {
+  const left = fixture(),
+    right = fixture();
+  const agent = await left.service.createOrc("alpha", settings);
+  const old = await left.service.reserveSubmission(agent.id);
+  const envelope = { source: "user" as const, text: "peer-bound" };
+  expect(
+    await left.service.finalizeSubmission(agent.id, old.operationId, envelope),
+  ).toMatchObject({ state: "rejected" });
+  const current = await left.service.reserveSubmission(agent.id);
+  const data = {
+    left: left.origin,
+    right: right.origin,
+    id: agent.id,
+    old: old.operationId,
+    current: current.operationId,
+    envelope,
+  };
+  const script = `
+    import { openGrove } from "./src/chord-client";
+    import { socketWithHeaders } from "./server/socket-testing";
+    const data = ${JSON.stringify(data)};
+    const connect = (origin) => openGrove(socketWithHeaders(origin.replace("http:", "ws:") + "/api/socket", { Origin: origin }), () => {}, () => {}, 2000);
+    const remote = await connect(data.right);
+    const failures = [];
+    for (const [member, input] of [
+      ["reserveRetry", { id: data.id, operationId: data.old }],
+      ["inspectRetry", { id: data.id, operationId: data.old, envelope: data.envelope }],
+      ["finalizeSubmission", { id: data.id, operationId: data.old, envelope: data.envelope }],
+      ["send", { id: data.id, operationId: data.old, text: data.envelope.text }],
+    ]) {
+      try { await remote.call(member, input); failures.push("accepted"); }
+      catch (error) { failures.push(error.message); }
+    }
+    remote.close();
+    const local = await connect(data.left);
+    await local.call("send", { id: data.id, operationId: data.current, text: "once" });
+    await local.call("send", { id: data.id, operationId: data.current, text: "once" });
+    const receipt = await local.call("lookup", { id: data.id, operationId: data.current });
+    local.close();
+    console.log(JSON.stringify({ failures, receipt }));
+  `;
+  const child = Bun.spawn([process.execPath, "--eval", script], {
+    cwd: import.meta.dir + "/..",
+    env: { ...process.env, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const out = new Response(child.stdout).text(),
+    err = new Response(child.stderr).text();
+  const timeout = setTimeout(() => child.kill(), 10_000);
+  try {
+    expect(await child.exited).toBe(0);
+    const stderr = await err;
+    expect(stderr).not.toContain("invalid/protocol");
+    const result = JSON.parse(await out) as {
+      failures: string[];
+      receipt: { state: string };
+    };
+    expect(result.failures).toHaveLength(4);
+    expect(
+      result.failures.every((value) => value.includes("another Peer")),
+    ).toBe(true);
+    expect(result.receipt.state).toBe("accepted");
+    expect(left.runtime.inputs.map((input) => input.clientId)).toEqual([
+      current.operationId,
+    ]);
+    expect(right.runtime.inputs).toHaveLength(0);
+  } finally {
+    clearTimeout(timeout);
+    child.kill();
+    await child.exited;
+  }
+}, 15000);
 test("single-session history qualifies known identities like the history list", async () => {
   const { app, runtime, service } = fixture();
   const agent = await app.createOrc("alpha", settings);

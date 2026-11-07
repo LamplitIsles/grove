@@ -15,6 +15,15 @@ import {
 } from "./directory-branches";
 import type { MessageImage } from "../src/contracts";
 import { WorkspaceStore } from "./workspace-store";
+import {
+  encodeFence,
+  envelopeHash,
+  parseFence,
+  retryTokenHash,
+  submissionOwner,
+  type SubmissionEnvelope,
+} from "./submission-admission";
+import { randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import type {
@@ -58,6 +67,20 @@ function pendingFollowUp(d: Delivery) {
   return (
     d.mode === "follow_up" && d.status !== "sent" && d.status !== "cancelled"
   );
+}
+
+// These cancelled rows were never admitted; ordinary cancellations have no error.
+const followUpRejections = {
+  "follow-up-rejected:v1:full": "Follow-up queue is full",
+  "follow-up-rejected:v1:stopping":
+    "Wait for the observed turn outcome before queueing",
+} as const;
+type FollowUpRejection = keyof typeof followUpRejections;
+export class FollowUpRejected extends Error {}
+function followUpRejection(error?: string): string | undefined {
+  return error && Object.hasOwn(followUpRejections, error)
+    ? followUpRejections[error as FollowUpRejection]
+    : undefined;
 }
 
 function localCodex(a: RuntimeAgent) {
@@ -1226,23 +1249,68 @@ export class Workspace {
       revision: this.state.revision,
     };
   }
+  private supersededDeliveries(id: string, deliveries: Delivery[]) {
+    const candidates = deliveries.filter(
+      (d) =>
+        d.status === "failed" &&
+        d.mode !== "follow_up" &&
+        (d.source === "user" || d.source === "question"),
+    );
+    const result = new Map<string, string>();
+    if (!candidates.length) return result;
+    try {
+      const byId = new Map(candidates.map((d) => [d.id, d]));
+      for (const row of this.store.submissionFencesFor(id, [...byId.keys()])) {
+        try {
+          const d = byId.get(row.operationId)!;
+          const fence = parseFence(row.value);
+          if (
+            fence.state !== "superseded" ||
+            !fence.successor ||
+            fence.successor === d.id ||
+            fence.owner !== submissionOwner(d.authorUserId)
+          )
+            continue;
+          if (d.source === "question" && !d.answers?.length) continue;
+          const envelope: SubmissionEnvelope =
+            d.source === "question"
+              ? { source: "question", answers: d.answers! }
+              : { source: "user", text: d.text, images: d.images };
+          if (fence.hash === envelopeHash(envelope))
+            result.set(d.id, fence.successor);
+        } catch {
+          // A damaged fence never supplies a display relationship.
+        }
+      }
+    } catch {
+      // A projection failure leaves the original failed records visible.
+      result.clear();
+    }
+    return result;
+  }
   detail(id: string): Detail {
     const a = this.agent(id);
     const inspectionCandidate = followUpInspectionCandidate(a);
+    const deliveries = a.deliveries
+      .filter(
+        (d) =>
+          (d.mode !== "follow_up" && d.status !== "sent") ||
+          d.source === "question" ||
+          a.messages.some((m) => m.clientId === d.id),
+      )
+      .slice(-100);
+    const superseded = this.supersededDeliveries(id, deliveries);
     return {
       ...this.publicAgent(a),
       messages: structuredClone(
         recentWindow(a.messages, a.deliveries, a.questions),
       ),
-      deliveries: a.deliveries
-        .filter(
-          (d) =>
-            (d.mode !== "follow_up" && d.status !== "sent") ||
-            d.source === "question" ||
-            a.messages.some((m) => m.clientId === d.id),
-        )
-        .slice(-100)
-        .map(deliveryMetadata),
+      deliveries: deliveries.map((d) => ({
+        ...deliveryMetadata(d),
+        ...(superseded.has(d.id)
+          ? { supersededBy: superseded.get(d.id)! }
+          : {}),
+      })),
       followUps: a.deliveries
         .filter(
           (d) =>
@@ -1334,8 +1402,14 @@ export class Workspace {
       .sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
     const page = records.slice(0, 100),
       last = page.at(-1);
+    const superseded = this.supersededDeliveries(id, page);
     return {
-      deliveries: page.map(deliveryMetadata),
+      deliveries: page.map((d) => ({
+        ...deliveryMetadata(d),
+        ...(superseded.has(d.id)
+          ? { supersededBy: superseded.get(d.id)! }
+          : {}),
+      })),
       nextCursor:
         records.length > 100 && last
           ? Buffer.from(JSON.stringify([last.at, last.id])).toString(
@@ -1347,7 +1421,8 @@ export class Workspace {
   recovery(id: string, operationId: string) {
     const d = this.agent(id).deliveries.find((d) => d.id === operationId);
     if (!d) throw new Error("Delivery not found");
-    return structuredClone(d);
+    const supersededBy = this.supersededDeliveries(id, [d]).get(d.id);
+    return structuredClone({ ...d, ...(supersededBy ? { supersededBy } : {}) });
   }
   questionHistory(
     id: string,
@@ -2141,20 +2216,25 @@ export class Workspace {
     }
     return handle;
   }
-  private serialize<T>(id: string, work: () => Promise<T>): Promise<T> {
+  private sessionAdmissionGuard(id: string) {
     if (this.instanceAction)
-      return Promise.reject(
-        new RequestRefused("Instance maintenance is in progress"),
-      );
+      throw new RequestRefused("Instance maintenance is in progress");
     const a = this.state.agents.find((a) => a.id === id) ?? this.store.byId(id);
     if (a && localCodex(a) && this.shuttingDown)
-      return Promise.reject(new RequestRefused("Instance is shutting down"));
+      throw new RequestRefused("Instance is shutting down");
     if (a && this.closingTrees.has(a.ownerId ?? a.id))
-      return Promise.reject(new RequestRefused("Tree is closing"));
+      throw new RequestRefused("Tree is closing");
     if (a && this.treeActions.has(a.ownerId ?? a.id))
-      return Promise.reject(
-        new RequestRefused("Tree settings are being saved"),
-      );
+      throw new RequestRefused("Tree settings are being saved");
+    return a;
+  }
+  private serialize<T>(id: string, work: () => Promise<T>): Promise<T> {
+    let a: RuntimeAgent | undefined;
+    try {
+      a = this.sessionAdmissionGuard(id);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const previous = this.queues.get(id) ?? Promise.resolve();
     const next = previous
       .catch(() => {})
@@ -2182,6 +2262,7 @@ export class Workspace {
     images?: MessageImage[],
     startOnly = false,
     authorUserId?: string,
+    claim?: string,
   ) {
     if (this.writeFailure) throw this.writeFailure;
     if (this.disposed) throw new Error("Workspace is stopped");
@@ -2250,6 +2331,15 @@ export class Workspace {
     text = d.text;
     questionIds = d.questionIds;
     const previousState = a.state;
+    if (claim) {
+      const fence = parseFence(claim);
+      this.store.queueSubmissionFence(
+        a.id,
+        requestId,
+        claim,
+        encodeFence({ ...fence, state: "reserved", hash: undefined }),
+      );
+    }
     this.save();
     const messagePosition = a.messages.length;
     let startPrepared = false;
@@ -2493,17 +2583,25 @@ export class Workspace {
   retryDelivery(id: string, deliveryId: string) {
     if (["reviewer", "researcher"].includes(this.agent(id).role))
       throw new Error("Continue Reviewer/Researcher instructions through Orc");
-    const delivery = this.agent(id).deliveries.find((d) => d.id === deliveryId);
-    if (delivery?.source === "question" && delivery.status === "failed") {
-      if (!delivery.answers)
-        throw new Error("Answer batch has no persisted envelope");
-      return this.answerBatch(id, delivery.answers, deliveryId);
-    }
+    if (
+      this.agent(id).deliveries.some(
+        (d) =>
+          d.id === deliveryId &&
+          d.source === "question" &&
+          d.status === "failed",
+      )
+    )
+      throw new Error("Question answers require a new operation ID");
     return this.serialize(id, async () => {
       const a = this.agent(id);
       const d = a.deliveries.find((d) => d.id === deliveryId);
-      if (!d || d.source === "user" || d.status !== "failed")
-        throw new Error("Only a rejected report or answer can be retried");
+      if (
+        !d ||
+        d.source === "user" ||
+        d.source === "question" ||
+        d.status !== "failed"
+      )
+        throw new Error("Only a rejected report can be retried");
       return this.deliver(a, d.text, d.id, d.source, d.questionIds);
     });
   }
@@ -2523,21 +2621,550 @@ export class Workspace {
     };
   }
 
+  async inspectSubmission(id: string, operationId: string) {
+    const receipt = this.lookup(id, operationId);
+    if (receipt) return receipt;
+    const a = this.agent(id);
+    const handle = this.handles.get(id);
+    const threadId = a.threadId;
+    if (!threadId || (handle && handle.threadId !== threadId)) return null;
+    const inspect = handle?.inspectFollowUp
+      ? () => handle.inspectFollowUp!(operationId)
+      : !handle && a.backend === "pi" && this.options.runtime.inspectFollowUp
+        ? () => this.options.runtime.inspectFollowUp!(a, operationId)
+        : undefined;
+    if (!inspect) return null;
+    const version = this.nativeEventVersions.get(a) ?? 0;
+    let native: import("./runtime").NativeFollowUpInspection;
+    try {
+      native = await inspect();
+    } catch {
+      return null;
+    }
+    if (!native.accepted) return null;
+    return this.serialize(id, async () => {
+      if (
+        this.disposed ||
+        a.closed ||
+        !this.state.agents.includes(a) ||
+        a.threadId !== threadId ||
+        this.handles.get(id) !== handle ||
+        (this.nativeEventVersions.get(a) ?? 0) !== version
+      )
+        return null;
+      const delivery = this.confirmNative(a, operationId, native.turnId);
+      if (delivery) {
+        this.save();
+        return this.lookup(id, operationId);
+      }
+      return {
+        operationId,
+        state: "accepted" as const,
+        turnId: native.turnId ?? null,
+        error: null,
+      };
+    });
+  }
+
+  private submissionFence(
+    id: string,
+    operationId: string,
+    envelope: SubmissionEnvelope,
+    authorUserId?: string,
+  ) {
+    const raw = this.store.submissionFence(id, operationId);
+    if (!raw) return undefined;
+    const fence = parseFence(raw);
+    if (fence.owner !== submissionOwner(authorUserId))
+      throw new Error("Submission belongs to another user");
+    const hash = envelopeHash(envelope);
+    if (fence.hash && fence.hash !== hash)
+      throw new Error("Operation ID is bound to different content");
+    return { ...fence, hash };
+  }
+
+  inspectRetry(
+    id: string,
+    operationId: string,
+    envelope: SubmissionEnvelope,
+    authorUserId?: string,
+  ) {
+    if (this.writeFailure) throw this.writeFailure;
+    if (this.disposed) throw new Error("Workspace is stopped");
+    const a = this.agent(id);
+    if (a.role !== "orc") throw new Error("Choose an Orc conversation");
+    const delivery = a.deliveries.find((d) => d.id === operationId);
+    if (
+      a.messages.some(
+        (m) =>
+          m.role === "user" &&
+          (m.id === operationId || m.clientId === operationId),
+      )
+    )
+      return null;
+    if (delivery) {
+      if (
+        delivery.status !== "failed" ||
+        delivery.mode === "follow_up" ||
+        submissionOwner(delivery.authorUserId) !==
+          submissionOwner(authorUserId) ||
+        (delivery.source !== "user" && delivery.source !== "question") ||
+        (delivery.source === "question" && !delivery.answers?.length)
+      )
+        return null;
+      const actual: SubmissionEnvelope =
+        delivery.source === "question"
+          ? { source: "question", answers: delivery.answers! }
+          : { source: "user", text: delivery.text, images: delivery.images };
+      if (envelopeHash(actual) !== envelopeHash(envelope)) return null;
+    }
+    const successor = this.store.inspectRetryEdge(
+      id,
+      operationId,
+      submissionOwner(authorUserId),
+      envelopeHash(envelope),
+    );
+    return successor ? { operationId, supersededBy: successor } : null;
+  }
+
+  async reserveSubmission(id: string, authorUserId?: string) {
+    // Reserving only inserts a fence; it must not wait behind native delivery.
+    // Keep the guard and insert synchronous so lifecycle changes cannot interleave.
+    this.sessionAdmissionGuard(id);
+    if (this.writeFailure) throw this.writeFailure;
+    if (this.disposed) throw new Error("Workspace is stopped");
+    const a = this.agent(id);
+    if (a.role !== "orc" || a.closed || a.closeRequest)
+      throw new Error("Choose an open Orc conversation");
+    let operationId: string;
+    do {
+      operationId = `grove-v1-${crypto.randomUUID()}`;
+    } while (
+      a.deliveries.some((d) => d.id === operationId) ||
+      this.store.submissionFence(id, operationId)
+    );
+    try {
+      this.store.createSubmissionReservation(
+        id,
+        operationId,
+        encodeFence({
+          state: "reserved",
+          owner: submissionOwner(authorUserId),
+        }),
+      );
+    } catch (error) {
+      this.writeFailure = error;
+      throw error;
+    }
+    return { operationId };
+  }
+
+  reserveRetry(id: string, operationId: string, authorUserId?: string) {
+    return this.serialize(id, async () => {
+      if (this.writeFailure) throw this.writeFailure;
+      if (this.disposed) throw new Error("Workspace is stopped");
+      const a = this.agent(id);
+      if (a.role !== "orc" || a.closed || a.closeRequest)
+        throw new Error("Choose an open Orc conversation");
+      const raw = this.store.submissionFence(id, operationId);
+      const fence = raw ? parseFence(raw) : undefined;
+      const owner = submissionOwner(authorUserId);
+      if (fence && fence.owner !== owner)
+        throw new Error("Submission belongs to another user");
+      if (fence?.state === "superseded") {
+        const successor = this.store.inspectRetryEdge(
+          id,
+          operationId,
+          owner,
+          fence.hash!,
+        );
+        if (!successor) throw new Error("Invalid retry reservation chain");
+        return { state: "existing" as const, operationId: successor };
+      }
+      const delivery = a.deliveries.find((d) => d.id === operationId);
+      if (delivery) {
+        if (
+          (delivery.source !== "user" && delivery.source !== "question") ||
+          delivery.mode === "follow_up" ||
+          delivery.status !== "failed"
+        )
+          throw new Error("Only a rejected submission can be retried");
+        if (submissionOwner(delivery.authorUserId) !== owner)
+          throw new Error("Submission belongs to another user");
+      } else if (fence?.state !== "rejected") {
+        throw new Error("Original submission outcome unknown");
+      }
+      if (fence?.state === "reserved")
+        throw new Error("Original submission outcome unknown");
+      let hash = fence?.hash;
+      if (delivery) {
+        if (delivery.source === "question" && !delivery.answers?.length)
+          throw new Error("Original answer envelope is unavailable");
+        const original: SubmissionEnvelope =
+          delivery.source === "question"
+            ? { source: "question", answers: delivery.answers! }
+            : { source: "user", text: delivery.text, images: delivery.images };
+        const actual = envelopeHash(original);
+        if (hash && hash !== actual)
+          throw new Error("Original submission envelope conflict");
+        hash = actual;
+      }
+      if (!hash) throw new Error("Original submission envelope is unavailable");
+      if (
+        a.messages.some(
+          (m) =>
+            m.role === "user" &&
+            (m.id === operationId || m.clientId === operationId),
+        )
+      )
+        throw new Error("Original submission was accepted");
+      await this.checkRetryAncestors(a, operationId, owner);
+      if (
+        this.disposed ||
+        this.agent(id) !== a ||
+        (delivery && delivery.status !== "failed") ||
+        a.messages.some(
+          (m) =>
+            m.role === "user" &&
+            (m.id === operationId || m.clientId === operationId),
+        )
+      )
+        throw new Error("Original submission outcome changed");
+      let successor: string;
+      do {
+        successor = `grove-v1-${crypto.randomUUID()}`;
+      } while (
+        a.deliveries.some((d) => d.id === successor) ||
+        this.store.submissionFence(id, successor)
+      );
+      const claimToken = randomBytes(32).toString("base64url");
+      try {
+        this.store.createRetryReservation(
+          id,
+          operationId,
+          raw,
+          encodeFence({
+            state: "superseded",
+            owner,
+            hash,
+            successor,
+            retryOf: fence?.retryOf,
+          }),
+          successor,
+          encodeFence({
+            state: "reserved",
+            owner,
+            retryOf: operationId,
+            tokenHash: retryTokenHash(claimToken),
+          }),
+        );
+      } catch (error) {
+        this.writeFailure = error;
+        throw error;
+      }
+      return { state: "won" as const, operationId: successor, claimToken };
+    });
+  }
+
+  private async verifyRetry(
+    a: RuntimeAgent,
+    operationId: string,
+    fence: ReturnType<Workspace["submissionFence"]>,
+    predecessor: SubmissionEnvelope | undefined,
+    current: SubmissionEnvelope,
+    authorUserId?: string,
+    claimToken?: string,
+    forFinalization = false,
+  ) {
+    if (!fence?.retryOf) {
+      if (predecessor) throw new Error("Submission is not a retry");
+      if (claimToken) throw new Error("Submission is not a retry");
+      return;
+    }
+    if (
+      !forFinalization &&
+      (!claimToken ||
+        !/^[A-Za-z0-9_-]{43}$/.test(claimToken) ||
+        retryTokenHash(claimToken) !== fence.tokenHash)
+    )
+      throw new Error("Retry submission authorization required");
+    if (!predecessor) throw new Error("Original submission envelope required");
+    const original = this.submissionFence(
+      a.id,
+      fence.retryOf,
+      predecessor,
+      authorUserId,
+    );
+    if (original?.state !== "superseded" || original.successor !== operationId)
+      throw new Error(
+        "Retry reservation does not match its original submission",
+      );
+    const delivery = a.deliveries.find((d) => d.id === fence.retryOf);
+    if (!forFinalization && delivery && delivery.status !== "failed")
+      throw new Error("Original submission outcome changed");
+    if (predecessor.source !== current.source)
+      throw new Error("Retry content differs from the original submission");
+    if (predecessor.source === "question" && current.source === "question") {
+      if (envelopeHash(predecessor) !== envelopeHash(current))
+        throw new Error("Retry answers differ from the original submission");
+    } else if (predecessor.source === "user" && current.source === "user") {
+      if (
+        predecessor.text.trim() !== current.text.trim() ||
+        (predecessor.images?.length ?? 0) !== (current.images?.length ?? 0)
+      )
+        throw new Error("Retry content differs from the original submission");
+      if (
+        predecessor.images?.length &&
+        !(
+          forFinalization &&
+          JSON.stringify(predecessor.images) === JSON.stringify(current.images)
+        )
+      )
+        this.images.validateRetry(
+          a.id,
+          operationId,
+          current.text,
+          predecessor.images,
+          current.images!,
+        );
+    }
+    if (forFinalization) return;
+    await this.checkRetryAncestors(a, fence.retryOf, fence.owner);
+    if (
+      this.disposed ||
+      this.agent(a.id) !== a ||
+      (delivery && delivery.status !== "failed") ||
+      a.messages.some(
+        (m) =>
+          m.role === "user" &&
+          (m.id === fence.retryOf || m.clientId === fence.retryOf),
+      )
+    )
+      throw new Error("Original submission outcome changed");
+  }
+
+  uploadSubmissionImages(
+    id: string,
+    operationId: string,
+    text: string,
+    files: File[],
+    authorUserId?: string,
+  ) {
+    return this.serialize(id, async () => {
+      if (this.writeFailure) throw this.writeFailure;
+      const a = this.agent(id);
+      if (a.role !== "orc" || a.closed)
+        throw new Error("Choose an open Orc conversation");
+      const raw = this.store.submissionFence(id, operationId);
+      if (raw) {
+        const fence = parseFence(raw);
+        if (fence.owner !== submissionOwner(authorUserId))
+          throw new Error("Submission belongs to another user");
+        if (fence.state !== "reserved")
+          throw new Error("Submission is no longer open for images");
+      }
+      return this.images.upload(id, operationId, text, files);
+    });
+  }
+
+  finalizeSubmission(
+    id: string,
+    operationId: string,
+    envelope: SubmissionEnvelope,
+    authorUserId?: string,
+    predecessor?: SubmissionEnvelope,
+  ) {
+    return this.serialize(id, async () => {
+      if (this.writeFailure) throw this.writeFailure;
+      if (this.disposed) throw new Error("Workspace is stopped");
+      const a = this.agent(id);
+      if (a.role !== "orc") throw new Error("Choose an Orc conversation");
+      if (envelope.source === "question") {
+        if (
+          !envelope.answers.length ||
+          new Set(envelope.answers.map((answer) => answer.questionId)).size !==
+            envelope.answers.length ||
+          envelope.answers.some(
+            (answer) =>
+              !answer.answer.trim() ||
+              !a.questions.some((q) => q.id === answer.questionId),
+          )
+        )
+          throw new Error("Every submitted question must belong to this Orc");
+      } else if (!envelope.text.trim() && !envelope.images?.length) {
+        throw new Error("Write a message first");
+      }
+      const fence = this.submissionFence(
+        id,
+        operationId,
+        envelope,
+        authorUserId,
+      );
+      const delivery = a.deliveries.find((d) => d.id === operationId);
+      // A legacy absent row is not evidence of non-admission.
+      if (!fence) return this.lookup(id, operationId);
+      if (fence.state === "superseded") {
+        if (delivery) return this.lookup(id, operationId);
+        if (
+          a.messages.some(
+            (m) =>
+              m.role === "user" &&
+              (m.id === operationId || m.clientId === operationId),
+          )
+        )
+          return null;
+        return {
+          operationId,
+          state: "rejected" as const,
+          turnId: null,
+          error: "Submission was not admitted",
+        };
+      }
+      if (fence.state === "rejected")
+        return {
+          operationId,
+          state: "rejected" as const,
+          turnId: null,
+          error: "Submission was not admitted",
+        };
+      if (fence.state === "claimed") {
+        if (!delivery) return null;
+        return this.lookup(id, operationId);
+      }
+      // A reservation cannot authorize rejection of an existing native/ledger fact.
+      if (
+        delivery ||
+        a.messages.some(
+          (m) =>
+            m.role === "user" &&
+            (m.id === operationId || m.clientId === operationId),
+        )
+      )
+        return this.lookup(id, operationId);
+      await this.verifyRetry(
+        a,
+        operationId,
+        fence,
+        predecessor,
+        envelope,
+        authorUserId,
+        undefined,
+        true,
+      );
+      if (
+        envelope.source === "user" &&
+        envelope.images?.length &&
+        !(
+          fence.retryOf &&
+          predecessor?.source === "user" &&
+          JSON.stringify(predecessor.images) === JSON.stringify(envelope.images)
+        )
+      )
+        this.images.validate(id, operationId, envelope.text, envelope.images);
+      try {
+        const updated = this.store.closeSubmissionReservation(
+          id,
+          operationId,
+          encodeFence({
+            state: "reserved",
+            owner: fence.owner,
+            retryOf: fence.retryOf,
+            tokenHash: fence.tokenHash,
+          }),
+          encodeFence({
+            state: "rejected",
+            owner: fence.owner,
+            hash: fence.hash,
+            retryOf: fence.retryOf,
+            tokenHash: fence.tokenHash,
+          }),
+        );
+        if (!updated)
+          throw new Error("Submission reservation changed; outcome unknown");
+      } catch (error) {
+        this.writeFailure = error;
+        throw error;
+      }
+      return {
+        operationId,
+        state: "rejected" as const,
+        turnId: null,
+        error: "Submission was not admitted",
+      };
+    });
+  }
+
+  private async checkRetryAncestors(
+    a: RuntimeAgent,
+    operationId: string,
+    owner: string,
+  ) {
+    const visited = new Set<string>();
+    const checked: { id: string; delivery: Delivery | undefined }[] = [];
+    let current: string | undefined = operationId;
+    while (current) {
+      if (visited.has(current))
+        throw new Error("Invalid retry reservation chain");
+      visited.add(current);
+      const raw = this.store.submissionFence(a.id, current);
+      const fence = raw ? parseFence(raw) : undefined;
+      if (fence && fence.owner !== owner)
+        throw new Error("Invalid retry reservation chain");
+      const delivery = a.deliveries.find((d) => d.id === current);
+      if (
+        delivery
+          ? delivery.status !== "failed" ||
+            submissionOwner(delivery.authorUserId) !== owner
+          : !fence || !["rejected", "superseded"].includes(fence.state)
+      )
+        throw new Error("Original submission outcome changed");
+      checked.push({ id: current, delivery });
+      await this.requireNativeRejection(a, current);
+      if (fence?.retryOf) {
+        const parent = this.store.submissionFence(a.id, fence.retryOf);
+        const parsed = parent && parseFence(parent);
+        if (
+          !parsed ||
+          parsed.state !== "superseded" ||
+          parsed.successor !== current ||
+          parsed.owner !== owner
+        )
+          throw new Error("Invalid retry reservation chain");
+      }
+      current = fence?.retryOf;
+    }
+    if (
+      this.disposed ||
+      this.agent(a.id) !== a ||
+      checked.some(
+        ({ id, delivery }) =>
+          (delivery && delivery.status !== "failed") ||
+          a.messages.some(
+            (m) => m.role === "user" && (m.id === id || m.clientId === id),
+          ),
+      )
+    )
+      throw new Error("Original submission outcome changed");
+  }
+
   private async requireNativeRejection(
     a: RuntimeAgent,
     operationId: string,
     returnOnReadFailure = false,
   ): Promise<boolean> {
     if (!a.threadId) return true;
+    const threadId = a.threadId;
     let cursor: string | undefined;
     do {
       let page;
       try {
-        page = await this.options.runtime.historyMessages(a.threadId, cursor);
+        page = await this.options.runtime.historyMessages(threadId, cursor);
       } catch (error) {
         if (returnOnReadFailure) return false;
         throw error;
       }
+      if (this.disposed || this.agent(a.id) !== a || a.threadId !== threadId)
+        throw new Error("Conversation changed while checking native history");
       const accepted = page.messages.find(
         (m) =>
           m.role === "user" &&
@@ -2554,11 +3181,20 @@ export class Workspace {
     } while (cursor);
     return true;
   }
-  deleteFailedSubmission(id: string, operationId: string) {
+  deleteFailedSubmission(
+    id: string,
+    operationId: string,
+    authorUserId?: string,
+  ) {
     return this.serialize(id, async () => {
       const a = this.agent(id);
       const index = a.deliveries.findIndex((d) => d.id === operationId);
       const d = a.deliveries[index];
+      if (
+        d &&
+        submissionOwner(d.authorUserId) !== submissionOwner(authorUserId)
+      )
+        throw new Error("Submission belongs to another user");
       if (
         a.role !== "orc" ||
         a.messages.some(
@@ -2578,6 +3214,42 @@ export class Workspace {
         return this.detail(id); // Pre-admission rejection or already deleted, after queue drain.
       }
       await this.requireNativeRejection(a, operationId);
+      const rawFence = this.store.submissionFence(id, operationId);
+      const fence = rawFence ? parseFence(rawFence) : undefined;
+      if (fence?.state === "superseded")
+        throw new Error("Submission has a retry and cannot be deleted");
+      if (
+        fence?.state === "reserved" ||
+        d.status !== "failed" ||
+        a.messages.some(
+          (m) =>
+            m.role === "user" &&
+            (m.id === operationId || m.clientId === operationId),
+        )
+      )
+        throw new Error("Submission outcome unknown");
+      const hash = envelopeHash({
+        source: "user",
+        text: d.text,
+        images: d.images,
+      });
+      if (
+        (fence?.hash && fence.hash !== hash) ||
+        (fence && fence.owner !== submissionOwner(d.authorUserId))
+      )
+        throw new Error("Submission envelope conflict");
+      this.store.queueSubmissionFence(
+        id,
+        operationId,
+        encodeFence({
+          state: "rejected",
+          owner: fence?.owner ?? submissionOwner(d.authorUserId),
+          hash,
+          retryOf: fence?.retryOf,
+          tokenHash: fence?.tokenHash,
+        }),
+        rawFence,
+      );
       a.deliveries.splice(index, 1);
       try {
         this.save();
@@ -2599,32 +3271,83 @@ export class Workspace {
   ) {
     this.automaticFollowUps.delete(id);
     return this.serialize(id, async () => {
+      if (this.writeFailure) throw this.writeFailure;
+      if (this.disposed) throw new Error("Workspace is stopped");
       this.automaticFollowUps.delete(id);
       const a = this.agent(id, true);
+      if (this.store.submissionFence(id, requestId))
+        throw new Error("Operation belongs to a direct submission");
       if (a.role !== "orc" || a.closed || a.closeRequest)
-        throw new RequestRefused("Choose an open Orc conversation");
+        throw new Error("Choose an open Orc conversation");
       if (!text.trim() && !images?.length)
-        throw new RequestRefused("Write a message first");
-      if (text.length > 100_000)
-        throw new RequestRefused("Message is too long");
+        throw new Error("Write a message first");
+      if (text.length > 100_000) throw new Error("Message is too long");
       const previous = a.deliveries.find((d) => d.id === requestId);
       if (previous) {
+        if (previous.authorUserId !== authorUserId)
+          throw new Error("Operation belongs to another user");
         if (
           previous.mode !== "follow_up" ||
           previous.text !== text ||
           JSON.stringify(previous.images ?? []) !== JSON.stringify(images ?? [])
         )
-          throw new RequestRefused(
-            "Operation ID is bound to different content",
-          );
+          throw new Error("Operation ID is bound to different content");
+        if (previous.status === "cancelled" && previous.error) {
+          const rejection = followUpRejection(previous.error);
+          if (!rejection)
+            throw new Error("Invalid follow-up cancellation record");
+          if (previous.authorUserId !== authorUserId)
+            throw new Error("Operation belongs to another user");
+          throw new FollowUpRejected(rejection);
+        }
         return this.detail(id);
       }
-      if (a.state === "stopping")
-        throw new RequestRefused(
-          "Wait for the observed turn outcome before queueing",
-        );
-      if (a.deliveries.filter(pendingFollowUp).length >= 50)
-        throw new RequestRefused("Follow-up queue is full");
+      const rejection: FollowUpRejection | undefined =
+        a.state === "stopping"
+          ? "follow-up-rejected:v1:stopping"
+          : a.deliveries.filter(pendingFollowUp).length >= 50
+            ? "follow-up-rejected:v1:full"
+            : undefined;
+      if (rejection) {
+        const observed = () =>
+          a.messages.some(
+            (message) =>
+              message.role === "user" &&
+              (message.id === requestId || message.clientId === requestId),
+          );
+        if (observed()) throw new Error("Submission was already observed");
+        await this.requireNativeRejection(a, requestId);
+        if (
+          this.disposed ||
+          this.agent(id) !== a ||
+          a.deliveries.some((delivery) => delivery.id === requestId) ||
+          observed()
+        )
+          throw new Error("Submission outcome changed");
+        const rejected: RuntimeDelivery = {
+          id: requestId,
+          mode: "follow_up",
+          source: "user",
+          authorUserId,
+          status: "cancelled",
+          text,
+          images: images?.length ? structuredClone(images) : undefined,
+          at: Date.now(),
+          questionIds: [],
+          error: rejection,
+        };
+        a.deliveries.push(rejected);
+        this.save();
+        if (
+          this.disposed ||
+          this.writeFailure ||
+          rejected.status !== "cancelled" ||
+          rejected.error !== rejection ||
+          observed()
+        )
+          throw new Error("Submission outcome changed");
+        throw new FollowUpRejected(followUpRejections[rejection]);
+      }
       if (images?.length) this.images.commit(a.id, requestId, text, images);
       if (
         !a.deliveries.some(pendingFollowUp) &&
@@ -2662,7 +3385,14 @@ export class Workspace {
     const d = a.deliveries.find(
       (d) => d.id === operationId && d.mode === "follow_up",
     );
-    return d ? structuredClone(d) : null;
+    if (!d) return null;
+    const result = structuredClone(d);
+    if (result.status === "cancelled" && result.error) {
+      const rejection = followUpRejection(result.error);
+      if (!rejection) throw new Error("Invalid follow-up cancellation record");
+      result.error = rejection;
+    }
+    return result;
   }
   inspectFollowUp(
     id: string,
@@ -3004,74 +3734,58 @@ export class Workspace {
     text: string,
     requestId: string,
     images?: MessageImage[],
-    retry?: import("../src/chord-contract").RetrySend,
     authorUserId?: string,
+    requireReservation = false,
+    predecessor?: SubmissionEnvelope,
+    claimToken?: string,
   ): Promise<import("../src/chord-contract").SendResult> {
     this.automaticFollowUps.delete(id);
     return this.serialize(id, async () => {
       this.automaticFollowUps.delete(id);
       const a = this.agent(id, true);
-      if (a.role !== "orc")
-        throw new RequestRefused("Send instructions through Orc");
+      if (a.role !== "orc") throw new Error("Send instructions through Orc");
+      const fence = this.submissionFence(
+        id,
+        requestId,
+        { source: "user", text, images },
+        authorUserId,
+      );
+      if (requireReservation && !fence)
+        throw new Error("Submission reservation required");
+      if (fence?.state === "rejected")
+        throw new Error("Submission was not admitted");
+      if (fence?.state === "superseded")
+        throw new Error("Submission has already been replaced");
       const previous = a.deliveries.find((d) => d.id === requestId);
+      if (fence?.state === "claimed") {
+        if (!previous) throw new Error("Submission outcome unknown");
+        return this.detail(id);
+      }
+      if (fence && previous) throw new Error("Submission outcome unknown");
       if (previous) {
         if (previous.mode === "follow_up")
-          throw new RequestRefused("Operation belongs to a follow-up");
+          throw new Error("Operation belongs to a follow-up");
         if (
           previous.text !== text ||
           previous.source !== "user" ||
           JSON.stringify(previous.images ?? []) !== JSON.stringify(images ?? [])
         )
-          throw new RequestRefused(
-            "Operation ID is bound to different content",
-          );
-        // The logical operation/native clientId stays fixed. A fresh attempt
-        // may replace only the exact rejected predecessor, inside this queue.
-        // Repeated or delayed tokens return the current outcome without admission.
-        if (!retry || previous.attemptId === retry.attempt)
-          return this.detail(id);
-        if ((previous.attemptId ?? requestId) !== retry.after)
-          return { ...this.detail(id), retryNotAdmitted: retry.attempt };
-        if (
-          previous.status !== "failed" ||
-          a.messages.some(
-            (m) =>
-              m.role === "user" &&
-              (m.id === requestId || m.clientId === requestId),
-          )
-        )
-          throw new Error("Only a rejected user submission can be retried");
-        const verified = await this.requireNativeRejection(a, requestId, true);
-        // History can become unavailable or a native event can confirm the old
-        // operation while the read is pending. Neither admits this attempt.
-        if (
-          !verified ||
-          previous.status !== "failed" ||
-          a.messages.some(
-            (m) =>
-              m.role === "user" &&
-              (m.id === requestId || m.clientId === requestId),
-          )
-        )
-          return { ...this.detail(id), retryNotAdmitted: retry.attempt };
-        previous.attemptId = retry.attempt;
-        this.save();
-        if (a.state === "stopping") return this.detail(id);
-        return this.deliver(
-          a,
-          previous.text,
-          requestId,
-          "user",
-          [],
-          undefined,
-          previous.images,
-        );
+          throw new Error("Operation ID is bound to different content");
+        return this.detail(id);
       }
+      await this.verifyRetry(
+        a,
+        requestId,
+        fence,
+        predecessor,
+        { source: "user", text, images },
+        authorUserId,
+        claimToken,
+      );
       if (images?.length) this.images.validate(a.id, requestId, text, images);
       if (a.state === "stopping") {
         a.deliveries.push({
           id: requestId,
-          attemptId: retry?.attempt,
           text,
           source: "user",
           authorUserId,
@@ -3082,22 +3796,21 @@ export class Workspace {
           at: Date.now(),
           error: "Wait for the observed turn outcome before sending",
         });
+        if (fence)
+          this.store.queueSubmissionFence(
+            id,
+            requestId,
+            encodeFence({
+              state: "claimed",
+              owner: fence.owner,
+              hash: fence.hash,
+              retryOf: fence.retryOf,
+              tokenHash: fence.tokenHash,
+            }),
+            encodeFence({ ...fence, state: "reserved", hash: undefined }),
+          );
         this.save();
         return this.detail(id);
-      }
-      if (retry) {
-        a.deliveries.push({
-          id: requestId,
-          attemptId: retry.attempt,
-          text,
-          source: "user",
-          authorUserId,
-          author: authorUserId ? this.store.user(authorUserId) : undefined,
-          status: "failed",
-          questionIds: [],
-          images,
-          at: Date.now(),
-        });
       }
       return this.deliver(
         a,
@@ -3109,6 +3822,14 @@ export class Workspace {
         images,
         false,
         authorUserId,
+        fence &&
+          encodeFence({
+            state: "claimed",
+            owner: fence.owner,
+            hash: fence.hash,
+            retryOf: fence.retryOf,
+            tokenHash: fence.tokenHash,
+          }),
       );
     });
   }
@@ -3228,7 +3949,9 @@ export class Workspace {
     }
   }
   private closeAbandoningUnknown(id: string, operationIds: string[]) {
-    return this.serialize(id, async () => {
+    if (this.closingTrees.has(id))
+      return Promise.reject(new RequestRefused("Tree is closing"));
+    const close = this.serialize(id, async () => {
       const a = this.agent(id);
       const validate = () => {
         const actual = this.abandonUnknownIds(a);
@@ -3256,65 +3979,114 @@ export class Workspace {
       this.save();
       return { closed: true as const, id };
     });
+    // Guard new reservations from the time this close is queued, including
+    // while earlier session work is still finishing.
+    this.closingTrees.add(id);
+    return close.finally(() => this.closingTrees.delete(id));
   }
   answerBatch(
     id: string,
     answers: Answer[],
     operationId: string,
     authorUserId?: string,
+    requireReservation = false,
+    predecessor?: SubmissionEnvelope,
+    claimToken?: string,
   ) {
     return this.serialize(id, async () => {
       const a = this.agent(id, true);
       if (a.role !== "orc")
-        throw new RequestRefused("Answer owned agent questions through Orc");
+        throw new Error("Answer owned agent questions through Orc");
       const frozen = answers.map((answer) => ({
         questionId: answer.questionId,
         answer: answer.answer.trim(),
       }));
+      const fence = this.submissionFence(
+        id,
+        operationId,
+        { source: "question", answers: frozen },
+        authorUserId,
+      );
+      if (requireReservation && !fence)
+        throw new Error("Submission reservation required");
+      if (fence?.state === "rejected")
+        throw new Error("Submission was not admitted");
+      if (fence?.state === "superseded")
+        throw new Error("Submission has already been replaced");
       const prior = a.deliveries.find((d) => d.id === operationId);
+      if (fence?.state === "claimed") {
+        if (!prior) throw new Error("Submission outcome unknown");
+        return this.detail(id);
+      }
+      if (fence && prior) throw new Error("Submission outcome unknown");
       if (prior) {
         if (
           prior.source !== "question" ||
           JSON.stringify(prior.answers) !== JSON.stringify(frozen)
         )
-          throw new RequestRefused(
-            "Operation ID is bound to different content",
-          );
-        if (prior.status !== "failed") return this.detail(id);
+          throw new Error("Operation ID is bound to different content");
+        return this.detail(id);
       }
+      await this.verifyRetry(
+        a,
+        operationId,
+        fence,
+        predecessor,
+        { source: "question", answers: frozen },
+        authorUserId,
+        claimToken,
+      );
       if (a.state === "stopping")
-        throw new RequestRefused(
-          "Wait for the observed turn outcome before answering",
-        );
+        throw new Error("Wait for the observed turn outcome before answering");
       if (
         !frozen.length ||
         new Set(frozen.map((answer) => answer.questionId)).size !==
           frozen.length
       )
-        throw new RequestRefused(
-          "Choose a non-empty batch of distinct questions",
-        );
-      const questions = frozen.map((answer) => {
-        const q = a.questions.find((q) => q.id === answer.questionId);
-        if (!q || q.state !== "unanswered")
-          throw new RequestRefused(
-            "Every submitted question must belong to this Orc and remain unanswered",
-          );
-        if (!answer.answer || answer.answer.length > 100_000)
-          throw new RequestRefused("Write a valid answer for every question");
-        if (
-          a.deliveries.some(
-            (d) =>
-              d.source === "question" &&
-              d.questionIds.includes(q.id) &&
-              ["sending", "queued", "uncertain"].includes(d.status),
+        throw new Error("Choose a non-empty batch of distinct questions");
+      const validateQuestions = () =>
+        frozen.map((answer) => {
+          const q = a.questions.find((q) => q.id === answer.questionId);
+          if (!q || q.state !== "unanswered")
+            throw new Error(
+              "Every submitted question must belong to this Orc and remain unanswered",
+            );
+          if (!answer.answer || answer.answer.length > 100_000)
+            throw new Error("Write a valid answer for every question");
+          if (
+            a.deliveries.some(
+              (d) =>
+                d.source === "question" &&
+                d.questionIds.includes(q.id) &&
+                ["sending", "queued", "uncertain"].includes(d.status),
+            )
           )
-        )
-          throw new RequestRefused(
-            "Check the original answer batch before another submission",
-          );
-        return q;
-      });
+            throw new Error(
+              "Check the original answer batch before another submission",
+            );
+          return q;
+        });
+      validateQuestions();
+      const questionIds = new Set(frozen.map((answer) => answer.questionId));
+      const failed = a.deliveries.filter(
+        (delivery) =>
+          delivery.source === "question" &&
+          delivery.status === "failed" &&
+          delivery.questionIds.some((questionId) =>
+            questionIds.has(questionId),
+          ),
+      );
+      for (const delivery of failed)
+        await this.requireNativeRejection(a, delivery.id);
+      // Native events may arrive while history is being read, independently of
+      // this session's serialized submissions.
+      if (this.disposed || this.agent(id) !== a)
+        throw new Error("Conversation changed while checking native history");
+      if (this.agent(id).state === "stopping")
+        throw new Error("Wait for the observed turn outcome before answering");
+      const questions = validateQuestions();
+      if (requireReservation && failed.length && !fence?.retryOf)
+        throw new Error("Retry requires a linked reservation");
       const text = frozen
         .map(
           (answer, i) =>
@@ -3331,6 +4103,14 @@ export class Workspace {
         undefined,
         false,
         authorUserId,
+        fence &&
+          encodeFence({
+            state: "claimed",
+            owner: fence.owner,
+            hash: fence.hash,
+            retryOf: fence.retryOf,
+            tokenHash: fence.tokenHash,
+          }),
       );
     });
   }

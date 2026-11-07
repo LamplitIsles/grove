@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { OutputSpeedService } from "./tps";
 import { Workspace } from "./workspace";
 import { HostService, qualify } from "./hosts";
@@ -118,7 +119,19 @@ test("real HTTP/HostService/Chord runs only lazy background analysis, shares TTL
   const service = new HostService(app, {
     directory: join(root, "state"),
     origin: () => origin,
-    outputSpeed: { root: home },
+    outputSpeed: {
+      root: home,
+      command: [
+        "/usr/bin/env",
+        `HOME=${root}`,
+        `TMPDIR=${root}`,
+        "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0",
+        process.execPath,
+        "--smol",
+        fileURLToPath(new URL("./tps-child.ts", import.meta.url)),
+        home,
+      ],
+    },
   });
   const server = servePeer(app, {
     service,
@@ -143,10 +156,14 @@ test("real HTTP/HostService/Chord runs only lazy background analysis, shares TTL
     const id = qualify(service.identity.id, agent.id);
     expect(service.outputSpeed.diagnostics.starts).toBe(0);
     await client.call("weekly", {});
+    const { operationId } = await client.call<{ operationId: string }>(
+      "reserveSubmission",
+      { id },
+    );
     await client.call("send", {
       id,
       text: "ordinary message",
-      operationId: "once",
+      operationId,
     });
     expect(service.outputSpeed.diagnostics.starts).toBe(0);
     const url = origin + `/api/read/tps?agent=${encodeURIComponent(id)}`;

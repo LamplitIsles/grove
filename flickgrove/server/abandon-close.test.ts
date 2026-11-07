@@ -247,3 +247,106 @@ test("in-flight sending/queued operations cannot be bypassed and their new unkno
   await expect(close).rejects.toThrow("changed");
   expect(f.app.lookup(f.target.id, "new-inflight")).toBeNull();
 });
+
+test("reservation is blocked from abandonment enqueue through failed validation", async () => {
+  const f = await fixture();
+  const gate = Promise.withResolvers<string>();
+  const entered = Promise.withResolvers<void>();
+  f.runtime.sendOverride = async () => {
+    entered.resolve();
+    return gate.promise;
+  };
+  const sending = f.app.send(f.target.id, "New input", "held");
+  await entered.promise;
+  const closing = f.app.closeTree(f.target.id, ["original-unknown"]);
+  try {
+    await expect(f.app.reserveSubmission(f.target.id)).rejects.toThrow(
+      "Tree is closing",
+    );
+    await expect(
+      f.app.closeTree(f.target.id, ["original-unknown"]),
+    ).rejects.toThrow("Tree is closing");
+    await expect(f.app.reserveSubmission(f.target.id)).rejects.toThrow(
+      "Tree is closing",
+    );
+    gate.reject(new Error("fixture unknown"));
+    await sending;
+    await expect(closing).rejects.toThrow("changed");
+    const reservation = await f.app.reserveSubmission(f.target.id);
+    expect(reservation.operationId).toStartWith("grove-v1-");
+    expect(
+      f.runtime.inputs.filter((input) => input.clientId === "held"),
+    ).toHaveLength(1);
+  } finally {
+    gate.reject(new Error("cleanup"));
+    await sending;
+    await closing.catch(() => {});
+  }
+});
+
+test("reservation remains blocked during abandonment release; failure unlocks it across restart", async () => {
+  const f = await fixture();
+  const gate = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  f.runtime.closeOverride = async () => {
+    entered.resolve();
+    await gate.promise;
+    throw new Error("fixture release failed");
+  };
+  const closing = f.app.closeTree(f.target.id, ["original-unknown"]);
+  try {
+    await entered.promise;
+    await expect(f.app.reserveSubmission(f.target.id)).rejects.toThrow(
+      "Tree is closing",
+    );
+    await expect(
+      f.app.closeTree(f.target.id, ["original-unknown"]),
+    ).rejects.toThrow("Tree is closing");
+    await expect(f.app.reserveSubmission(f.target.id)).rejects.toThrow(
+      "Tree is closing",
+    );
+    gate.resolve();
+    await expect(closing).rejects.toThrow("fixture release failed");
+    const { operationId } = await f.app.reserveSubmission(f.target.id);
+    f.reload();
+    expect(
+      await f.app.finalizeSubmission(f.target.id, operationId, {
+        source: "user",
+        text: "never sent",
+      }),
+    ).toMatchObject({ state: "rejected" });
+    expect(f.runtime.inputs).toHaveLength(1);
+  } finally {
+    gate.resolve();
+    await closing.catch(() => {});
+  }
+});
+
+test("successful abandonment never allows a reservation during release or after close", async () => {
+  const f = await fixture();
+  const gate = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  f.runtime.closeOverride = async () => {
+    entered.resolve();
+    await gate.promise;
+  };
+  const closing = f.app.closeTree(f.target.id, ["original-unknown"]);
+  try {
+    await entered.promise;
+    await expect(f.app.reserveSubmission(f.target.id)).rejects.toThrow(
+      "Tree is closing",
+    );
+    gate.resolve();
+    await closing;
+    await expect(f.app.reserveSubmission(f.target.id)).rejects.toThrow(
+      "Session not found",
+    );
+    expect(
+      f.stored().agents.find((agent) => agent.id === f.target.id)?.closed,
+    ).toBe(true);
+    expect(f.runtime.inputs).toHaveLength(1);
+  } finally {
+    gate.resolve();
+    await closing.catch(() => {});
+  }
+});

@@ -1,14 +1,15 @@
 <script lang="ts">
-  import { submissionResult } from "./outgoing.svelte";
+  import { hasDismissedAnswer, isDismissedPending, submissionResult } from "./outgoing.svelte";
   import { ChevronLeft, ChevronRight, Check } from "@lucide/svelte";
   import { Textarea } from "$lib/components/ui/textarea/index.js";
   import { Button } from "$lib/components/ui/button/index.js";
   import Markdown from "./Markdown.svelte";
-  import { storagePrefix, readingCache } from "./api";
-  import { tick, untrack } from "svelte";
+  import LegacyPendingAction from "./LegacyPendingAction.svelte";
+  import { storagePrefix, readingCache, reserveSubmission } from "./api";
+  import { tick, untrack, onMount } from "svelte";
   import type { Answer, Delivery, Question } from "./contracts";
   import * as m from "./paraglide/messages";
-  let { agentId, previewAgentId = agentId, historyPreview = false, questions, deliveries = [], connected = false, recovering = false, readonly = false, selectedItem, onanswer, onretry }: { agentId: string; previewAgentId?: string | null; historyPreview?: boolean; questions: Question[]; deliveries?: Delivery[]; connected?: boolean; recovering?: boolean; readonly?: boolean; selectedItem?: string; onanswer?: (answers: Answer[], operationId: string, text?: string) => Promise<void>; onretry?: (id: string) => Promise<void>; } = $props();
+  let { agentId, previewAgentId = agentId, historyPreview = false, questions, deliveries = [], connected = false, recovering = false, readonly = false, selectedItem, onanswer, onretry }: { agentId: string; previewAgentId?: string | null; historyPreview?: boolean; questions: Question[]; deliveries?: Delivery[]; connected?: boolean; recovering?: boolean; readonly?: boolean; selectedItem?: string; onanswer?: (answers: Answer[], operationId: string, text?: string) => Promise<void>; onretry?: (id: string, delivery?: Delivery) => Promise<void>; } = $props();
   const storageKey = untrack(() => `${storagePrefix}/questions/${agentId}`);
   type Draft = { selected: string; text: string };
   let drafts = $state<Record<string, Draft>>(untrack(() => {
@@ -16,16 +17,19 @@
   }));
   let currentId = $state<string | undefined>(untrack(() => readonly ? undefined : localStorage.getItem(`${storageKey}/current`) ?? undefined));
   let submitting = $state(false), composing = false, feedback = $state("");
+  let active = true;
+  onMount(() => () => { active = false; });
   let panel: HTMLDivElement;
   const pending = $derived(questions.filter(q => readonly || q.state !== "answered"));
   const anchor = $derived(pending.find(q => q.id === currentId) ?? pending.find(q => q.itemId === selectedItem) ?? pending[0]);
   const batch = $derived(readonly ? pending : pending.filter(q => q.itemId === anchor?.itemId).sort((a,b) => a.index-b.index));
   const current = $derived(batch.find(q => q.id === currentId) ?? batch[0]);
   const index = $derived(batch.findIndex(q => q.id === current?.id));
-  const operation = $derived(batch.find(q => q.answerOperation)?.answerOperation);
+  const operation = $derived(batch.find(q => q.answerOperation && !isDismissedPending(agentId, q.answerOperation.id, q.answerOperation.status))?.answerOperation);
   const operations = $derived(deliveries.filter(d => d.source === "question" && submissionResult(d) !== "accepted" && d.questionIds.some(id => batch.some(q => q.id === id))));
   const frozen = $derived<Delivery | undefined>(readonly ? undefined : operations.find(d => submissionResult(d) === "pending") ?? operations.at(-1) ?? (operation ? {...operation,source:"question" as const,questionIds:batch.map(q => q.id),text:"",at:0} : undefined));
   const locked = $derived(readonly || submitting || !!frozen);
+  const answerUnconfirmed = $derived(hasDismissedAnswer(agentId, batch.map(q => q.id)));
   function draft(q: Question): Draft {
     const saved = drafts[q.id];
     if (saved && typeof saved.selected === "string" && typeof saved.text === "string") return saved;
@@ -48,13 +52,13 @@
   function setDraft(q: Question, d: Draft) { if (locked) return; feedback = ""; select(q.id); drafts[q.id] = d; readingCache.writeDevice(storageKey, JSON.stringify(drafts)); }
   async function missing(q: Question) { select(q.id); feedback = "Answer this question before sending the batch."; await tick(); panel?.querySelector<HTMLTextAreaElement>('textarea')?.focus(); }
   async function submit() {
-    if (!connected || locked || recovering || !batch.length || composing || !onanswer) return;
+    if (!connected || locked || recovering || hasDismissedAnswer(agentId, batch.map(q => q.id)) || !batch.length || composing || !onanswer) return;
     const unfilled = batch.find(q => !value(q));
     if (unfilled) { await missing(unfilled); return; }
     const answers = batch.map(q => ({questionId:q.id,answer:value(q)}));
     const text = batch.map(q => `Question: ${q.text}\nAnswer: ${value(q)}`).join("\n\n");
     submitting = true; feedback = "";
-    try { await onanswer(answers, crypto.randomUUID(), text); }
+    try { const operationId = await reserveSubmission(agentId); if(active && !hasDismissedAnswer(agentId, answers.map(a => a.questionId))) await onanswer(answers, operationId, text); }
     catch(e) { feedback = (e as Error).message; }
     finally { submitting = false; }
   }
@@ -73,7 +77,7 @@
 </script>
 <div class="questions-content" role="group" aria-label="Question navigation" bind:this={panel}>
   <div class="question-scroll">
-    {#if frozen}<section class="answer-batch" aria-label={m.answer_batch()} data-operation-id={frozen.id}><p class="batch-status" role="status">{submissionResult(frozen) === "pending" ? m.sending() : frozen.error ?? m.load_failure()}</p>{#each frozen.answers ?? [] as answer}<div class="answered-item"><Markdown text={questions.find(q => q.id === answer.questionId)?.text ?? ""} agentId={previewAgentId ?? undefined} {historyPreview} /><span>{answer.answer}</span></div>{/each}{#if submissionResult(frozen) === "rejected"}<Button variant="secondary" size="sm" disabled={!connected || submitting} onclick={async () => { submitting = true; try { await onretry?.(frozen.id); } finally { submitting = false; } }}>{m.retry()}</Button>{/if}</section>
+    {#if frozen}<section class="answer-batch" aria-label={m.answer_batch()} data-operation-id={frozen.id}><p class="batch-status" role="status">{submissionResult(frozen) === "pending" ? m.sending() : frozen.error ?? m.load_failure()}</p>{#each frozen.answers ?? [] as answer}<div class="answered-item"><Markdown text={questions.find(q => q.id === answer.questionId)?.text ?? ""} agentId={previewAgentId ?? undefined} {historyPreview} /><span>{answer.answer}</span></div>{/each}{#if submissionResult(frozen) === "pending"}<LegacyPendingAction {agentId} operationId={frozen.id} />{:else if submissionResult(frozen) === "rejected"}<Button variant="secondary" size="sm" disabled={!connected || submitting || answerUnconfirmed} onclick={async () => { if(hasDismissedAnswer(agentId,batch.map(q => q.id)))return; submitting = true; feedback = ""; try { await onretry?.(frozen.id, frozen); } catch(e) { feedback = (e as Error).message; } finally { submitting = false; } }}>{m.retry()}</Button>{/if}</section>
     {:else if current}
       {@const q = current}
       {@const d = draft(q)}
@@ -91,7 +95,8 @@
         </div>
       </section>
     {/if}
+    {#if answerUnconfirmed && !readonly}<p class="inline-error" role="status">{m.pending_answer_unconfirmed()}</p>{/if}
     {#if feedback}<p class="inline-error" role="status">{feedback}</p>{/if}
   </div>
-  {#if batch.length}<div class="question-footer"><div class="question-arrows"><Button variant="ghost" size="icon-sm" aria-label="Previous question" disabled={index<=0 || !!frozen} onclick={() => move(-1)}><ChevronLeft /></Button><span>{m.question_position({current:index+1,total:batch.length})}</span><Button variant="ghost" size="icon-sm" aria-label="Next question" disabled={index>=batch.length-1 || !!frozen} onclick={() => move(1)}><ChevronRight /></Button></div>{#if !readonly && !frozen}<Button size="sm" disabled={!connected || locked || recovering} onclick={() => { if (index<batch.length-1) { if (current && !value(current)) void missing(current); else move(1); } else void submit(); }}>{index<batch.length-1 ? "Next" : m.send_all_answers()}</Button>{/if}</div>{/if}
+  {#if batch.length}<div class="question-footer"><div class="question-arrows"><Button variant="ghost" size="icon-sm" aria-label="Previous question" disabled={index<=0 || !!frozen} onclick={() => move(-1)}><ChevronLeft /></Button><span>{m.question_position({current:index+1,total:batch.length})}</span><Button variant="ghost" size="icon-sm" aria-label="Next question" disabled={index>=batch.length-1 || !!frozen} onclick={() => move(1)}><ChevronRight /></Button></div>{#if !readonly && !frozen}<Button size="sm" disabled={!connected || locked || recovering || (index===batch.length-1 && answerUnconfirmed)} onclick={() => { if (index<batch.length-1) { if (current && !value(current)) void missing(current); else move(1); } else void submit(); }}>{index<batch.length-1 ? "Next" : m.send_all_answers()}</Button>{/if}</div>{/if}
 </div>

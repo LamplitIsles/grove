@@ -330,11 +330,20 @@ test("idle startup waits for selection; a new input waits for recovery and faile
       ),
     ).toHaveLength(2);
     await writeFile(control, "{}");
-    await f.app.send(owner.id, "retryable input", "retryable", undefined, {
-      after: "retryable",
-      attempt: "retry-attempt",
-    });
-    expect(f.app.lookup(owner.id, "retryable")?.state).toBe("accepted");
+    const retry = await f.app.reserveRetry(owner.id, "retryable");
+    if (retry.state !== "won") throw new Error("Expected retry winner");
+    await f.app.send(
+      owner.id,
+      "retryable input",
+      retry.operationId,
+      undefined,
+      undefined,
+      true,
+      { source: "user", text: "retryable input" },
+      retry.claimToken,
+    );
+    expect(f.app.lookup(owner.id, "retryable")?.state).toBe("rejected");
+    expect(f.app.lookup(owner.id, retry.operationId)?.state).toBe("accepted");
     expect(
       (await calls())
         .filter(

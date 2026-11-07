@@ -18,6 +18,7 @@ import {
 const MAX_FRAME = 2 * 1024 * 1024;
 import { invoke } from "./chord-methods";
 import { DeliveryRejected, RequestRefused } from "./runtime";
+import { FollowUpRejected } from "./workspace";
 import type { HostService } from "./hosts";
 import { voiceRelay, type VoiceSocketData } from "./voice";
 
@@ -107,8 +108,11 @@ function connect(socket: ServerWebSocket<SocketData>) {
       view,
       async execute(args): Promise<GroveResult> {
         let invoked = false;
+        let member: string | undefined;
         try {
-          const { member, input } = args as { member: string; input: unknown };
+          const call = args as { member: string; input: unknown };
+          member = call.member;
+          const { input } = call;
           if (!Object.hasOwn(inputs, member)) throw new Error("Invalid method");
           if (member === "select") {
             const p = inputs.select.parse(input);
@@ -170,11 +174,17 @@ function connect(socket: ServerWebSocket<SocketData>) {
           return {
             ok: false,
             outcome:
-              !invoked ||
-              error instanceof DeliveryRejected ||
-              error instanceof RequestRefused
-                ? "rejected"
-                : "unknown",
+              member === "enqueueFollowUp"
+                ? error instanceof FollowUpRejected
+                  ? "rejected"
+                  : "unknown"
+                : member === "send" || member === "answerBatch"
+                  ? "unknown"
+                  : !invoked ||
+                      error instanceof DeliveryRejected ||
+                      error instanceof RequestRefused
+                    ? "rejected"
+                    : "unknown",
             error: error instanceof Error ? error.message : "Request failed",
           };
         }

@@ -8,8 +8,7 @@ import {
 import { z } from "zod";
 import type { Detail, Human, Snapshot } from "./contracts";
 
-// Returned only by the explicit send call; never published as reading state.
-export type SendResult = Detail & { retryNotAdmitted?: string };
+export type SendResult = Detail;
 export type View = {
   snapshot: Snapshot;
   details: Record<string, Detail>;
@@ -45,8 +44,25 @@ export const settingsSchema = z.object({
   orc: defaults,
   worker: defaults,
 });
-export const retrySendSchema = z.object({ after: id, attempt: id }).strict();
-export type RetrySend = z.infer<typeof retrySendSchema>;
+export const submissionEnvelopeSchema = z.discriminatedUnion("source", [
+  z
+    .object({
+      source: z.literal("user"),
+      text: z.string().trim().max(100_000),
+      images: z.array(imageSchema).max(5).optional(),
+    })
+    .strict()
+    .refine(
+      (p) => p.text.length > 0 || !!p.images?.length,
+      "Write a message or choose an image",
+    ),
+  z
+    .object({
+      source: z.literal("question"),
+      answers: z.array(answerSchema).min(1),
+    })
+    .strict(),
+]);
 export const inputs = {
   select: z.object({ ids: z.array(id).max(100) }),
   identity: z.object({}),
@@ -74,13 +90,36 @@ export const inputs = {
     project: id,
     settings: settingsSchema,
   }),
+  reserveSubmission: z.object({ id }).strict(),
+  reserveRetry: z
+    .object({ id, operationId: z.string().min(1).max(120) })
+    .strict(),
+  inspectRetry: z
+    .object({
+      id,
+      operationId: z.string().min(1).max(120),
+      envelope: submissionEnvelopeSchema,
+    })
+    .strict(),
+  finalizeSubmission: z
+    .object({
+      id,
+      operationId: z.string().min(1).max(120),
+      envelope: submissionEnvelopeSchema,
+      predecessor: submissionEnvelopeSchema.optional(),
+    })
+    .strict(),
   send: z
     .object({
       id,
       text: z.string().trim().max(100_000),
       images: z.array(imageSchema).max(5).optional(),
       operationId: z.string().min(1).max(120),
-      retry: retrySendSchema.optional(),
+      predecessor: submissionEnvelopeSchema.optional(),
+      claimToken: z
+        .string()
+        .regex(/^[A-Za-z0-9_-]{43}$/)
+        .optional(),
     })
     .strict()
     .refine(
@@ -118,6 +157,11 @@ export const inputs = {
     id,
     answers: z.array(answerSchema).min(1),
     operationId: z.string().min(1).max(120),
+    predecessor: submissionEnvelopeSchema.optional(),
+    claimToken: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{43}$/)
+      .optional(),
   }),
   stop: z.object({ id, turnId: id }),
   updateSettings: z
@@ -143,6 +187,13 @@ export const abandonCloseSchema = z.discriminatedUnion("closed", [
   }),
 ]);
 export type Method = keyof typeof inputs;
+export const inspectRetrySchema = z
+  .object({
+    operationId: z.string().min(1).max(120),
+    supersededBy: z.string().min(1).max(120),
+  })
+  .strict()
+  .nullable();
 // Chord transport errors do not prove whether a call reached the server. Only a
 // complete application response can establish an explicit rejection.
 export type GroveResult =
@@ -307,6 +358,7 @@ const agent = z.object({
     .optional(),
 });
 export const deliverySchema = z.object({
+  supersededBy: id.optional(),
   author: human.optional(),
   mode: z.enum(["direct", "follow_up"]).optional(),
   attemptId: id.optional(),

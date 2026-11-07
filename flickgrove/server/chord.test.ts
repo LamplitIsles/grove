@@ -162,24 +162,160 @@ function fixture(transport: "tcp" | "ordered" = "tcp") {
     },
   };
 }
+async function reserve(
+  client: Awaited<ReturnType<typeof openGrove>>,
+  id: string,
+) {
+  return (
+    await client.call<{ operationId: string }>("reserveSubmission", { id })
+  ).operationId;
+}
+test("#5335 a held send does not block the next reservation or reorder native inputs", async () => {
+  const f = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  const client = await f.client(
+    () => {},
+    () => {},
+    300,
+  );
+  const first = await reserve(client, id);
+  const gate = Promise.withResolvers<string>();
+  f.runtime.sendOverride = async (_id, text, turn) =>
+    text === "First" ? gate.promise : turn!;
+  const sending = client
+    .call("send", { id, operationId: first, text: "First" })
+    .catch((error) => error);
+  try {
+    await until(() => f.runtime.inputs.length === 1);
+    const second = await reserve(client, id);
+    expect(second).not.toBe(first);
+    const next = client.call("send", {
+      id,
+      operationId: second,
+      text: "Second",
+    });
+    await Bun.sleep(10);
+    expect(f.runtime.inputs.map((input) => input.text)).toEqual(["First"]);
+    gate.resolve("first-turn");
+    await sending;
+    await next;
+    await client.call("send", { id, operationId: second, text: "Second" });
+    expect(
+      f.runtime.inputs.map((input) => [
+        input.text,
+        input.clientId,
+        input.turnId,
+      ]),
+    ).toEqual([
+      ["First", first, undefined],
+      ["Second", second, "first-turn"],
+    ]);
+  } finally {
+    gate.resolve("first-turn");
+    await sending;
+  }
+});
+for (const firstAction of ["finalize", "submit"] as const) {
+  test(`#5335 ${firstAction} wins for a reservation made while an earlier send is held`, async () => {
+    const f = fixture("ordered");
+    const agent = await f.app.createOrc("alpha");
+    const id = qualify(f.service.identity.id, agent.id);
+    const client = await f.client(
+      () => {},
+      () => {},
+      2000,
+    );
+    const first = await reserve(client, id);
+    const gate = Promise.withResolvers<string>();
+    f.runtime.sendOverride = async (_id, text, turn) =>
+      text === "First" ? gate.promise : turn!;
+    const sending = client
+      .call("send", { id, operationId: first, text: "First" })
+      .catch((error) => error);
+    const invoked: string[] = [];
+    const send = f.service.send.bind(f.service);
+    const finalize = f.service.finalizeSubmission.bind(f.service);
+    f.service.send = (...args) => {
+      if (args[1] === "Second") invoked.push("submit");
+      return send(...args);
+    };
+    f.service.finalizeSubmission = (...args) => {
+      invoked.push("finalize");
+      return finalize(...args);
+    };
+    try {
+      await until(() => f.runtime.inputs.length === 1);
+      const second = await reserve(client, id);
+      const submit = () =>
+        client
+          .call("send", { id, operationId: second, text: "Second" })
+          .catch((error) => error);
+      const final = () =>
+        client.call<Receipt | null>("finalizeSubmission", {
+          id,
+          operationId: second,
+          envelope: { source: "user", text: "Second" },
+        });
+      let submitted: Promise<unknown>, finalized: Promise<Receipt | null>;
+      if (firstAction === "finalize") {
+        finalized = final();
+        submitted = submit();
+      } else {
+        submitted = submit();
+        finalized = final();
+      }
+      await until(() => invoked.length === 2);
+      expect(invoked).toEqual(
+        firstAction === "finalize"
+          ? ["finalize", "submit"]
+          : ["submit", "finalize"],
+      );
+      expect(f.runtime.inputs.map((input) => input.text)).toEqual(["First"]);
+      gate.resolve("first-turn");
+      await sending;
+      const result = await submitted;
+      const receipt = await finalized;
+      if (firstAction === "finalize") {
+        expect(result).toBeInstanceOf(Error);
+        expect(receipt?.state).toBe("rejected");
+        expect(
+          f.runtime.inputs.filter((input) => input.clientId === second),
+        ).toHaveLength(0);
+      } else {
+        expect(result).not.toBeInstanceOf(Error);
+        expect(receipt?.state).toBe("accepted");
+        expect(
+          f.runtime.inputs.filter((input) => input.clientId === second),
+        ).toHaveLength(1);
+      }
+    } finally {
+      gate.resolve("first-turn");
+      await sending;
+    }
+  });
+}
 test("real socket admits A/B/C in order, start then steer, with operation-bound results and independent requests", async () => {
   const f = fixture();
   const agent = await f.app.createOrc("alpha");
   const id = qualify(f.service.identity.id, agent.id);
   const client = await f.client();
+  const opA = await reserve(client, id),
+    opB = await reserve(client, id),
+    opC = await reserve(client, id);
   const hold = Promise.withResolvers<string>();
   f.runtime.sendOverride = async (_id, text, turn) =>
     text === "A" ? hold.promise : turn!;
-  const a = client.call<Detail>("send", { id, text: "A", operationId: "A" });
+  const a = client.call<Detail>("send", { id, text: "A", operationId: opA });
   await until(() => f.runtime.inputs.length === 1);
   expect(
-    await client.call<Receipt | null>("lookup", { id, operationId: "A" }),
+    await client.call<Receipt | null>("lookup", { id, operationId: opA }),
   ).toBeNull();
-  const b = client.call("send", { id, text: "B", operationId: "B" });
-  const c = client.call("send", { id, text: "C", operationId: "C" });
+  const b = client.call("send", { id, text: "B", operationId: opB });
+  const c = client.call("send", { id, text: "C", operationId: opC });
   // A slow submission neither blocks lookup nor another Orc on this socket.
   expect(
-    await client.call<Receipt | null>("lookup", { id, operationId: "B" }),
+    await client.call<Receipt | null>("lookup", { id, operationId: opB }),
   ).toBeNull();
   const other = await client.call<{ id: string }>("createOrc", {
     project: "alpha",
@@ -198,13 +334,13 @@ test("real socket admits A/B/C in order, start then steer, with operation-bound 
     ["B", "turn-A"],
     ["C", "turn-A"],
   ]);
-  await client.call("send", { id, text: "A", operationId: "A" });
+  await client.call("send", { id, text: "A", operationId: opA });
   await expect(
-    client.call("send", { id, text: "altered", operationId: "A" }),
+    client.call("send", { id, text: "altered", operationId: opA }),
   ).rejects.toThrow("bound");
   expect(f.runtime.inputs).toHaveLength(3);
   expect(
-    await client.call<Receipt>("lookup", { id, operationId: "B" }),
+    await client.call<Receipt>("lookup", { id, operationId: opB }),
   ).toMatchObject({ state: "accepted", turnId: "turn-A" });
   client.close();
   expect(f.app.detail(agent.id).state).toBe("working");
@@ -215,29 +351,31 @@ test("durable lookup after restart preserves accepted and null outcomes without 
   const agent = await f.app.createOrc("alpha");
   const id = qualify(f.service.identity.id, agent.id);
   const client = await f.client();
-  await client.call("send", { id, text: "accepted", operationId: "accepted" });
+  const acceptedOp = await reserve(client, id),
+    unknownOp = await reserve(client, id);
+  await client.call("send", { id, text: "accepted", operationId: acceptedOp });
   f.runtime.sendOverride = async () => {
     throw new Error("No native confirmation");
   };
-  await client.call("send", { id, text: "unknown", operationId: "unknown" });
+  await client.call("send", { id, text: "unknown", operationId: unknownOp });
   client.close();
   f.restart();
   const reconnected = await f.client();
   expect(
-    (await reconnected.call<Receipt>("lookup", { id, operationId: "accepted" }))
+    (await reconnected.call<Receipt>("lookup", { id, operationId: acceptedOp }))
       .state,
   ).toBe("accepted");
   expect(
     await reconnected.call<Receipt | null>("lookup", {
       id,
-      operationId: "unknown",
+      operationId: unknownOp,
     }),
   ).toBeNull();
   expect(f.runtime.inputs).toHaveLength(2);
   await reconnected.call("send", {
     id,
     text: "unknown",
-    operationId: "unknown",
+    operationId: unknownOp,
   });
   expect(f.runtime.inputs).toHaveLength(2);
 });
@@ -250,6 +388,7 @@ test("two browser selections and rapid switching are independent; detail pushes 
   let left: View | undefined, right: View | undefined;
   const l = await f.client((v) => (left = v)),
     r = await f.client((v) => (right = v));
+  const workOp = await reserve(r, bid);
   await l.call("select", { ids: [aid] });
   await r.call("select", { ids: [bid] });
   await until(() => !!left?.details[aid] && !!right?.details[bid]);
@@ -270,7 +409,7 @@ test("two browser selections and rapid switching are independent; detail pushes 
   await late;
   await until(() => !!left?.details[bid]);
   expect(left?.details[aid]).toBeUndefined();
-  await r.call("send", { id: bid, text: "work", operationId: "work" });
+  await r.call("send", { id: bid, text: "work", operationId: workOp });
   const turnId = f.app.detail(b.id).turnId!;
   f.runtime.emit(b.id, {
     type: "item",
@@ -300,11 +439,12 @@ test("independent clients share the durable FIFO and observe pending counts with
   let left: View | undefined, right: View | undefined;
   const l = await f.client((v) => (left = v));
   const r = await f.client((v) => (right = v));
+  const initialOp = await reserve(l, id);
   await Promise.all([
     l.call("select", { ids: [id] }),
     r.call("select", { ids: [id] }),
   ]);
-  await l.call("send", { id, text: "initial", operationId: "initial" });
+  await l.call("send", { id, text: "initial", operationId: initialOp });
   const initialTurn = f.app.detail(agent.id).turnId!;
   await Promise.all([
     l.call("enqueueFollowUp", { id, text: "from left", operationId: "left" }),
@@ -360,7 +500,7 @@ test("independent clients share the durable FIFO and observe pending counts with
     operationId: "left",
   });
   expect(f.runtime.inputs.map((input) => input.clientId)).toEqual([
-    "initial",
+    initialOp,
     ...order,
   ]);
   expect(f.app.detail(agent.id).state).toBe("working");
@@ -532,9 +672,10 @@ test("timed out mutation is reconciled by receipt without replay or disconnect",
     80,
   );
   const hold = Promise.withResolvers<string>();
+  const operationId = await reserve(client, id);
   f.runtime.sendOverride = () => hold.promise;
   const failure = await client
-    .call("send", { id, text: "once", operationId: "slow-once" })
+    .call("send", { id, text: "once", operationId: operationId })
     .catch((error: unknown) => error);
   expect(failure).toBeInstanceOf(RequestTimeout);
   expect((failure as RequestTimeout).member).toBe("send");
@@ -547,7 +688,7 @@ test("timed out mutation is reconciled by receipt without replay or disconnect",
   await until(() => f.app.detail(agent.id).deliveries[0]?.status === "sent");
   const receipt = await client.call<Receipt>("lookup", {
     id,
-    operationId: "slow-once",
+    operationId: operationId,
   });
   expect(receipt.state).toBe("accepted");
   expect(f.runtime.inputs).toHaveLength(1);
@@ -559,17 +700,19 @@ test("nullable receipts over real Chord preserve image and answer admission boun
   const a = await f.app.createOrc("alpha");
   const id = qualify(f.service.identity.id, a.id);
   const client = await f.client();
+  const imageOp = await reserve(client, id),
+    answerOp = await reserve(client, id);
   const bytes = await sharp({
     create: { width: 8, height: 8, channels: 4, background: "blue" },
   })
     .png()
     .toBuffer();
-  const refs = await f.app.images.upload(a.id, "image", "caption", [
+  const refs = await f.app.images.upload(a.id, imageOp, "caption", [
     new File([bytes], "image.png", { type: "image/png" }),
   ]);
   expect(
     lookupSchema.parse(
-      await client.call("lookup", { id, operationId: "image" }),
+      await client.call("lookup", { id, operationId: imageOp }),
     ),
   ).toBeNull();
   const imageGate = Promise.withResolvers<string>();
@@ -578,26 +721,26 @@ test("nullable receipts over real Chord preserve image and answer admission boun
     id,
     text: "caption",
     images: refs,
-    operationId: "image",
+    operationId: imageOp,
   });
   await until(() => f.runtime.inputs.length === 1);
   expect(
     lookupSchema.parse(
-      await client.call("lookup", { id, operationId: "image" }),
+      await client.call("lookup", { id, operationId: imageOp }),
     ),
   ).toBeNull();
   imageGate.resolve("image-turn");
   await image;
   expect(
     receiptSchema.parse(
-      await client.call("lookup", { id, operationId: "image" }),
+      await client.call("lookup", { id, operationId: imageOp }),
     ).state,
   ).toBe("accepted");
   await client.call("send", {
     id,
     text: "caption",
     images: refs,
-    operationId: "image",
+    operationId: imageOp,
   });
   expect(f.runtime.inputs).toHaveLength(1);
   const ask = (itemId: string) =>
@@ -623,12 +766,12 @@ test("nullable receipts over real Chord preserve image and answer admission boun
   const answer = client.call("answerBatch", {
     id,
     answers,
-    operationId: "answer",
+    operationId: answerOp,
   });
   await until(() => f.runtime.inputs.length === 2);
   expect(
     lookupSchema.parse(
-      await client.call("lookup", { id, operationId: "answer" }),
+      await client.call("lookup", { id, operationId: answerOp }),
     ),
   ).toBeNull();
   expect(f.app.detail(a.id).questions[0].state).toBe("unanswered");
@@ -637,17 +780,30 @@ test("nullable receipts over real Chord preserve image and answer admission boun
   await answer;
   expect(
     receiptSchema.parse(
-      await client.call("lookup", { id, operationId: "answer" }),
+      await client.call("lookup", { id, operationId: answerOp }),
     ),
   ).toMatchObject({ state: "rejected", error: "Native rejected the answer" });
   expect(
     f.app.detail(a.id).questions.every((q) => q.state === "unanswered"),
   ).toBe(true);
   f.runtime.sendOverride = async () => "image-turn";
-  await client.call("retryDelivery", { id, deliveryId: "answer" });
+  const retry = await client.call<{
+    state: "won";
+    operationId: string;
+    claimToken: string;
+  }>("reserveRetry", { id, operationId: answerOp });
+  expect(retry.state).toBe("won");
+  const predecessor = { source: "question", answers };
+  await client.call("answerBatch", {
+    id,
+    answers,
+    operationId: retry.operationId,
+    predecessor,
+    claimToken: retry.claimToken,
+  });
   expect(
     receiptSchema.parse(
-      await client.call("lookup", { id, operationId: "answer" }),
+      await client.call("lookup", { id, operationId: retry.operationId }),
     ).state,
   ).toBe("accepted");
   expect(f.app.detail(a.id).questions.map((q) => q.state)).toEqual([
@@ -655,11 +811,20 @@ test("nullable receipts over real Chord preserve image and answer admission boun
     "unanswered",
   ]);
   expect(f.runtime.inputs).toHaveLength(3);
-  await client.call("answerBatch", { id, answers, operationId: "answer" });
+  await expect(
+    client.call("answerBatch", { id, answers, operationId: answerOp }),
+  ).rejects.toThrow("replaced");
+  await client.call("answerBatch", {
+    id,
+    answers,
+    operationId: retry.operationId,
+    predecessor,
+    claimToken: retry.claimToken,
+  });
   expect(f.runtime.inputs).toHaveLength(3);
   expect(
     receiptSchema.safeParse({
-      operationId: "answer",
+      operationId: answerOp,
       state: "pending",
       turnId: null,
       error: null,
@@ -681,6 +846,7 @@ test("passive Chord select and reconnect preserve prefeature Orc until explicit 
   await first.call("select", { ids: [id] });
   first.close();
   const reconnected = await f.client();
+  const explicitOp = await reserve(reconnected, id);
   await reconnected.call("select", { ids: [id] });
   expect(captures).toBe(0);
   expect(runtime.agents.has(a.id)).toBe(false);
@@ -694,7 +860,7 @@ test("passive Chord select and reconnect preserve prefeature Orc until explicit 
   await reconnected.call("send", {
     id,
     text: "Continue explicitly",
-    operationId: "explicit",
+    operationId: explicitOp,
   });
   expect(captures).toBe(1);
   expect(runtime.agents.get(a.id)?.orcPromptSnapshot).toBe(
@@ -710,7 +876,10 @@ test("failed submission deletion is owning-Peer durable, serialized and rejected
   const id = qualify(f.service.identity.id, a.id),
     other = qualify(f.service.identity.id, b.id);
   const client = await f.client();
-  const remove = (target = id, operationId = "failed") =>
+  const failedOp = await reserve(client, id),
+    acceptedOp = await reserve(client, id),
+    unknownOp = await reserve(client, id);
+  const remove = (target = id, operationId = failedOp) =>
     client.call<Detail>("deleteFailedSubmission", { id: target, operationId });
   f.runtime.sendOverride = async () => {
     throw new DeliveryRejected("Synthetic rejection");
@@ -718,7 +887,7 @@ test("failed submission deletion is owning-Peer durable, serialized and rejected
   await client.call("send", {
     id,
     text: "Rejected content",
-    operationId: "failed",
+    operationId: failedOp,
   });
   await expect(remove(`foreign:${a.id}`)).rejects.toThrow();
   await expect(remove(other)).rejects.toThrow();
@@ -728,24 +897,24 @@ test("failed submission deletion is owning-Peer durable, serialized and rejected
   };
   await expect(remove()).rejects.toThrow("Synthetic delete save failure");
   (f.app as any).save = save;
-  expect(f.app.lookup(a.id, "failed")?.state).toBe("rejected");
+  expect(f.app.lookup(a.id, failedOp)?.state).toBe("rejected");
   expect((await remove()).deliveries).toHaveLength(0);
   expect((await remove()).deliveries).toHaveLength(0);
   expect((await remove(id, "local-rejected-only")).deliveries).toHaveLength(0);
   const runtime = f.restart();
   const fresh = await f.client();
-  expect(await fresh.call("lookup", { id, operationId: "failed" })).toBeNull();
+  expect(await fresh.call("lookup", { id, operationId: failedOp })).toBeNull();
   const hold = Promise.withResolvers<string>();
   runtime.sendOverride = async () => hold.promise;
   const accepted = fresh.call("send", {
     id,
     text: "Accepted content",
-    operationId: "accepted",
+    operationId: acceptedOp,
   });
   await until(() => runtime.inputs.length === 1);
   let settled = false;
   const deleting = fresh
-    .call("deleteFailedSubmission", { id, operationId: "accepted" })
+    .call("deleteFailedSubmission", { id, operationId: acceptedOp })
     .then(
       () => {
         settled = true;
@@ -763,7 +932,7 @@ test("failed submission deletion is owning-Peer durable, serialized and rejected
   expect(await deleting).toBe("Only a rejected user submission can be deleted");
   expect(
     (await fresh.call<Detail>("detail", { id })).messages.some(
-      (m) => m.clientId === "accepted",
+      (m) => m.clientId === acceptedOp,
     ),
   ).toBe(true);
   runtime.sendOverride = async () => {
@@ -772,12 +941,12 @@ test("failed submission deletion is owning-Peer durable, serialized and rejected
   await fresh.call("send", {
     id,
     text: "Unknown content",
-    operationId: "unknown",
+    operationId: unknownOp,
   });
   await expect(
-    fresh.call("deleteFailedSubmission", { id, operationId: "unknown" }),
+    fresh.call("deleteFailedSubmission", { id, operationId: unknownOp }),
   ).rejects.toThrow();
-  expect(await fresh.call("lookup", { id, operationId: "unknown" })).toBeNull();
+  expect(await fresh.call("lookup", { id, operationId: unknownOp })).toBeNull();
   expect(runtime.inputs.length).toBe(2);
   runtime.sendOverride = undefined;
   const token = runtime.agents.get(a.id)!.token;
@@ -830,42 +999,47 @@ test("selection returns while native recovery is pending and a newly sent input 
   let view: View | undefined;
   const client = await f.client((v) => (view = v));
   const id = qualify(f.service.identity.id, agent.id);
+  const newOp = await reserve(client, id);
   try {
     await client.call("select", { ids: [id] });
     await until(() => view?.details[id]?.connection?.state === "connecting");
-    const send = client.call("send", { id, text: "new", operationId: "new" });
+    const send = client.call("send", { id, text: "new", operationId: newOp });
     await Bun.sleep(50);
     expect(runtime.inputs).toHaveLength(0);
     expect(view?.details[id]?.state).toBe("idle");
     gate.resolve();
     await send;
     expect(runtime.inputs.map((input) => input.text)).toEqual(["new"]);
-    expect(runtime.inputs[0]?.clientId).toBe("new");
+    expect(runtime.inputs[0]?.clientId).toBe(newOp);
     expect(f.app.detail(agent.id).threadId).toBe(agent.threadId);
   } finally {
     gate.resolve();
   }
 });
 
-test("admission guards reject explicitly while failures after admission stay unknown", async () => {
+test("follow-up guards and failures without a durable barrier remain unknown", async () => {
   const f = fixture("ordered");
   const agent = await f.app.createOrc("alpha");
   const id = qualify(f.service.identity.id, agent.id);
   const client = await f.client();
-  await expect(
-    client.call("enqueueFollowUp", {
+  const foreign = await client
+    .call("enqueueFollowUp", {
       id: "foreign:missing",
       text: "guard",
       operationId: "guard",
-    }),
-  ).rejects.toBeInstanceOf(RequestRejected);
-  await expect(
-    client.call("enqueueFollowUp", {
+    })
+    .catch((error) => error);
+  expect(foreign).toBeInstanceOf(Error);
+  expect(foreign).not.toBeInstanceOf(RequestRejected);
+  const missing = await client
+    .call("enqueueFollowUp", {
       id: qualify(f.service.identity.id, "missing"),
       text: "guard",
       operationId: "missing",
-    }),
-  ).rejects.toBeInstanceOf(RequestRejected);
+    })
+    .catch((error) => error);
+  expect(missing).toBeInstanceOf(Error);
+  expect(missing).not.toBeInstanceOf(RequestRejected);
   let admissions = 0;
   f.app.enqueueFollowUp = async () => {
     admissions++;
@@ -883,40 +1057,44 @@ test("admission guards reject explicitly while failures after admission stay unk
   expect(admissions).toBe(1);
 });
 
-test("image ownership refusal is explicit and the original upload can be retried once", async () => {
+test("image ownership mismatch remains unknown until the original is finalized", async () => {
   const f = fixture("ordered");
   const agent = await f.app.createOrc("alpha");
   const id = qualify(f.service.identity.id, agent.id);
   const client = await f.client();
+  const operationId = await reserve(client, id);
   const png = await sharp({
     create: { width: 4, height: 4, channels: 3, background: "#123456" },
   })
     .png()
     .toBuffer();
-  const images = await f.app.images.upload(agent.id, "image-op", "original", [
+  const images = await f.app.images.upload(agent.id, operationId, "original", [
     new File([png], "owned.png", { type: "image/png" }),
   ]);
-  const send = { id, text: "original", operationId: "image-op", images };
+  const send = { id, text: "original", operationId, images };
   const refusal = await client
     .call("send", { ...send, text: "changed" })
     .catch((e: unknown) => e);
-  expect(refusal).toBeInstanceOf(RequestRejected);
+  expect(refusal).toBeInstanceOf(Error);
+  expect(refusal).not.toBeInstanceOf(RequestRejected);
   expect((refusal as Error).message).toContain("Images do not belong");
   expect(f.runtime.inputs).toHaveLength(0);
-  expect(f.app.lookup(agent.id, "image-op")).toBeNull();
+  expect(f.app.lookup(agent.id, operationId)).toBeNull();
   const followUp = await client
     .call("enqueueFollowUp", { ...send, text: "changed" })
     .catch((e: unknown) => e);
-  expect(followUp).toBeInstanceOf(RequestRejected);
-  expect(f.app.lookupFollowUp(agent.id, "image-op")).toBeNull();
-  const retried = await client.call<Detail>("send", {
-    ...send,
-    retry: { after: "image-op", attempt: "image-retry" },
-  });
-  expect(retried.deliveries.find((d) => d.id === "image-op")?.status).toBe(
-    "sent",
-  );
-  expect(f.runtime.inputs.map((input) => input.clientId)).toEqual(["image-op"]);
+  expect(followUp).toBeInstanceOf(Error);
+  expect(followUp).not.toBeInstanceOf(RequestRejected);
+  expect(f.app.lookupFollowUp(agent.id, operationId)).toBeNull();
+  expect(
+    await client.call("finalizeSubmission", {
+      id,
+      operationId,
+      envelope: { source: "user", text: "original", images },
+    }),
+  ).toMatchObject({ state: "rejected" });
+  await expect(client.call("send", send)).rejects.toThrow("not admitted");
+  expect(f.runtime.inputs).toHaveLength(0);
 });
 
 test("image validation infrastructure errors stay unknown", async () => {
@@ -924,6 +1102,7 @@ test("image validation infrastructure errors stay unknown", async () => {
   const agent = await f.app.createOrc("alpha");
   const id = qualify(f.service.identity.id, agent.id);
   const client = await f.client();
+  const operationId = await reserve(client, id);
   f.app.images.validate = () => {
     throw new Error("Synthetic storage error");
   };
@@ -931,7 +1110,7 @@ test("image validation infrastructure errors stay unknown", async () => {
     .call("send", {
       id,
       text: "test",
-      operationId: "image-error",
+      operationId,
       images: [
         {
           id: "0".repeat(64),
@@ -950,66 +1129,52 @@ test("image validation infrastructure errors stay unknown", async () => {
   expect(f.runtime.inputs).toHaveLength(0);
 });
 
-test("unreadable native history leaves the prior rejection authoritative without retry admission", async () => {
+test("unreadable history leaves the original rejection and does not authorize a retry", async () => {
   const f = fixture("ordered");
   const agent = await f.app.createOrc("alpha");
   const id = qualify(f.service.identity.id, agent.id);
   const client = await f.client();
+  const operationId = await reserve(client, id);
   f.runtime.sendOverride = async () => {
     throw new DeliveryRejected("First rejected");
   };
-  await client.call("send", {
-    id,
-    text: "original",
-    operationId: "history-op",
-  });
-  expect(f.app.lookup(agent.id, "history-op")?.state).toBe("rejected");
+  await client.call("send", { id, text: "original", operationId });
+  expect(f.app.lookup(agent.id, operationId)?.state).toBe("rejected");
   const history = f.runtime.historyMessages.bind(f.runtime);
   f.runtime.historyMessages = async () => {
     throw new Error("History unavailable");
   };
-  const result = await client.call<Detail & { retryNotAdmitted?: string }>(
-    "send",
-    {
-      id,
-      text: "original",
-      operationId: "history-op",
-      retry: { after: "history-op", attempt: "history-retry" },
-    },
-  );
-  expect(result.retryNotAdmitted).toBe("history-retry");
-  expect(result.deliveries.find((d) => d.id === "history-op")).toMatchObject({
-    status: "failed",
-    error: "First rejected",
-  });
-  expect(f.app.lookup(agent.id, "history-op")).toMatchObject({
-    state: "rejected",
-    attemptId: undefined,
-  });
+  const error = await client
+    .call("reserveRetry", { id, operationId })
+    .catch((e) => e);
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(RequestRejected);
+  expect((error as Error).message).toContain("History unavailable");
   expect(f.runtime.inputs.map((input) => input.clientId)).toEqual([
-    "history-op",
+    operationId,
   ]);
   f.runtime.historyMessages = history;
   f.runtime.sendOverride = async () => {
     throw new Error("Synthetic unknown admission");
   };
-  const retried = await client.call<Detail & { retryNotAdmitted?: string }>(
-    "send",
-    {
-      id,
-      text: "original",
-      operationId: "history-op",
-      retry: { after: "history-op", attempt: "later-retry" },
-    },
-  );
-  expect(retried.retryNotAdmitted).toBeUndefined();
-  expect(retried.deliveries.find((d) => d.id === "history-op")).toMatchObject({
-    status: "uncertain",
-    attemptId: "later-retry",
+  const retry = await client.call<{
+    state: "won";
+    operationId: string;
+    claimToken: string;
+  }>("reserveRetry", { id, operationId });
+  expect(retry.state).toBe("won");
+  await client.call("send", {
+    id,
+    text: "original",
+    operationId: retry.operationId,
+    predecessor: { source: "user", text: "original" },
+    claimToken: retry.claimToken,
   });
+  expect(f.app.lookup(agent.id, operationId)?.state).toBe("rejected");
+  expect(f.app.lookup(agent.id, retry.operationId)).toBeNull();
   expect(f.runtime.inputs.map((input) => input.clientId)).toEqual([
-    "history-op",
-    "history-op",
+    operationId,
+    retry.operationId,
   ]);
 });
 
@@ -1018,18 +1183,15 @@ test("native acceptance and failed persistence never become a retry rejection", 
   const agent = await f.app.createOrc("alpha");
   const id = qualify(f.service.identity.id, agent.id);
   const client = await f.client();
+  const operationId = await reserve(client, id);
   f.runtime.sendOverride = async () => {
     throw new DeliveryRejected("First rejected");
   };
-  await client.call("send", {
-    id,
-    text: "original",
-    operationId: "accepted-op",
-  });
+  await client.call("send", { id, text: "original", operationId });
   f.runtime.historyItems.set(agent.threadId!, [
     {
       id: "native-item",
-      clientId: "accepted-op",
+      clientId: operationId,
       role: "user",
       text: "original",
       at: 1,
@@ -1040,21 +1202,16 @@ test("native acceptance and failed persistence never become a retry rejection", 
     throw new Error("Synthetic persistence failure");
   };
   const error = await client
-    .call("send", {
-      id,
-      text: "original",
-      operationId: "accepted-op",
-      retry: { after: "accepted-op", attempt: "blocked-retry" },
-    })
-    .catch((e: unknown) => e);
+    .call("reserveRetry", { id, operationId })
+    .catch((e) => e);
   (f.app as any).save = save;
   expect(error).toBeInstanceOf(Error);
   expect(error).not.toBeInstanceOf(RequestRejected);
   expect((error as Error).message).toContain("Synthetic persistence failure");
   expect(f.runtime.inputs.map((input) => input.clientId)).toEqual([
-    "accepted-op",
+    operationId,
   ]);
-  expect(f.app.lookup(agent.id, "accepted-op")?.state).toBe("accepted");
+  expect(f.app.lookup(agent.id, operationId)?.state).toBe("accepted");
 });
 
 test("native history acceptance prevents retry and remains authoritative", async () => {
@@ -1062,32 +1219,28 @@ test("native history acceptance prevents retry and remains authoritative", async
   const agent = await f.app.createOrc("alpha");
   const id = qualify(f.service.identity.id, agent.id);
   const client = await f.client();
+  const operationId = await reserve(client, id);
   f.runtime.sendOverride = async () => {
     throw new DeliveryRejected("First rejected");
   };
-  await client.call("send", { id, text: "original", operationId: "native-op" });
+  await client.call("send", { id, text: "original", operationId });
   f.runtime.historyItems.set(agent.threadId!, [
     {
       id: "native-item",
-      clientId: "native-op",
+      clientId: operationId,
       role: "user",
       text: "original",
       at: 1,
     },
   ]);
   const error = await client
-    .call("send", {
-      id,
-      text: "original",
-      operationId: "native-op",
-      retry: { after: "native-op", attempt: "not-admitted" },
-    })
-    .catch((e: unknown) => e);
+    .call("reserveRetry", { id, operationId })
+    .catch((e) => e);
   expect(error).toBeInstanceOf(Error);
   expect(error).not.toBeInstanceOf(RequestRejected);
-  expect(f.app.lookup(agent.id, "native-op")?.state).toBe("accepted");
+  expect(f.app.lookup(agent.id, operationId)?.state).toBe("accepted");
   expect(f.runtime.inputs.map((input) => input.clientId)).toEqual([
-    "native-op",
+    operationId,
   ]);
 });
 
@@ -1096,10 +1249,11 @@ test("native acceptance observed during a retry history read prevents another ad
   const agent = await f.app.createOrc("alpha");
   const id = qualify(f.service.identity.id, agent.id);
   const client = await f.client();
+  const operationId = await reserve(client, id);
   f.runtime.sendOverride = async () => {
     throw new DeliveryRejected("First rejected");
   };
-  await client.call("send", { id, text: "original", operationId: "race-op" });
+  await client.call("send", { id, text: "original", operationId });
   const entered = Promise.withResolvers<void>();
   const history = Promise.withResolvers<{
     messages: never[];
@@ -1109,12 +1263,9 @@ test("native acceptance observed during a retry history read prevents another ad
     entered.resolve();
     return history.promise;
   };
-  const retry = client.call<Detail & { retryNotAdmitted?: string }>("send", {
-    id,
-    text: "original",
-    operationId: "race-op",
-    retry: { after: "race-op", attempt: "race-retry" },
-  });
+  const retry = client
+    .call("reserveRetry", { id, operationId })
+    .catch((e) => e);
   try {
     await entered.promise;
     f.runtime.emit(agent.id, {
@@ -1123,17 +1274,17 @@ test("native acceptance observed during a retry history read prevents another ad
       item: {
         type: "userMessage",
         id: "native-race",
-        clientId: "race-op",
+        clientId: operationId,
         text: "original",
       },
     });
     history.resolve({ messages: [], nextCursor: null });
-    const result = await retry;
-    expect(result.retryNotAdmitted).toBe("race-retry");
-    expect(result.messages.some((m) => m.clientId === "race-op")).toBe(true);
-    expect(f.app.lookup(agent.id, "race-op")?.state).toBe("accepted");
+    const error = await retry;
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(RequestRejected);
+    expect(f.app.lookup(agent.id, operationId)?.state).toBe("accepted");
     expect(f.runtime.inputs.map((input) => input.clientId)).toEqual([
-      "race-op",
+      operationId,
     ]);
   } finally {
     history.resolve({ messages: [], nextCursor: null });
@@ -1163,11 +1314,12 @@ test("disconnect releases observation while an admitted send completes once", as
   );
   try {
     expect(observers).toBe(1);
+    const disconnectOp = await reserve(client, id);
     const pending = client
       .call("send", {
         id,
         text: "once across disconnect",
-        operationId: "disconnect-once",
+        operationId: disconnectOp,
       })
       .catch((error: unknown) => error);
     await until(() => f.runtime.inputs.length === 1);
@@ -1182,7 +1334,7 @@ test("disconnect releases observation while an admitted send completes once", as
     const fresh = await f.client();
     const receipt = await fresh.call<Receipt>("lookup", {
       id,
-      operationId: "disconnect-once",
+      operationId: disconnectOp,
     });
     expect(receipt.state).toBe("accepted");
     expect(f.runtime.inputs).toHaveLength(1);
@@ -1190,4 +1342,162 @@ test("disconnect releases observation while an admitted send completes once", as
     gate.resolve("disconnect-turn");
     client.close();
   }
+});
+
+test("#5335 timed out native input completes once and remains queryable by original ID", async () => {
+  const f = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  const client = await f.client(
+    () => {},
+    () => {},
+    100,
+  );
+  const { operationId } = await client.call<{ operationId: string }>(
+    "reserveSubmission",
+    { id },
+  );
+  const gate = Promise.withResolvers<string>();
+  f.runtime.sendOverride = () => gate.promise;
+  try {
+    const submitted = client
+      .call("send", { id, operationId, text: "once" })
+      .catch((error) => error);
+    await until(() => f.runtime.inputs.length === 1);
+    expect(await submitted).toBeInstanceOf(RequestTimeout);
+    expect(await client.call("lookup", { id, operationId })).toBeNull();
+    gate.resolve("native-turn");
+    await until(
+      () => f.app.lookup(agent.id, operationId)?.state === "accepted",
+    );
+    expect(await client.call("lookup", { id, operationId })).toMatchObject({
+      state: "accepted",
+      operationId,
+    });
+    await client.call("send", { id, operationId, text: "once" });
+    expect(
+      f.runtime.inputs.filter((input) => input.clientId === operationId),
+    ).toHaveLength(1);
+    expect(await client.call("select", { ids: [] })).toBeNull();
+  } finally {
+    gate.resolve("native-turn");
+  }
+});
+
+test("#5335 follow-up full barrier defeats a late same-ID call after room and restart", async () => {
+  const f = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  await f.app.send(agent.id, "start", "fixture-start");
+  for (let i = 0; i < 50; i++)
+    await f.app.enqueueFollowUp(agent.id, `queued ${i}`, `queued-${i}`);
+  const id = qualify(f.service.identity.id, agent.id);
+  const first = await f.client();
+  const second = await f.client();
+  const gate = Promise.withResolvers<void>();
+  const enqueue = f.app.enqueueFollowUp.bind(f.app);
+  let held = false;
+  f.app.enqueueFollowUp = async (...args) => {
+    if (args[2] === "same-id" && !held) {
+      held = true;
+      await gate.promise;
+    }
+    return enqueue(...args);
+  };
+  try {
+    const late = first
+      .call("enqueueFollowUp", { id, operationId: "same-id", text: "once" })
+      .catch((error) => error);
+    await until(() => held);
+    const rejected = await second
+      .call("enqueueFollowUp", { id, operationId: "same-id", text: "once" })
+      .catch((error) => error);
+    expect(rejected).toBeInstanceOf(RequestRejected);
+    expect((rejected as Error).message).toContain("queue is full");
+    await second.call("cancelFollowUp", { id, operationId: "queued-0" });
+    gate.resolve();
+    expect(await late).toBeInstanceOf(RequestRejected);
+    expect(
+      f.runtime.inputs.filter((input) => input.clientId === "same-id"),
+    ).toHaveLength(0);
+    f.restart();
+    const reconnected = await f.client();
+    expect(
+      await reconnected.call("lookupFollowUp", { id, operationId: "same-id" }),
+    ).toMatchObject({ status: "cancelled", error: "Follow-up queue is full" });
+    await expect(
+      reconnected.call("enqueueFollowUp", {
+        id,
+        operationId: "same-id",
+        text: "once",
+      }),
+    ).rejects.toBeInstanceOf(RequestRejected);
+    expect(f.app.lookupFollowUp(agent.id, "same-id")?.status).toBe("cancelled");
+  } finally {
+    gate.resolve();
+  }
+});
+
+test("#5335 follow-up barrier storage failure remains unknown", async () => {
+  const f = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  await f.app.send(agent.id, "start", "fixture-start");
+  for (let i = 0; i < 50; i++)
+    await f.app.enqueueFollowUp(agent.id, `queued ${i}`, `queued-${i}`);
+  const id = qualify(f.service.identity.id, agent.id);
+  const client = await f.client();
+  f.app.store.sqlite.exec(
+    "CREATE TRIGGER fail_rejection BEFORE INSERT ON deliveries WHEN NEW.operation_id='storage-failure' BEGIN SELECT RAISE(ABORT, 'fixture storage failure'); END",
+  );
+  const error = await client
+    .call("enqueueFollowUp", {
+      id,
+      operationId: "storage-failure",
+      text: "once",
+    })
+    .catch((value) => value);
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(RequestRejected);
+  expect(
+    f.runtime.inputs.filter((input) => input.clientId === "storage-failure"),
+  ).toHaveLength(0);
+});
+
+test("reservation and retry relations cannot cross the owning Peer", async () => {
+  const left = fixture("ordered"),
+    right = fixture("ordered");
+  const agent = await left.app.createOrc("alpha");
+  const agentId = qualify(left.service.identity.id, agent.id);
+  const rc = await right.client();
+  const { operationId } = await left.service.reserveSubmission(agentId);
+  const envelope = { source: "user" as const, text: "peer-bound" };
+  expect(
+    await left.service.finalizeSubmission(agentId, operationId, envelope),
+  ).toMatchObject({ state: "rejected" });
+  for (const [member, input] of [
+    ["reserveRetry", { id: agentId, operationId }],
+    ["inspectRetry", { id: agentId, operationId, envelope }],
+    ["finalizeSubmission", { id: agentId, operationId, envelope }],
+    ["send", { id: agentId, operationId, text: envelope.text }],
+  ] as const)
+    await expect(rc.call(member, input)).rejects.toThrow("another Peer");
+  const current = await left.service.reserveSubmission(agentId);
+  const lc = await left.client();
+  await lc.call("send", {
+    id: agentId,
+    operationId: current.operationId,
+    text: "once",
+  });
+  await lc.call("send", {
+    id: agentId,
+    operationId: current.operationId,
+    text: "once",
+  });
+  expect(
+    await lc.call("lookup", { id: agentId, operationId: current.operationId }),
+  ).toMatchObject({ state: "accepted" });
+  expect(left.runtime.inputs.map((input) => input.clientId)).toEqual([
+    current.operationId,
+  ]);
+  expect(right.runtime.inputs).toHaveLength(0);
+  expect(await left.service.lookup(agentId, operationId)).toBeNull();
 });

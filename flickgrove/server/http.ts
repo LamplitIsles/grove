@@ -116,7 +116,7 @@ export function createHandler(workspace: Workspace, options: Options) {
     if (file) return file;
     const reading = await readingHttp(request, options.service, origins);
     if (reading) return reading;
-    const media = await imageHttp(request, options.service, origins);
+    const media = await imageHttp(request, options.service, origins, human);
     if (media) return media;
     if (
       !origins.some((value) => url.host === new URL(value).host) ||

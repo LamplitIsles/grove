@@ -143,7 +143,11 @@ export async function openGrove(
           throw new Error("Connection offline. Outcome unknown.");
         if (pending >= 256) throw new Error("Too many pending requests");
         const parsed = jsonValue(inputs[member].parse(input));
-        const operation = service.execute({ member, input: parsed });
+        const controller = new AbortController();
+        const operation = host.root(
+          (ctx) => service.execute({ member, input: parsed }, ctx),
+          { signal: controller.signal },
+        );
         pending++;
         void operation.then(
           () => pending--,
@@ -153,6 +157,7 @@ export async function openGrove(
           (resolve, reject) => {
             const timer = setTimeout(() => {
               reject(new RequestTimeout(member));
+              controller.abort();
               timedOut(member);
             }, timeoutMs);
             operation.then(

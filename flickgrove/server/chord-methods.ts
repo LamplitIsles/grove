@@ -62,8 +62,29 @@ export async function invoke(
         p.text,
         p.operationId,
         p.images,
-        p.retry,
         authorUserId,
+        p.predecessor,
+        p.claimToken,
+      );
+    }
+    case "reserveSubmission":
+      return await app.reserveSubmission(parse(member).id, authorUserId);
+    case "reserveRetry": {
+      const p = parse(member);
+      return await app.reserveRetry(p.id, p.operationId, authorUserId);
+    }
+    case "inspectRetry": {
+      const p = parse(member);
+      return app.inspectRetry(p.id, p.operationId, p.envelope, authorUserId);
+    }
+    case "finalizeSubmission": {
+      const p = parse(member);
+      return await app.finalizeSubmission(
+        p.id,
+        p.operationId,
+        p.envelope,
+        authorUserId,
+        p.predecessor,
       );
     }
     case "enqueueFollowUp": {
@@ -100,7 +121,11 @@ export async function invoke(
     }
     case "deleteFailedSubmission": {
       const p = parse(member);
-      return await app.deleteFailedSubmission(p.id, p.operationId);
+      return await app.deleteFailedSubmission(
+        p.id,
+        p.operationId,
+        authorUserId,
+      );
     }
     case "answerBatch": {
       const p = parse(member);
@@ -109,6 +134,8 @@ export async function invoke(
         p.answers,
         p.operationId,
         authorUserId,
+        p.predecessor,
+        p.claimToken,
       );
     }
     case "stop": {

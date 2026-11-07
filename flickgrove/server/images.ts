@@ -221,6 +221,49 @@ export class ImageStore {
       );
     return upload;
   }
+  validateRetry(
+    agent: string,
+    retryId: string,
+    text: string,
+    original: MessageImage[],
+    retry: MessageImage[],
+  ) {
+    // A rejected retry can be finalized with its predecessor's references;
+    // those references remain bound by the persisted envelope hash.
+    const before = this.uploads.find(
+      (u) =>
+        u.agent === agent &&
+        u.text === text &&
+        JSON.stringify(u.images) === JSON.stringify(original),
+    );
+    if (!before)
+      throw new Error(
+        "Original image evidence is unavailable; keep the failed message and its original files",
+      );
+    const after = this.validate(agent, retryId, text, retry);
+    if (
+      original.length !== retry.length ||
+      before.fingerprints.length !== after.fingerprints.length
+    )
+      throw new Error("Retry images do not match the original submission");
+    for (let i = 0; i < original.length; i++) {
+      if (original[i].name !== retry[i].name)
+        throw new Error("Retry images do not match the original submission");
+      if (before.fingerprints[i] === after.fingerprints[i]) continue;
+      // A different device may recover the saved full image, which can be a
+      // lossless WebP rather than the originally uploaded byte sequence.
+      const path = join(this.directory, imageSchema.parse(original[i]).id);
+      if (
+        !existsSync(path) ||
+        hash(
+          Buffer.concat([Buffer.from(original[i].name), readFileSync(path)]),
+        ) !== after.fingerprints[i]
+      )
+        throw new Error(
+          "Cannot verify original retry images; restore the original files and try again",
+        );
+    }
+  }
   commit(
     agent: string,
     operation: string,

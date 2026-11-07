@@ -141,10 +141,14 @@ test("execution Peer branch updates traverse real Chord, isolate same-name peers
   const reads = left.reads.get(left.repo)!;
   await until(() => left.reads.get(left.repo)! > reads);
   expect(l!.details[aid].directoryBranch).toBe("left-only");
+  const { operationId } = await lc.call<{ operationId: string }>(
+    "reserveSubmission",
+    { id: aid },
+  );
   await lc.call("send", {
     id: aid,
     text: "business still available",
-    operationId: "send-once",
+    operationId,
   });
   expect(
     left.runtime.inputs.filter((i) => i.text === "business still available"),

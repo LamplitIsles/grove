@@ -91,7 +91,15 @@ test("isolated native notifications through Workspace and real Chord preserve re
       () => {},
     );
     await client.call("select", { ids: [id] });
-    await client.call("send", { id, text: "begin", operationId: "first" });
+    const first = await client.call<{ operationId: string }>(
+      "reserveSubmission",
+      { id },
+    );
+    await client.call("send", {
+      id,
+      text: "begin",
+      operationId: first.operationId,
+    });
     await app.send(b.id, "other agent", "other");
     const detail = () => view?.details[id];
     const current = app.detail(a.id),
@@ -121,10 +129,14 @@ test("isolated native notifications through Workspace and real Chord preserve re
     });
     await Bun.sleep(40);
     expect(app.detail(a.id).execution?.retrying).toBe(true);
+    const steer = await client.call<{ operationId: string }>(
+      "reserveSubmission",
+      { id },
+    );
     await client.call("send", {
       id,
       text: "steer while retrying",
-      operationId: "steer",
+      operationId: steer.operationId,
     });
     expect(app.detail(a.id).execution?.retrying).toBe(true);
     await inject("error", {

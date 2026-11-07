@@ -184,3 +184,63 @@ test("Chord client closes an oversized inbound frame", async () => {
   }
   expect(offline).toBe(1);
 });
+
+test("timed out calls release client capacity without replaying entered work", async () => {
+  const browser = new Socket();
+  const server = new Socket();
+  browser.peer = server;
+  server.peer = browser;
+  const host = createHost({ name: "server", self: "server" });
+  const gate = Promise.withResolvers<void>();
+  let entered = 0;
+  let finished = 0;
+  host.serve(Grove, (_input, _principal, self) => ({
+    variant: "default" as const,
+    view: self.state(
+      "view",
+      {},
+      {
+        snapshot: { revision: 1, settings: null, agents: [] },
+        details: {},
+      },
+    ),
+    async execute({ member }) {
+      if (member === "environments") {
+        entered++;
+        await gate.promise;
+        finished++;
+      }
+      return { ok: true, value: null };
+    },
+  }));
+  host.accept(webSocketLink(server as unknown as WebSocketLike), {
+    principal: "browser",
+    kind: "client",
+  });
+  const client = await openGrove(
+    browser as unknown as WebSocket,
+    () => {},
+    () => {},
+    100,
+  );
+  try {
+    const calls = Array.from({ length: 256 }, () =>
+      client.call("environments", {}).catch((error) => error),
+    );
+    const results = await Promise.all(calls);
+    expect(results.every((result) => result instanceof RequestTimeout)).toBe(
+      true,
+    );
+    expect(entered).toBe(256);
+    expect(finished).toBe(0);
+    expect(await client.call("select", { ids: [] })).toBeNull();
+    gate.resolve();
+    while (finished < 256) await Bun.sleep(1);
+    expect(entered).toBe(256);
+    expect(await client.call("select", { ids: [] })).toBeNull();
+  } finally {
+    gate.resolve();
+    client.close();
+    await host.close();
+  }
+});

@@ -657,20 +657,93 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
       ).status,
     ).toBe(401);
     const id = `${service.identity.id}:${orc.id}`;
+    const [{ operationId: aliceOp }, { operationId: bobOp }] =
+      await Promise.all([
+        aliceClient.call<{ operationId: string }>("reserveSubmission", { id }),
+        bobClient.call<{ operationId: string }>("reserveSubmission", { id }),
+      ]);
+    const { operationId: originalOp } = await aliceClient.call<{
+      operationId: string;
+    }>("reserveSubmission", { id });
+    const envelope = { source: "user", text: "private retry" };
+    expect(
+      await aliceClient.call("finalizeSubmission", {
+        id,
+        operationId: originalOp,
+        envelope,
+      }),
+    ).toMatchObject({ state: "rejected" });
+    const retry = await aliceClient.call<{
+      state: "won";
+      operationId: string;
+      claimToken: string;
+    }>("reserveRetry", { id, operationId: originalOp });
+    expect(retry.state).toBe("won");
+    expect(
+      await bobClient.call("inspectRetry", {
+        id,
+        operationId: originalOp,
+        envelope,
+      }),
+    ).toBeNull();
+    await expect(
+      bobClient.call("reserveRetry", { id, operationId: originalOp }),
+    ).rejects.toThrow("another user");
+    await expect(
+      bobClient.call("send", {
+        id,
+        operationId: retry.operationId,
+        text: envelope.text,
+        predecessor: envelope,
+        claimToken: retry.claimToken,
+      }),
+    ).rejects.toThrow("another user");
+    expect(
+      await aliceClient.call("inspectRetry", {
+        id,
+        operationId: originalOp,
+        envelope,
+      }),
+    ).toMatchObject({
+      operationId: originalOp,
+      supersededBy: retry.operationId,
+    });
+    expect(
+      await aliceClient.call("finalizeSubmission", {
+        id,
+        operationId: retry.operationId,
+        envelope,
+        predecessor: envelope,
+      }),
+    ).toMatchObject({ state: "rejected" });
+    await expect(
+      bobClient.call("finalizeSubmission", {
+        id,
+        operationId: aliceOp,
+        envelope: { source: "user", text: "Alice speaks" },
+      }),
+    ).rejects.toThrow("another user");
+    await expect(
+      bobClient.call("send", {
+        id,
+        operationId: aliceOp,
+        text: "Alice speaks",
+      }),
+    ).rejects.toThrow("another user");
     await Promise.all([
       aliceClient.call("send", {
         id,
         text: "Alice speaks",
-        operationId: "alice-op",
+        operationId: aliceOp,
       }),
-      bobClient.call("send", { id, text: "Bob speaks", operationId: "bob-op" }),
+      bobClient.call("send", { id, text: "Bob speaks", operationId: bobOp }),
     ]);
     expect(
-      app.detail(orc.id).messages.find((m) => m.clientId === "alice-op")?.author
+      app.detail(orc.id).messages.find((m) => m.clientId === aliceOp)?.author
         ?.name,
     ).toBe("Alice");
     expect(
-      app.detail(orc.id).messages.find((m) => m.clientId === "bob-op")?.author
+      app.detail(orc.id).messages.find((m) => m.clientId === bobOp)?.author
         ?.name,
     ).toBe("Bob");
     expect((await call("/api/auth/sign-out", {}, [session])).status).toBe(200);
@@ -825,6 +898,9 @@ test("authenticated connections receive the registered user list after registrat
     const selectedColor = statusBody.colors[1]!;
     const orc = await app.createOrc("alpha");
     const id = `${service.identity.id}:${orc.id}`;
+    const { operationId: profileOp } = await first.client.call<{
+      operationId: string;
+    }>("reserveSubmission", { id });
     await Promise.all([
       first.client.call("select", { ids: [id] }),
       secondDevice.client.call("select", { ids: [id] }),
@@ -833,12 +909,12 @@ test("authenticated connections receive the registered user list after registrat
     await first.client.call("send", {
       id,
       text: "old message",
-      operationId: "profile-message",
+      operationId: profileOp,
     });
     await waitFor(
       () =>
         first.view?.details[id]?.messages.some(
-          (m) => m.clientId === "profile-message",
+          (m) => m.clientId === profileOp,
         ) === true,
     );
     for (const body of [
@@ -885,7 +961,7 @@ test("authenticated connections receive the registered user list after registrat
         const detail = c.view?.details[id];
         return (
           c.users?.find((u) => u.id === user.id)?.name === "Alicia" &&
-          detail?.messages.find((m) => m.clientId === "profile-message")?.author
+          detail?.messages.find((m) => m.clientId === profileOp)?.author
             ?.name === "Alicia" &&
           c.view?.snapshot.agents
             .find((a) => a.id === id)
@@ -899,18 +975,16 @@ test("authenticated connections receive the registered user list after registrat
       }),
     );
     expect(
-      first.view?.details[id]?.messages.find(
-        (m) => m.clientId === "profile-message",
-      )?.author,
+      first.view?.details[id]?.messages.find((m) => m.clientId === profileOp)
+        ?.author,
     ).toEqual(user);
     expect(
-      first.view?.details[id]?.deliveries.find(
-        (d) => d.id === "profile-message",
-      )?.author,
+      first.view?.details[id]?.deliveries.find((d) => d.id === profileOp)
+        ?.author,
     ).toEqual(user);
     expect(
       (await service.agentHistory(id)).messages.find(
-        (m) => m.clientId === "profile-message",
+        (m) => m.clientId === profileOp,
       )?.author,
     ).toEqual(user);
     expect((await auth.session(new Headers({ cookie: bob })))?.user.name).toBe(
@@ -952,9 +1026,8 @@ test("authenticated connections receive the registered user list after registrat
       ).toEqual(user);
       await restarted.synchronizeDetail(orc.id);
       expect(
-        restarted
-          .detail(orc.id)
-          .messages.find((m) => m.clientId === "profile-message")?.author,
+        restarted.detail(orc.id).messages.find((m) => m.clientId === profileOp)
+          ?.author,
       ).toEqual(user);
     } finally {
       restartedAuth.close();

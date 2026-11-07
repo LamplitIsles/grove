@@ -313,5 +313,13 @@
   "recent_activity": "Recent activity",
   "activity_window": "Activity window",
   "key_visible_number": "Open visible session 1–9 (recent activity first)",
-  "key_visible_cycle": "Next / previous visible session, wrapping"
+  "key_visible_cycle": "Next / previous visible session, wrapping",
+  "pending_answer_unconfirmed": "An earlier answer may have been received. Wait for confirmation before sending.",
+  "pending_remove": "Remove pending message",
+  "pending_remove_warning": "This message may already have been received. Removing it only clears this device; it does not cancel or resend it.",
+  "pending_original_text": "Original message",
+  "pending_copy": "Copy text",
+  "pending_copied": "Copied",
+  "pending_copy_failed": "Select the text to copy it.",
+  "pending_remove_confirm": "Remove from this device"
 }

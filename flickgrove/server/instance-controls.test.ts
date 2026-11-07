@@ -1321,13 +1321,7 @@ test("a pending same-turn steer can remain idle after its verified terminal", as
       entered.resolve();
       return response.promise;
     };
-    pending = app.send(
-      owner.id,
-      "pending steer",
-      "steer-operation",
-      undefined,
-      { after: "steer-operation", attempt: "steer-attempt" },
-    );
+    pending = app.send(owner.id, "pending steer", "steer-operation");
     await entered.promise;
     runtime.emit(owner.id, {
       type: "completed",
@@ -1344,7 +1338,7 @@ test("a pending same-turn steer can remain idle after its verified terminal", as
       app.store
         .byId(owner.id)!
         .deliveries.find((d) => d.id === "steer-operation")?.steerEvidence,
-    ).toEqual({ attemptId: "steer-attempt", turnId, terminalObserved: true });
+    ).toEqual({ attemptId: "steer-operation", turnId, terminalObserved: true });
     expect(app.lookup(owner.id, "steer-operation")).toBeNull();
     await expect(app.closeTree(owner.id)).rejects.toThrow();
     response.reject(new Error("steer response lost"));
@@ -1496,10 +1490,7 @@ test("stored evidence for a different attempt cannot prove an uncertain steer st
     runtime.sendOverride = async () => {
       throw new Error("steer response lost");
     };
-    await app.send(owner.id, "steer", "second", undefined, {
-      after: "second",
-      attempt: "attempt-one",
-    });
+    await app.send(owner.id, "steer", "second");
     runtime.emit(owner.id, {
       type: "completed",
       turnId,
@@ -1509,7 +1500,7 @@ test("stored evidence for a different attempt cannot prove an uncertain steer st
     expect(
       app.store.byId(owner.id)!.deliveries.find((d) => d.id === "second")
         ?.steerEvidence,
-    ).toEqual({ attemptId: "attempt-one", turnId, terminalObserved: true });
+    ).toEqual({ attemptId: "second", turnId, terminalObserved: true });
     app.dispose();
     const db = new Database(join(directory, "workspace.sqlite"));
     db.query(

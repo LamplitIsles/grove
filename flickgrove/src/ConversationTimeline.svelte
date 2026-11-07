@@ -3,13 +3,13 @@
   import { onMount, tick, untrack, type Snippet } from "svelte";
   import { LoaderCircle } from "@lucide/svelte";
   import { Button } from "$lib/components/ui/button/index.js";
-  import type { HistoryMessages, Message, MessageWindow } from "./contracts";
+  import type { Delivery, HistoryMessages, Message, MessageWindow } from "./contracts";
   import { reading, readingCache } from "./api";
   import { historyCache, type LoadedHistory } from "./history-cache";
   import { transcriptPositions, saveTranscriptPosition } from "./transcript-state";
   import * as m from "./paraglide/messages";
-  let { syncRevision = 0, agentId, boundary, live, ready, connected, detailError = "", renderMessage, header, footer, onfollow, onanchor = () => {}, reports, pinned }: {
-    agentId: string; boundary?: string; syncRevision?: number; live: Message[]; ready: boolean; connected: boolean; detailError?: string;
+  let { syncRevision = 0, agentId, boundary, live, deliveries, ready, connected, detailError = "", renderMessage, header, footer, onfollow, onanchor = () => {}, reports, pinned }: {
+    agentId: string; boundary?: string; syncRevision?: number; live: Message[]; deliveries: Delivery[]; ready: boolean; connected: boolean; detailError?: string;
     renderMessage: Snippet<[Message]>; header: Snippet; footer: Snippet<[boolean]>; onfollow: (follow: boolean) => void; onanchor?: (operation:string) => void; reports: Set<string>; pinned?: string;
   } = $props();
   const id = untrack(() => agentId);
@@ -102,7 +102,25 @@
     const prefix = overlap > 0 ? retained.slice(0, overlap) : [];
     const rows = windowState && !windowState.joined ? historical : [...prefix, ...historical, ...retained, ...live];
     const clients = new Set(rows.filter(m => !m.provisional && m.clientId).map(m => m.clientId));
-    return [...new Map(rows.filter(m => (!m.provisional || !clients.has(m.clientId)) && (readingSettled || !m.provisional || !m.delivery?.recoveryRef || m.delivery.status === "sent")).map(m => [m.id, m])).values()];
+    const visible = [...new Map(rows.filter(m => (!m.provisional || !clients.has(m.clientId)) && (readingSettled || !m.provisional || !m.delivery?.recoveryRef || m.delivery.status === "sent")).map(m => [m.id, m])).values()];
+    const confirmed = new Set(visible.filter(m => m.role === "user" && !m.provisional && m.clientId).map(m => m.clientId));
+    const byId = new Map(deliveries.map(d => [d.id, d]));
+    const visibleIds = new Set(visible.map(m => m.clientId ?? m.id));
+    function hasConfirmedSuccessor(delivery: Delivery) {
+      const seen = new Set([delivery.id]);
+      let next = delivery.supersededBy;
+      while (next && !seen.has(next)) {
+        if (confirmed.has(next)) return true;
+        seen.add(next);
+        const successor = visibleIds.has(next) ? byId.get(next) : undefined;
+        next = successor?.source === "user" && successor.status === "failed" ? successor.supersededBy : undefined;
+      }
+      return false;
+    }
+    return visible.filter(m => {
+      const delivery = byId.get(m.clientId ?? m.id) ?? m.delivery;
+      return !(m.provisional && delivery?.source === "user" && delivery.status === "failed" && hasConfirmedSuccessor(delivery));
+    });
   });
   let transcript = $state<HTMLDivElement>();
   let tail: HTMLDivElement;

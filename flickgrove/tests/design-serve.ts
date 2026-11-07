@@ -24,11 +24,7 @@ import { WorkspaceStore } from "../server/workspace-store";
 import { HostService } from "../server/hosts";
 import { createHandler, createUpgrade } from "../server/http";
 import { groveWebsocket, type SocketData } from "../server/chord-socket";
-import {
-  type RuntimeEvent,
-  DeliveryRejected,
-  RequestRefused,
-} from "../server/runtime";
+import { type RuntimeEvent, DeliveryRejected } from "../server/runtime";
 import { voiceHttp } from "../server/voice-http";
 import { fakeVoiceProvider } from "./voice-fixture";
 import { FakeRuntime } from "../server/testing";
@@ -289,7 +285,16 @@ function unit(
       await gate.promise;
       queueRejection = undefined;
       queueRejectionWaiting = false;
-      throw new RequestRefused("Queue rejected");
+      // Exercise the actual durable queue-full rejection, not a synthetic
+      // transport error that cannot establish this operation's outcome.
+      for (let i = 0; i < 50; i++)
+        await enqueue(
+          args[0],
+          `Occupied ${i}`,
+          crypto.randomUUID(),
+          undefined,
+          args[4],
+        );
     }
     const result = await enqueue(...args);
     if (queueAck) {

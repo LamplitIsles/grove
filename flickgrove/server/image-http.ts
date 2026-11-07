@@ -5,6 +5,7 @@ export async function imageHttp(
   request: Request,
   service: HostService,
   origins: string[],
+  human?: import("./auth").HumanSession | null,
 ): Promise<Response | undefined> {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/api/images")) return;
@@ -60,6 +61,7 @@ export async function imageHttp(
         operation,
         text,
         files as File[],
+        human?.user.id,
       );
       return respond({ agent, operation, images });
     }

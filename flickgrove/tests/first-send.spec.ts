@@ -54,7 +54,7 @@ test("new session opened before connection adopts the loaded model defaults", as
 for (const width of [1440, 390]) {
   test(`fresh empty restart rejects before native send with original identity at ${width}`, async ({
     page,
-  }) => {
+  }, testInfo) => {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
     const calls: Array<{
       member: string;
@@ -168,7 +168,7 @@ for (const width of [1440, 390]) {
       page.getByRole("button", { name: "Send message", exact: true }),
     ).toBeEnabled();
     await page.screenshot({
-      path: `../.scratch/send-freeze-after-questions-card/rejected-${width}.png`,
+      path: testInfo.outputPath(`rejected-${width}.png`),
       animations: "disabled",
     });
     await message.getByRole("button", { name: "Retry", exact: true }).click();

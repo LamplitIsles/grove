@@ -48,8 +48,8 @@ test("human metadata uses the persisted submission time and current authenticate
     "#654321",
   );
   const a = await app.createOrc("alpha");
-  await app.send(a.id, "same", "a", undefined, undefined, "alice");
-  await app.send(a.id, "same", "b", undefined, undefined, "bob");
+  await app.send(a.id, "same", "a", undefined, "alice");
+  await app.send(a.id, "same", "b", undefined, "bob");
   const [alice, bob] = runtime.inputs;
   const delivery = app.detail(a.id).deliveries.find((d) => d.id === "b")!;
   expect(alice!.humanContext).toContain('"name":"Alice"');
@@ -133,42 +133,57 @@ test("human metadata survives rejected retry and unknown admission while Worker 
   runtime.sendOverride = async () => {
     throw new DeliveryRejected("Rejected");
   };
-  await app.send(orc.id, "Retry me", "rejected", undefined, undefined, "alice");
-  const rejectedAt = app
-    .detail(orc.id)
-    .deliveries.find((d) => d.id === "rejected")!.at;
-  expect(app.lookup(orc.id, "rejected")?.state).toBe("rejected");
-  runtime.sendOverride = undefined;
+  const original = await app.reserveSubmission(orc.id, "alice");
+  const envelope = { source: "user" as const, text: "Retry me" };
   await app.send(
     orc.id,
-    "Retry me",
-    "rejected",
+    envelope.text,
+    original.operationId,
     undefined,
-    { after: "rejected", attempt: "retry" },
     "alice",
+    true,
   );
+  const rejectedAt = app
+    .detail(orc.id)
+    .deliveries.find((d) => d.id === original.operationId)!.at;
+  expect(app.lookup(orc.id, original.operationId)?.state).toBe("rejected");
+  runtime.sendOverride = undefined;
+  const retry = await app.reserveRetry(orc.id, original.operationId, "alice");
+  expect(retry.state).toBe("won");
+  if (retry.state !== "won") throw new Error("Expected retry winner");
+  expect(retry.operationId).not.toBe(original.operationId);
+  await app.send(
+    orc.id,
+    envelope.text,
+    retry.operationId,
+    undefined,
+    "alice",
+    true,
+    envelope,
+    retry.claimToken,
+  );
+  const retryAt = app.store
+    .byId(orc.id)!
+    .deliveries.find((d) => d.id === retry.operationId)!.at;
   const attempts = runtime.inputs.filter(
-    (input) => input.clientId === "rejected",
+    (input) =>
+      input.clientId === original.operationId ||
+      input.clientId === retry.operationId,
   );
   expect(attempts).toHaveLength(2);
   expect(attempts[0]!.humanContext).toContain('"name":"Alice"');
   expect(attempts[0]!.humanContext).toContain(
     new Date(rejectedAt).toISOString(),
   );
-  expect(attempts[1]!.humanContext).toBe(attempts[0]!.humanContext);
-  expect(app.lookup(orc.id, "rejected")?.state).toBe("accepted");
+  expect(attempts[1]!.humanContext).toContain('"name":"Alice"');
+  expect(attempts[1]!.humanContext).toContain(new Date(retryAt).toISOString());
+  expect(app.lookup(orc.id, original.operationId)?.state).toBe("rejected");
+  expect(app.lookup(orc.id, retry.operationId)?.state).toBe("accepted");
 
   runtime.sendOverride = async () => {
     throw new Error("Unknown admission");
   };
-  await app.send(
-    orc.id,
-    "Unconfirmed",
-    "unknown",
-    undefined,
-    undefined,
-    "alice",
-  );
+  await app.send(orc.id, "Unconfirmed", "unknown", undefined, "alice");
   const unknownAt = app
     .detail(orc.id)
     .deliveries.find((d) => d.id === "unknown")!.at;
@@ -181,24 +196,10 @@ test("human metadata survives rejected retry and unknown admission while Worker 
     new Date(unknownAt).toISOString(),
   );
   expect(app.lookup(orc.id, "unknown")).toBeNull();
-  await app.send(
-    orc.id,
-    "Unconfirmed",
-    "unknown",
-    undefined,
-    undefined,
-    "alice",
+  await app.send(orc.id, "Unconfirmed", "unknown", undefined, "alice");
+  await expect(app.reserveRetry(orc.id, "unknown", "alice")).rejects.toThrow(
+    "Only a rejected submission",
   );
-  await expect(
-    app.send(
-      orc.id,
-      "Unconfirmed",
-      "unknown",
-      undefined,
-      { after: "unknown", attempt: "unsafe" },
-      "alice",
-    ),
-  ).rejects.toThrow("Only a rejected");
   expect(
     runtime.inputs.filter((input) => input.clientId === "unknown"),
   ).toHaveLength(1);
@@ -483,7 +484,7 @@ test("a rejected question answer can retry and does not clear other unanswered q
   await app.answerBatch(
     a.id,
     [{ questionId: "ask:0", answer: "Yes" }],
-    "answer-yes",
+    "answer-retry",
   );
   expect(app.detail(a.id).questions.map((q) => q.state)).toEqual([
     "answered",
@@ -1675,7 +1676,10 @@ test("rejected batch retries its persisted answers; unknown batch lookup and dup
       .questions.every((q) => q.state === "unanswered" && !q.answer),
   ).toBe(true);
   runtime.sendOverride = undefined;
-  await app.retryDelivery(a.id, "rejected-batch");
+  expect(() => app.retryDelivery(a.id, "rejected-batch")).toThrow(
+    "new operation ID",
+  );
+  await app.answerBatch(a.id, answers, "retry-batch");
   expect(app.questionHistory(a.id).map((q) => q.answer)).toEqual(["Yes", "No"]);
   expect(runtime.inputs).toHaveLength(3);
   await expect(
@@ -1733,7 +1737,8 @@ test("a rejected answer retry validates originals already accepted by another op
   runtime.sendOverride = undefined;
   await app.answerBatch(a.id, answers, "accepted-elsewhere");
   const count = runtime.inputs.length;
-  await expect(app.retryDelivery(a.id, "failed")).rejects.toThrow(
+  expect(() => app.retryDelivery(a.id, "failed")).toThrow("new operation ID");
+  await expect(app.answerBatch(a.id, answers, "fresh-retry")).rejects.toThrow(
     "remain unanswered",
   );
   expect(runtime.inputs).toHaveLength(count);
@@ -1916,78 +1921,6 @@ for (const path of ["agent", "owning"] as const) {
     expect(app.detail(a.id).state).toBe("working");
   });
 }
-
-test("explicit user retry replaces only its rejected attempt and duplicate tokens never re-admit", async () => {
-  const { app, runtime } = fixture();
-  const a = await app.createOrc("alpha");
-  runtime.sendOverride = async () => {
-    throw new DeliveryRejected("Rejected");
-  };
-  await app.send(a.id, "Original", "logical");
-  const first = { after: "logical", attempt: "retry-1" };
-  await Promise.all([
-    app.send(a.id, "Original", "logical", undefined, first),
-    app.send(a.id, "Original", "logical", undefined, first),
-  ]);
-  expect(runtime.inputs).toHaveLength(2);
-  expect(app.lookup(a.id, "logical")).toMatchObject({
-    state: "rejected",
-    attemptId: "retry-1",
-  });
-  const stale = await app.send(a.id, "Original", "logical", undefined, {
-    after: "logical",
-    attempt: "stale-page-retry",
-  });
-  expect(stale.retryNotAdmitted).toBe("stale-page-retry");
-  expect(stale.deliveries.find((d) => d.id === "logical")).toMatchObject({
-    status: "failed",
-    attemptId: "retry-1",
-  });
-  expect(app.lookup(a.id, "logical")?.attemptId).toBe("retry-1");
-  const duplicate = await app.send(
-    a.id,
-    "Original",
-    "logical",
-    undefined,
-    first,
-  );
-  expect(duplicate.retryNotAdmitted).toBeUndefined();
-  await app.send(a.id, "Original", "logical");
-  expect(runtime.inputs).toHaveLength(2);
-  await expect(
-    app.send(a.id, "Changed", "logical", undefined, {
-      after: "retry-1",
-      attempt: "retry-2",
-    }),
-  ).rejects.toThrow("different content");
-  runtime.sendOverride = undefined;
-  await app.send(a.id, "Original", "logical", undefined, {
-    after: "retry-1",
-    attempt: "retry-2",
-  });
-  expect(runtime.inputs).toHaveLength(3);
-  expect(
-    app.detail(a.id).messages.filter((m) => m.clientId === "logical"),
-  ).toHaveLength(1);
-  await expect(
-    app.send(a.id, "Original", "logical", undefined, {
-      after: "retry-2",
-      attempt: "retry-3",
-    }),
-  ).rejects.toThrow("Only a rejected");
-  expect(app.lookup(a.id, "logical")?.state).toBe("accepted");
-  runtime.sendOverride = async () => {
-    throw new Error("Unconfirmed");
-  };
-  await app.send(a.id, "Unknown", "unknown");
-  await expect(
-    app.send(a.id, "Unknown", "unknown", undefined, {
-      after: "unknown",
-      attempt: "unsafe",
-    }),
-  ).rejects.toThrow("Only a rejected");
-  expect(runtime.inputs).toHaveLength(4);
-});
 
 test("collaboration reading replaces provisional admission by native client identity and paginates native history", async () => {
   const { app, runtime } = fixture();

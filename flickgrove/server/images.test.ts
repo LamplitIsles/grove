@@ -80,7 +80,9 @@ test("HTTP upload and real Chord preserve a multiline caption exactly", async ()
       '中文\n"caption"\\\tend',
       "a\r\u0000\ud800b",
     ].entries()) {
-      const operationId = `caption-${index}`;
+      const { operationId } = await service.reserveSubmission(a.id);
+      const otherOperation = await service.reserveSubmission(other.id);
+      const wrongOperation = await service.reserveSubmission(a.id);
       const form = new FormData();
       form.set("text", JSON.stringify(text));
       form.append("images", file);
@@ -102,9 +104,9 @@ test("HTTP upload and real Chord preserve a multiline caption exactly", async ()
       const refs = (await upload.json()).images;
       const input = { text, operationId, images: refs };
       for (const [id, changed] of [
-        [other.id, input],
+        [other.id, { ...input, operationId: otherOperation.operationId }],
         [`wrong:${a.id}`, input],
-        [a.id, { ...input, operationId: `${operationId}-wrong` }],
+        [a.id, { ...input, operationId: wrongOperation.operationId }],
         [a.id, { ...input, text: `${text} changed` }],
         [a.id, { ...input, images: [...refs].reverse() }],
         [a.id, { ...input, images: [{ ...refs[0], width: 1 }, refs[1]] }],
@@ -146,7 +148,7 @@ test("HTTP upload and real Chord preserve a multiline caption exactly", async ()
       expect(runtime.inputs).toHaveLength(index + 1);
       expect(runtime.inputs[index].text).toBe(text);
       expect(runtime.inputs[index].images).toHaveLength(2);
-      expect(service.lookup(a.id, operationId)?.state).toBe("accepted");
+      expect((await service.lookup(a.id, operationId))?.state).toBe("accepted");
       const changed = await callRoute(origin, `/api/agents/${a.id}/messages`, {
         ...input,
         text: `${text} changed`,
@@ -301,6 +303,7 @@ test("same-origin token-independent HTTP upload/read on real socket and stable C
   try {
     const a = await service.createOrc("alpha", defaults);
     const other = await service.createOrc("alpha", defaults);
+    const { operationId } = await service.reserveSubmission(a.id);
     const headers = {
       Origin: origin,
       Authorization: "Bearer stale",
@@ -324,7 +327,7 @@ test("same-origin token-independent HTTP upload/read on real socket and stable C
     form.set("text", JSON.stringify(""));
     form.append("images", file);
     const upload = await fetch(
-      `${origin}/api/images?agent=${a.id}&operation=one`,
+      `${origin}/api/images?agent=${a.id}&operation=${operationId}`,
       { method: "POST", headers, body: form },
     );
     expect(upload.status).toBe(200);
@@ -365,7 +368,7 @@ test("same-origin token-independent HTTP upload/read on real socket and stable C
       (
         await callRoute(origin, `/api/agents/${a.id}/messages`, {
           text: "",
-          operationId: "one",
+          operationId,
           images: refs,
         })
       ).status,
@@ -379,18 +382,18 @@ test("same-origin token-independent HTTP upload/read on real socket and stable C
       (
         await callRoute(origin, `/api/agents/${a.id}/messages`, {
           text: "",
-          operationId: "one",
+          operationId,
           images: refs,
         })
       ).status,
     ).toBe(200);
-    service.lookup(a.id, "one");
+    expect((await service.lookup(a.id, operationId))?.state).toBe("accepted");
     expect(runtime.inputs.length).toBe(1);
     await expect(
       invoke(service, "send", {
         id: a.id,
         text: "changed",
-        operationId: "one",
+        operationId,
         images: refs,
       }),
     ).rejects.toThrow("different content");
@@ -398,16 +401,22 @@ test("same-origin token-independent HTTP upload/read on real socket and stable C
       invoke(service, "send", {
         id: `other:${a.id}`,
         text: "",
-        operationId: "one",
+        operationId,
         images: refs,
       }),
     ).rejects.toThrow("another Peer");
-    const next = await service.uploadImages(a.id, "two", "steer", [file]);
+    const nextOperation = await service.reserveSubmission(a.id);
+    const next = await service.uploadImages(
+      a.id,
+      nextOperation.operationId,
+      "steer",
+      [file],
+    );
     expect(
       (
         await callRoute(origin, `/api/agents/${a.id}/messages`, {
           text: "steer",
-          operationId: "two",
+          operationId: nextOperation.operationId,
           images: next,
         })
       ).status,

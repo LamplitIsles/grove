@@ -197,7 +197,7 @@ test("a rejected queue request clears its pending state after switching back", a
   await expect(
     page
       .getByRole("region", { name: "Queued messages" })
-      .getByText("Queue rejected"),
+      .getByText("Follow-up queue is full"),
   ).toBeVisible();
   await expect(input).toHaveValue("Retain rejected draft");
   await expect(page.locator(".image-draft")).toHaveCount(1);
@@ -207,7 +207,10 @@ test("a rejected queue request clears its pending state after switching back", a
   await page.reload();
   await expect(input).toHaveValue("Retain rejected draft");
   await expect(page.locator(".image-draft")).toHaveCount(1);
-  const failed = page.getByRole("region", { name: "Queued messages" });
+  const failed = page
+    .getByRole("region", { name: "Queued messages" })
+    .locator(".follow-up-item")
+    .filter({ hasText: "Retain rejected draft" });
   await expect(failed).toContainText("Failed");
   await failed.getByRole("button", { name: "Remove failed message" }).click();
   await expect(failed).toHaveCount(0);
@@ -732,7 +735,7 @@ test("text follow-up still works when image storage is unavailable", async ({
   await expect(input).toHaveValue("");
 });
 
-test("automatic inspection waits for completion before resuming the queue", async ({
+test("local queue waits for confirmed completion and explicit Continue", async ({
   page,
   request,
 }) => {
@@ -756,8 +759,10 @@ test("automatic inspection waits for completion before resuming the queue", asyn
     data: { sendMode: "uncertain", complete: "completed" },
   });
   await expect(queue).toContainText("Sending…");
+  // This fake has no authoritative current-execution view, so main's
+  // presentation keeps unresolved work in the Working state.
   await expect(page.locator(".detail-heading .detail-status")).toContainText(
-    "Queue paused",
+    "Working",
   );
   await expect(queue).not.toContainText("Synthetic native outcome unknown");
   await expect(queue.getByRole("button", { name: "Continue" })).toBeDisabled();
@@ -768,7 +773,7 @@ test("automatic inspection waits for completion before resuming the queue", asyn
   });
   await expect(queue).toContainText("Processing…", { timeout: 15000 });
   await expect(page.locator(".detail-heading .detail-status")).toContainText(
-    "Queue paused",
+    "Working",
   );
   await expect(queue.getByRole("button", { name: "Continue" })).toBeDisabled();
   await request.post("/fixture/change", {
@@ -782,6 +787,17 @@ test("automatic inspection waits for completion before resuming the queue", asyn
       sendMode: "accepted",
     },
   });
+  // Local Codex requires an explicit Continue after inspection, even when
+  // native evidence confirms the previous follow-up completed.
+  await expect(queue.getByRole("button", { name: "Continue" })).toBeEnabled({
+    timeout: 15000,
+  });
+  expect(
+    (await (await request.get("/fixture/info")).json()).inputs.filter(
+      (item: { text: string }) => item.text === "Next follow-up",
+    ),
+  ).toHaveLength(0);
+  await queue.getByRole("button", { name: "Continue" }).click();
   await expect
     .poll(async () => {
       const info = await (await request.get("/fixture/info")).json();
@@ -875,7 +891,10 @@ test("a separate execution error remains visible while a queued message is uncon
       },
     },
   });
-  await expect(
-    page.locator(".detail-heading .execution-feedback"),
-  ).toContainText("Execution error");
+  const feedback = page.locator(".detail-heading .execution-feedback");
+  await expect(feedback).toContainText("Working");
+  await feedback.click();
+  await expect(page.locator(".execution-reason")).toContainText(
+    "Synthetic execution failure",
+  );
 });

@@ -24,10 +24,10 @@
   import type { Answer, Agent, Detail, HistorySession, Human, InstanceReloadResult, InstanceRestartResult, InstanceStatus, Model, Project, Settings, Skill, Snapshot } from "./contracts";
   import { api, editable, setClient } from "./api";
   import { RequestRejected, RequestTimeout } from "./chord-client";
-  import { lookupSchema, abandonCloseSchema, deliverySchema, type Receipt } from "./chord-contract";
-  import { addOutgoing, observeOutgoing, outgoing, withOutgoing, acceptReceipt, unknownOutgoing, submissionResult, beginRetry, observeSendResult } from "./outgoing.svelte";
+  import { lookupSchema, inspectRetrySchema, abandonCloseSchema, deliverySchema, type Receipt } from "./chord-contract";
+  import { addOutgoing, observeRetry, observeRetryLink, observeOutgoing, outgoing, withOutgoing, acceptReceipt, unknownOutgoing, submissionResult, dismissedAnswerOperations, hasDismissedAnswer } from "./outgoing.svelte";
   import { imageSchema } from "./chord-contract";
-  import { loadImages, operationKey, type ImageDraft } from "./image-drafts";
+  import { loadImages, saveImages, operationKey, type ImageDraft } from "./image-drafts";
   import { receiptAlreadyAccepted, setOutgoingImages, clearClosedPending, closeRecovery, rememberCloseRecovery, forgetCloseRecovery } from "./outgoing.svelte";
   import { observeQuestions, questionPanels, setQuestionPanel } from "./question-state.svelte";
   import ModelFields from "./ModelFields.svelte";
@@ -378,6 +378,20 @@
     finally { saving = false; }
   }
   const lookups=new Set<string>();
+  const nextFinalization = new Map<string, number>();
+  const retryInspections = new Map<string, number>();
+  async function inspectLocalRetry(agentId:string, operationId:string) {
+    const key=agentId+"/"+operationId;
+    const local=outgoing.entries.find(o=>o.agentId===agentId && o.id===operationId && o.status==="rejected");
+    if (!client || !connected || !local || Date.now() < (retryInspections.get(key) ?? 0)) return;
+    if (local.localImageIds?.length && local.images?.length !== local.localImageIds.length) return;
+    const envelope = local.answers ? {source:"question" as const,answers:$state.snapshot(local.answers)} : {source:"user" as const,text:local.text,...(local.images?.length ? {images:$state.snapshot(local.images)} : {})};
+    retryInspections.set(key,Date.now()+30_000);
+    try {
+      const result=inspectRetrySchema.parse(await client.call('inspectRetry',{id:agentId,operationId,envelope}));
+      if (result?.operationId === operationId && result.supersededBy !== operationId && outgoing.entries.some(o=>o.agentId===agentId && o.id===operationId && o.status==="rejected")) { observeRetryLink(agentId,operationId,result.supersededBy); retryInspections.set(key,Infinity); }
+    } catch { /* A missing relationship is not a delivery outcome. */ }
+  }
   async function lookup(agentId: string, operationId: string) {
     if(!client || !connected || hosts.find(h => h.id === agentId.split(':')[0])?.connected === false) return;
     const key=agentId+"/"+operationId;if(lookups.has(key))return;lookups.add(key);
@@ -386,19 +400,80 @@
       const receipt = lookupSchema.parse(await client.call<Receipt | null>('lookup',{id:agentId,operationId}));
       if (receipt && receipt.operationId !== operationId) throw new Error("Receipt operation identity changed");
       acceptReceipt(agentId, receipt);
+      const pending = outgoing.entries.find(o => o.agentId === agentId && o.id === operationId);
+      if (receipt || !pending || pending.status !== "pending") { nextFinalization.delete(key); return; }
+      // A client marker enables the request; only the issuing Peer can prove
+      // this ID has an unclaimed reservation. Legacy IDs stay lookup-only.
+      if (!pending.admissionVersion || Date.now() - pending.at < 60_000 || Date.now() < (nextFinalization.get(key) ?? 0)) return;
+      if (dispatches.some(d => d.key === key && dispatchActive(d))) return;
+      nextFinalization.set(key, Date.now() + 30_000);
+      if (!pending.predecessor && pending.localImageIds?.length && pending.images?.length !== pending.localImageIds.length) {
+        // Recreate only the staged image references. The original message is
+        // never sent here; the Peer permits this upload only while reserved.
+        const stored = await loadImages(operationKey(agentId, operationId));
+        const images = stored?.images ?? [];
+        if (images.length !== pending.localImageIds.length || images.some((image, i) => image.id !== pending.localImageIds![i])) return;
+        const form = new FormData();
+        form.set("text", JSON.stringify(pending.text));
+        for (const image of images) form.append("images", image.file, image.file.name);
+        const response = await client.media(agentId, `/api/images?agent=${encodeURIComponent(agentId)}&operation=${encodeURIComponent(operationId)}`, {method:"POST",body:form});
+        const upload = await response.json();
+        if (!response.ok || upload.agent !== agentId || upload.operation !== operationId) throw new Error(upload.error ?? "Image operation identity changed");
+        const refs = upload.images.map((image:unknown) => imageSchema.parse(image));
+        if (refs.length !== images.length) throw new Error("Original images are unavailable");
+        if (!outgoing.entries.some(o => o.agentId === agentId && o.id === operationId && o.status === "pending")) return;
+        setOutgoingImages(agentId, operationId, refs);
+      }
+      const envelope = pending.predecessor ?? (pending.answers ? {source:"question" as const, answers:pending.answers} : {source:"user" as const, text:pending.text, ...(pending.images?.length ? {images:pending.images} : {})});
+      const final = lookupSchema.parse(await client.call<Receipt | null>('finalizeSubmission',{id:agentId,operationId,envelope,...(pending.predecessor ? {predecessor:pending.predecessor} : {})}));
+      if (final && final.operationId !== operationId) throw new Error("Receipt operation identity changed");
+      acceptReceipt(agentId, final);
     }
     catch(e) { if(outgoing.entries.find(o=>o.agentId===agentId && o.id===operationId)?.attemptId===attempt) unknownOutgoing(agentId,operationId,e instanceof Error?e.message:m.load_failure()); }
     finally{lookups.delete(key);}
   }
-  async function retryDelivery(operationId: string) {
+  type RetryEnvelope = {source:"user";text:string;images?:import("./contracts").MessageImage[]} | {source:"question";answers:Answer[]};
+  async function retryReservation(id:string, operationId:string, envelope:RetryEnvelope) {
+    if (!client) throw new Error("Connection offline");
+    const connection = client;
+    let receipt = lookupSchema.parse(await connection.call<Receipt | null>("lookup", {id,operationId}));
+    if (!receipt) receipt = lookupSchema.parse(await connection.call<Receipt | null>("finalizeSubmission", {id,operationId,envelope}));
+    if (receipt?.operationId !== operationId || receipt.state !== "rejected") throw new Error("The original message outcome is not confirmed as failed.");
+    acceptReceipt(id, receipt);
+    const result = await connection.call<{state:string;operationId:string;claimToken?:string}>("reserveRetry", {id,operationId});
+    if (!result || !["won","existing"].includes(result.state) || !result.operationId?.startsWith("grove-v1-") || result.operationId === operationId || (result.state === "won" && !/^[A-Za-z0-9_-]{43}$/.test(result.claimToken ?? ""))) throw new Error("Could not prepare the retry. Try again.");
+    observeRetryLink(id,operationId,result.operationId);
+    retryInspections.set(id+"/"+operationId,Infinity);
+    return result;
+  }
+  async function retryDelivery(operationId: string, supplied?: import("./contracts").Delivery) {
     if (!selectedId || !hostConnected || !client) return;
-    const batch = outgoing.entries.find(o => o.agentId === selectedId && o.id === operationId && o.answers);
-    if (batch?.answers) { await answerBatch(batch.answers, operationId); return; }
+    const id = selectedId;
+    const batch = outgoing.entries.find(o => o.agentId === id && o.id === operationId && o.answers);
+    const original = batch ?? supplied ?? detail?.deliveries.find(d => d.id === operationId && d.source === "question");
+    if (original) {
+      const envelope = "recoveryRef" in original && original.recoveryRef ? await reading<import("./contracts").Delivery>(`/recovery?${new URLSearchParams({agent:id,operation:operationId})}`, id) : original;
+      if (!envelope.answers?.length) throw new Error("The original answers are unavailable.");
+      const answers = $state.snapshot(envelope.answers);
+      if (hasDismissedAnswer(id,answers.map(answer=>answer.questionId))) throw new Error(m.pending_answer_unconfirmed());
+      const predecessor:RetryEnvelope = {source:"question",answers};
+      const retry = await retryReservation(id,operationId,predecessor);
+      if (selectedId !== id) return;
+      if (hasDismissedAnswer(id,answers.map(answer=>answer.questionId))) {
+        observeRetry(id,envelope.text,retry.operationId,answers,{of:operationId,predecessor}); void lookup(id,retry.operationId);
+        return;
+      }
+      if (retry.state === "won") await answerBatch(answers, retry.operationId, envelope.text, {of:operationId,predecessor,claimToken:retry.claimToken!});
+      else { observeRetry(id,envelope.text,retry.operationId,answers,{of:operationId,predecessor}); void lookup(id,retry.operationId); }
+      return;
+    }
     try { await client.call("retryDelivery", {id:selectedId,deliveryId:operationId}); }
     catch(e) { error = e instanceof Error ? e.message : m.load_failure(); }
   }
   async function reconcilePending() {
     for(const pending of outgoing.entries) if(pending.status === 'pending') void lookup(pending.agentId,pending.id);
+    if(selectedId) for(const pending of dismissedAnswerOperations(selectedId)) if(!receiptAlreadyAccepted(selectedId,pending.id)) void lookup(selectedId,pending.id);
+    for(const local of outgoing.entries) if(local.agentId === selectedId && local.status === 'rejected') void inspectLocalRetry(local.agentId,local.id);
   }
   let dispatches = $state<{key:string; token:string; admitting:boolean}[]>([]);
   let retryErrors = $state<Record<string,string>>({});
@@ -420,26 +495,47 @@
     dispatches = [...dispatches,{key,token,admitting:false}];
     retryErrors = {...retryErrors,[key]:""};
     try {
-      let original = outgoing.entries.find(o => o.agentId === id && o.id === operationId);
-      if (!original) {
-        const envelope = d.recoveryRef ? await reading<import("./contracts").Delivery>(`/recovery?${new URLSearchParams({agent:id,operation:operationId})}`, id) : d;
-        if (receiptAlreadyAccepted(id,operationId)) return;
-        addOutgoing(id,envelope.text,operationId,undefined,envelope.images);
-        original = outgoing.entries.find(o => o.agentId === id && o.id === operationId)!;
-        original.attemptId = envelope.attemptId;
-        acceptReceipt(id,{operationId, attemptId:envelope.attemptId, state:"rejected", turnId:null, error:envelope.error ?? null});
-      }
+      const local = outgoing.entries.find(o => o.agentId === id && o.id === operationId);
+      const original = local ?? (d.recoveryRef ? await reading<import("./contracts").Delivery>(`/recovery?${new URLSearchParams({agent:id,operation:operationId})}`, id) : d);
+      if (receiptAlreadyAccepted(id,operationId)) return;
       let images:ImageDraft[] = [];
-      if (original.localImageIds?.length && !original.images?.length) {
+      const localIds = "localImageIds" in original ? original.localImageIds : undefined;
+      if (localIds?.length) {
         const stored = await loadImages(operationKey(id,operationId));
         images = stored?.images ?? [];
-        if (images.length !== original.localImageIds.length || images.some((image,i) => image.id !== original!.localImageIds![i])) throw new Error("Original images are unavailable on this device. Reconnect to the original device and retry.");
+        if (images.length !== localIds.length || images.some((image,i) => image.id !== localIds[i])) images = [];
       }
-      await dispatch(id,original.text,operationId,images,{after:original.attemptId ?? operationId,attempt:token});
+      if (!images.length && original.images?.length) {
+        const connection = client;
+        images = await Promise.all(original.images.map(async image => {
+          const response = await connection.media(id, `/api/images/${encodeURIComponent(image.id)}/original?agent=${encodeURIComponent(id)}`);
+          if (!response.ok) throw new Error("Original images are unavailable. Reconnect to the original device and retry.");
+          return {id:crypto.randomUUID(),file:new File([await response.blob()],image.name,{type:image.mediaType})};
+        }));
+      }
+      if ((localIds?.length || original.images?.length) && !images.length) throw new Error("Original images are unavailable. Reconnect to the original device and retry.");
+      let refs = original.images ? $state.snapshot(original.images) : undefined;
+      if (images.length && !refs?.length) {
+        const form = new FormData(); form.set("text",JSON.stringify(original.text));
+        for(const image of images) form.append("images",image.file,image.file.name);
+        const response = await client.media(id,`/api/images?agent=${encodeURIComponent(id)}&operation=${encodeURIComponent(operationId)}`,{method:"POST",body:form});
+        const upload = await response.json();
+        if(!response.ok || upload.agent!==id || upload.operation!==operationId) throw new Error(upload.error ?? "Image operation identity changed");
+        refs = upload.images.map((image:unknown)=>imageSchema.parse(image));
+        if(refs?.length!==images.length) throw new Error("Original images are unavailable.");
+        setOutgoingImages(id,operationId,refs);
+      }
+      const predecessor:RetryEnvelope = {source:"user",text:original.text,...(refs?.length ? {images:refs} : {})};
+      const retry = await retryReservation(id,operationId,predecessor);
+      const meta = {of:operationId,predecessor};
+      if(retry.state === "existing") { observeRetry(id,original.text,retry.operationId,undefined,meta); void lookup(id,retry.operationId); return; }
+      if (images.length) await saveImages(operationKey(id,retry.operationId),images,original.text);
+      addOutgoing(id,original.text,retry.operationId,undefined,undefined,images.map(image=>image.id),meta);
+      dispatches = [...dispatches,{key:dispatchKey(id,retry.operationId),token:retry.operationId,admitting:false}];
+      try { await dispatch(id,original.text,retry.operationId,images,{...meta,claimToken:retry.claimToken!}); }
+      finally { dispatches=dispatches.filter(d=>d.token!==retry.operationId); }
     } catch(e) {
       retryErrors = {...retryErrors,[key]:(e as Error).message};
-      const original = outgoing.entries.find(o => o.agentId === id && o.id === operationId);
-      acceptReceipt(id,{operationId,attemptId:original?.attemptId,state:"rejected",turnId:null,error:(e as Error).message});
     } finally { dispatches = dispatches.filter(d => d.token !== token); }
   }
   async function send(id: string, text: string, operationId: string, images: ImageDraft[] = []) {
@@ -482,10 +578,9 @@
   async function queueAction(id:string,member:"cancelFollowUp" | "resumeFollowUps",operationId?:string) {
     await queueConnection(id).call(member,operationId ? {id,operationId} : {id});
   }
-  async function dispatch(id:string,text:string,operationId:string,images:ImageDraft[],retry?:import("./chord-contract").RetrySend) {
+  async function dispatch(id:string,text:string,operationId:string,images:ImageDraft[],retry?:{of:string;predecessor:RetryEnvelope;claimToken:string}) {
     const connection = client;
-    let submitted=false, attemptId=outgoing.entries.find(o=>o.agentId===id && o.id===operationId)?.attemptId;
-    const previousAttempt=attemptId;
+    let submitted=false;
     try {
       if (!connection || !hosts.find(h=>h.id===id.split(":")[0])?.connected) throw new RequestRejected("Execution host disconnected before submission");
       let refs=outgoing.entries.find(o=>o.agentId===id && o.id===operationId)?.images;
@@ -497,22 +592,13 @@
         refs=upload.images.map((i:unknown)=>imageSchema.parse(i));setOutgoingImages(id,operationId,refs!);
       }
       if (receiptAlreadyAccepted(id,operationId)) return;
-      if(retry){beginRetry(id,operationId,retry.attempt);attemptId=retry.attempt;}
       submitted=true;
-      const active=dispatches.find(d=>d.token===(retry?.attempt ?? operationId));if(active)active.admitting=true;
-      const result=await connection.call<import("./chord-contract").SendResult>('send',{id,text,operationId,...(refs ? {images:refs} : {}),...(retry ? {retry} : {})});
-      observeSendResult(result,operationId,retry?.attempt);
-      if(outgoing.entries.find(o=>o.agentId===id && o.id===operationId)?.attemptId===attemptId && !result.deliveries.some(d=>d.id===operationId))unknownOutgoing(id,operationId,"");
+      const active=dispatches.find(d=>d.token===operationId);if(active)active.admitting=true;
+      const result=await connection.call<import("./chord-contract").SendResult>('send',{id,text,operationId,...(refs ? {images:refs} : {}),...(retry ? {predecessor:retry.predecessor,claimToken:retry.claimToken} : {})});
+      observeOutgoing(result);
+      if(!result.deliveries.some(d=>d.id===operationId))unknownOutgoing(id,operationId,"");
     }catch(e){
-      const current=outgoing.entries.find(o=>o.agentId===id && o.id===operationId);
-      if(current?.attemptId!==attemptId)return;
-      if((!submitted || e instanceof RequestRejected) && !receiptAlreadyAccepted(id,operationId)){
-        // An RPC rejection did not enter the owning queue. Keep the predecessor
-        // token so the next explicit retry can still replace that rejection.
-        const o=outgoing.entries.find(o=>o.agentId===id && o.id===operationId);
-        if(o && retry && e instanceof RequestRejected){o.attemptId=previousAttempt;attemptId=previousAttempt;}
-        acceptReceipt(id,{operationId,attemptId,state:"rejected",turnId:null,error:e instanceof Error?e.message:m.load_failure()});
-      }else unknownOutgoing(id,operationId,e instanceof Error?e.message:m.load_failure());
+      unknownOutgoing(id,operationId,e instanceof Error?e.message:m.load_failure());
     }
     if(submitted)void lookup(id,operationId);
   }
@@ -619,18 +705,16 @@
     try { const result = await api<Detail>(`/agents/${id}/stop`, { turnId }); if (selectedId === id) detail = result; return true; }
     catch(e) { error = e instanceof Error ? e.message : m.load_failure(); return false; }
   }
-  async function answerBatch(answers: Answer[], operationId: string, preparedText?: string) {
-    if (!selectedId || !hostConnected || !client || !detail) return;
+  async function answerBatch(answers: Answer[], operationId: string, preparedText?: string, retry?:{of:string;predecessor:RetryEnvelope;claimToken:string}) {
+    if (!selectedId || !hostConnected || !client || !detail) throw new Error("Connect to send your answer.");
     const id = selectedId;
+    if (hasDismissedAnswer(id,answers.map(answer=>answer.questionId))) throw new Error(m.pending_answer_unconfirmed());
     const text = preparedText ?? outgoing.entries.find(o => o.agentId === id && o.id === operationId)?.text ?? answers.map(answer => `Question: ${detail!.questions.find(q => q.id === answer.questionId)?.text}\nAnswer: ${answer.answer}`).join("\n\n");
-    addOutgoing(id, text, operationId, answers);
+    addOutgoing(id, text, operationId, answers, undefined, undefined, retry);
     try {
-      const result = await client.call<Detail>("answerBatch", { id, answers, operationId });
+      const result = await client.call<Detail>("answerBatch", { id, answers, operationId, ...(retry ? {predecessor:retry.predecessor,claimToken:retry.claimToken} : {}) });
       observeOutgoing(result);
-    } catch (e) {
-      if (e instanceof RequestRejected) { acceptReceipt(id, { operationId, state: "rejected", turnId: null, error: e.message }); return; }
-      else unknownOutgoing(id, operationId, e instanceof Error ? e.message : m.load_failure());
-    }
+    } catch (e) { unknownOutgoing(id, operationId, e instanceof Error ? e.message : m.load_failure()); }
     void lookup(id, operationId);
   }
   function keydown(event: KeyboardEvent) {
@@ -712,7 +796,7 @@
     const compositionEnd = () => composing = false;
     window.addEventListener("compositionstart", compositionStart);
     window.addEventListener("compositionend", compositionEnd);
-    const timer = setInterval(() => { now = Date.now(); if (modal === "settings" && settingsPage === "grove" && connected && now % 5000 < 1000) void refreshInstance(); }, 1000);
+    const timer = setInterval(() => { now = Date.now(); if (connected && now % 5000 < 1000) { void reconcilePending(); if (modal === "settings" && settingsPage === "grove") void refreshInstance(); } }, 1000);
     const permission = () => { if ("Notification" in window && Notification.permission === "default") void Notification.requestPermission().catch(() => {}); };
     const reserveTab = (e: KeyboardEvent) => { if (e.key === "Tab" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing && e.keyCode !== 229) e.preventDefault(); };
     window.addEventListener("keydown", reserveTab, true);

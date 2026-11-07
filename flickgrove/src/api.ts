@@ -9,6 +9,19 @@ export function connection() {
   if (!client) throw new Error("Connection offline");
   return client;
 }
+export async function reserveSubmission(id: string): Promise<string> {
+  const value = await connection().call<{ operationId: string }>(
+    "reserveSubmission",
+    { id },
+  );
+  if (
+    typeof value?.operationId !== "string" ||
+    !value.operationId.startsWith("grove-v1-") ||
+    value.operationId.length > 120
+  )
+    throw new Error("Could not prepare the message. Try again.");
+  return value.operationId;
+}
 export const storagePrefix = `flickgrove/${location.origin}`;
 export const readingCache = new ReadingCache(localStorage, storagePrefix);
 export async function api<T>(path: string, body?: unknown): Promise<T> {

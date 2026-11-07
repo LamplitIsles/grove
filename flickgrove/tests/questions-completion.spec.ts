@@ -14,6 +14,8 @@ async function start(page: Page, request: APIRequestContext, width = 1440) {
   await request.post(origin + "/fixture/reset", { data: { mode: "working" } });
   await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
   await page.goto(origin);
+  if (width === 390)
+    await page.getByRole("button", { name: "Toggle Sidebar" }).click();
   await page
     .getByRole("button", {
       name: "Open Streaming voice input Orc",
@@ -110,7 +112,9 @@ test("mobile New/Back and widening preserve questions and foreground hierarchy",
   await expect(input(page)).toHaveValue("navigation draft");
   await page.goBack();
   await expect(page.locator(".session-list")).toBeVisible();
-  await page.locator(".session-open").first().click();
+  await page
+    .getByRole("button", { name: "Open Streaming voice input Orc" })
+    .click();
   await expect(panel(page).locator("textarea")).toHaveValue("question draft");
 });
 test("unadmitted answer retains exact identity after reload and null lookup never replays", async ({

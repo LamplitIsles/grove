@@ -174,17 +174,10 @@ test("authorized passive target windows bind identity/direction, preserve metada
         .run();
     const one = await app.createOrc("alpha"),
       two = await app.createOrc("alpha");
-    await app.send(one.id, "Original", "owned", undefined, undefined, "alice");
-    await app.send(one.id, "Second", "second", undefined, undefined, "bob");
+    await app.send(one.id, "Original", "owned", undefined, "alice");
+    await app.send(one.id, "Second", "second", undefined, "bob");
     await app.send(one.id, "Unknown", "unknown");
-    await app.send(
-      two.id,
-      "Other session",
-      "foreign",
-      undefined,
-      undefined,
-      "bob",
-    );
+    await app.send(two.id, "Other session", "foreign", undefined, "bob");
     await app.enqueueFollowUp(one.id, "Pending", "pending", undefined, "bob");
     for (let i = 0; i < 120; i++)
       runtime.emit(one.id, {

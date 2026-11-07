@@ -2,12 +2,13 @@ import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { readMigrationFiles } from "drizzle-orm/migrator";
-import { and, eq, ne, or, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
 import { fileURLToPath } from "node:url";
 import type { Question } from "../src/contracts";
 import type { RuntimeAgent, RuntimeDelivery as Delivery } from "./runtime";
 import * as s from "./schema";
 import { threadIdentity } from "./backend";
+import { parseFence } from "./submission-admission";
 const migrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url));
 const sessionKeys = [
   "backend",
@@ -196,6 +197,15 @@ export class WorkspaceStore {
     { a: RuntimeAgent; q: Question; position: number }
   >();
   private deleted = new Map<string, { sessionId: string; id: string }>();
+  private fences = new Map<
+    string,
+    {
+      sessionId: string;
+      operationId: string;
+      envelopeHash: string;
+      expected: string | undefined;
+    }
+  >();
   private tracked = new WeakSet<RuntimeAgent>();
   private positions = new WeakMap<object, number>();
   userMessageOutline(
@@ -485,7 +495,8 @@ export class WorkspaceStore {
       !this.configs.size &&
       !this.deliveries.size &&
       !this.questions.size &&
-      !this.deleted.size
+      !this.deleted.size &&
+      !this.fences.size
     )
       return;
     this.db.transaction((tx) => {
@@ -502,6 +513,32 @@ export class WorkspaceStore {
           .values(row)
           .onConflictDoUpdate({ target: s.sessionConfig.sessionId, set: row })
           .run();
+      }
+      for (const fence of this.fences.values()) {
+        if (fence.expected === undefined) {
+          tx.insert(s.submissionFences)
+            .values({
+              sessionId: fence.sessionId,
+              operationId: fence.operationId,
+              envelopeHash: fence.envelopeHash,
+            })
+            .run();
+        } else {
+          const changed = tx
+            .update(s.submissionFences)
+            .set({ envelopeHash: fence.envelopeHash })
+            .where(
+              and(
+                eq(s.submissionFences.sessionId, fence.sessionId),
+                eq(s.submissionFences.operationId, fence.operationId),
+                eq(s.submissionFences.envelopeHash, fence.expected),
+              ),
+            )
+            .returning({ operationId: s.submissionFences.operationId })
+            .get();
+          if (!changed)
+            throw new Error("Submission reservation changed; outcome unknown");
+        }
       }
       for (const { a, q, position } of this.questions.values()) {
         const row = {
@@ -603,6 +640,183 @@ export class WorkspaceStore {
     this.questions.clear();
     this.deliveries.clear();
     this.deleted.clear();
+    this.fences.clear();
+  }
+  submissionFence(sessionId: string, operationId: string) {
+    return this.db
+      .select({ value: s.submissionFences.envelopeHash })
+      .from(s.submissionFences)
+      .where(
+        and(
+          eq(s.submissionFences.sessionId, sessionId),
+          eq(s.submissionFences.operationId, operationId),
+        ),
+      )
+      .get()?.value;
+  }
+  submissionFencesFor(sessionId: string, operationIds: string[]) {
+    const rows: { operationId: string; value: string }[] = [];
+    for (let offset = 0; offset < operationIds.length; offset += 400) {
+      rows.push(
+        ...this.db
+          .select({
+            operationId: s.submissionFences.operationId,
+            value: s.submissionFences.envelopeHash,
+          })
+          .from(s.submissionFences)
+          .where(
+            and(
+              eq(s.submissionFences.sessionId, sessionId),
+              inArray(
+                s.submissionFences.operationId,
+                operationIds.slice(offset, offset + 400),
+              ),
+            ),
+          )
+          .all(),
+      );
+    }
+    return rows;
+  }
+  inspectRetryEdge(
+    sessionId: string,
+    operationId: string,
+    owner: string,
+    hash: string,
+  ) {
+    return this.db.transaction((tx) => {
+      const read = (id: string) =>
+        tx
+          .select({ value: s.submissionFences.envelopeHash })
+          .from(s.submissionFences)
+          .where(
+            and(
+              eq(s.submissionFences.sessionId, sessionId),
+              eq(s.submissionFences.operationId, id),
+            ),
+          )
+          .get()?.value;
+      const rawParent = read(operationId);
+      if (!rawParent) return null;
+      let parent: ReturnType<typeof parseFence>;
+      try {
+        parent = parseFence(rawParent);
+      } catch {
+        return null;
+      }
+      if (
+        parent.state !== "superseded" ||
+        parent.owner !== owner ||
+        parent.hash !== hash ||
+        !parent.successor ||
+        parent.successor === operationId ||
+        parent.retryOf === parent.successor
+      )
+        return null;
+      const rawChild = read(parent.successor);
+      if (!rawChild) return null;
+      let child: ReturnType<typeof parseFence>;
+      try {
+        child = parseFence(rawChild);
+      } catch {
+        return null;
+      }
+      if (
+        child.owner !== owner ||
+        child.retryOf !== operationId ||
+        (child.state === "superseded" &&
+          (child.successor === operationId ||
+            child.successor === parent.successor))
+      )
+        return null;
+      return parent.successor;
+    });
+  }
+  createSubmissionReservation(
+    sessionId: string,
+    operationId: string,
+    envelopeHash: string,
+  ) {
+    this.db
+      .insert(s.submissionFences)
+      .values({ sessionId, operationId, envelopeHash })
+      .run();
+  }
+  createRetryReservation(
+    sessionId: string,
+    originalId: string,
+    expected: string | undefined,
+    superseded: string,
+    successorId: string,
+    reservation: string,
+  ) {
+    this.db.transaction((tx) => {
+      if (expected === undefined) {
+        tx.insert(s.submissionFences)
+          .values({
+            sessionId,
+            operationId: originalId,
+            envelopeHash: superseded,
+          })
+          .run();
+      } else {
+        const changed = tx
+          .update(s.submissionFences)
+          .set({ envelopeHash: superseded })
+          .where(
+            and(
+              eq(s.submissionFences.sessionId, sessionId),
+              eq(s.submissionFences.operationId, originalId),
+              eq(s.submissionFences.envelopeHash, expected),
+            ),
+          )
+          .returning({ operationId: s.submissionFences.operationId })
+          .get();
+        if (!changed)
+          throw new Error("Original submission changed; outcome unknown");
+      }
+      tx.insert(s.submissionFences)
+        .values({
+          sessionId,
+          operationId: successorId,
+          envelopeHash: reservation,
+        })
+        .run();
+    });
+  }
+  closeSubmissionReservation(
+    sessionId: string,
+    operationId: string,
+    expected: string,
+    envelopeHash: string,
+  ) {
+    return (
+      this.db
+        .update(s.submissionFences)
+        .set({ envelopeHash })
+        .where(
+          and(
+            eq(s.submissionFences.sessionId, sessionId),
+            eq(s.submissionFences.operationId, operationId),
+            eq(s.submissionFences.envelopeHash, expected),
+          ),
+        )
+        .returning({ operationId: s.submissionFences.operationId })
+        .get() !== undefined
+    );
+  }
+  queueSubmissionFence(
+    sessionId: string,
+    operationId: string,
+    envelopeHash: string,
+    expected: string | undefined,
+  ) {
+    this.fences.set(JSON.stringify([sessionId, operationId]), {
+      sessionId,
+      operationId,
+      envelopeHash,
+      expected,
+    });
   }
   hasOperationElsewhere(id: string, operation: string) {
     return !!this.db
@@ -624,6 +838,7 @@ export class WorkspaceStore {
     this.deliveries.clear();
     this.questions.clear();
     this.deleted.clear();
+    this.fences.clear();
     this.sqlite.close();
   }
 }

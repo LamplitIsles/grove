@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { addOutgoing, acceptReceipt } from "./outgoing.svelte";
+  import { addOutgoing, unknownOutgoing } from "./outgoing.svelte";
   import { navigation, setSurface } from "./navigation.svelte";
   import { Button } from '$lib/components/ui/button/index.js';
   import { Textarea } from '$lib/components/ui/textarea/index.js';
   import { Plus, MessagesSquare, Hammer, Bug, ClipboardCheck, RotateCcw, Telescope, X, ArrowUp, Square, Sparkles, ListPlus } from '@lucide/svelte';
-  import { storagePrefix, readingCache, connection } from './api';
+  import { storagePrefix, readingCache, connection, reserveSubmission } from './api';
   import { Mic, LoaderCircle } from '@lucide/svelte';
   import { canCaptureVoice, VoiceRecordingController, type VoiceRecordingStatus } from './voice-input';
   import { imagePreview, loadImages, saveImages, draftKey, operationKey, intakeError, IMAGE_ACCEPT, type ImageDraft } from './image-drafts';
@@ -201,17 +201,19 @@
   async function send() {
     if(suspended || voiceBusy || composing || unresolvedDraft || (!text.trim() && !images.length) || !connected || stopping || preparing || !ready) return;
     if(images.length){imageError=intakeError([],images.map(i=>i.file));if(imageError)return;}
-    const value=text.trim(); const frozen=$state.snapshot(images);const version=revision;const id=crypto.randomUUID();
+    const value=text.trim(); const frozen=$state.snapshot(images);const version=revision;const owner=agentId;
     input?.blur();
     submitting=true;preparing=true;
     try {
+      const id=await reserveSubmission(owner);
+      if(!active || agentId!==owner)return;
       if(frozen.length) await saveImages(operationKey(agentId,id),frozen,value);
       addOutgoing(agentId,value,id,undefined,undefined,frozen.map(i=>i.id));
       if(frozen.length){
         try { await saveImages(draftKey(agentId),current=>JSON.stringify(current.map(i=>i.id))===JSON.stringify(frozen.map(i=>i.id)) ? [] : current); }
         catch (error) {
-          // Originals and journal are durable, but no send has crossed the seam.
-          acceptReceipt(agentId,{operationId:id,state:"rejected",turnId:null,error:(error as Error).message});
+          // Keep the journal pending until the issuing host closes its reservation.
+          unknownOutgoing(agentId,id,(error as Error).message);
           throw error;
         }
       }
@@ -294,7 +296,7 @@
     try {
       const result=await oncheckqueue(owner,pending.id);
       if(!result)return;
-      if(result.status === "cancelled")failPending(pending,m.queue_cancelled_draft());
+      if(result.status === "cancelled")failPending(pending,result.error ?? m.queue_cancelled_draft());
       else await acceptPending(pending,owner);
     } catch { /* Retry the original lookup after the connection recovers. */ }
   }

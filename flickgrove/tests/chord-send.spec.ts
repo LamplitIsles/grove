@@ -7,7 +7,7 @@ for (const [name, viewport] of [
   test(`${name}: continuous messages echo before receipt, preserve editing, and reconcile without replay`, async ({
     page,
     request,
-  }) => {
+  }, testInfo) => {
     await page.setViewportSize(viewport);
     await request.post(origin + "/fixture/reset", {
       data: { mode: "no-workers" },
@@ -16,6 +16,8 @@ for (const [name, viewport] of [
       data: { sendMode: "held" },
     });
     await page.goto(origin);
+    if (viewport.width === 390)
+      await page.getByRole("button", { name: "Toggle Sidebar" }).click();
     await page
       .getByRole("button", { name: "Open Streaming voice input Orc" })
       .click();
@@ -46,7 +48,7 @@ for (const [name, viewport] of [
       )
       .toBe(1);
     await page.screenshot({
-      path: `../.scratch/conversation-region-spinner/${viewport.width}-optimistic.png`,
+      path: testInfo.outputPath(`${viewport.width}-optimistic.png`),
       animations: "disabled",
     });
     await request.post(origin + "/fixture/change", {
@@ -73,7 +75,7 @@ for (const [name, viewport] of [
     await expect(input).toHaveValue("A newer editable draft");
     await expect(page.locator(".user-message [role=status]")).toHaveCount(0);
     await page.screenshot({
-      path: `../.scratch/flickgrove-results/delivery-success-${name}.png`,
+      path: testInfo.outputPath(`delivery-success-${name}.png`),
     });
     await page.reload();
     await expect(input).toHaveValue("A newer editable draft");
@@ -95,7 +97,7 @@ for (const [name, viewport] of [
   test(`${name}: rejected content retries beside new draft; pending survives null lookup across refresh`, async ({
     page,
     request,
-  }) => {
+  }, testInfo) => {
     await page.setViewportSize(viewport);
     await request.post(origin + "/fixture/reset", {
       data: { mode: "no-workers" },
@@ -104,6 +106,8 @@ for (const [name, viewport] of [
       data: { sendMode: "held" },
     });
     await page.goto(origin);
+    if (viewport.width === 390)
+      await page.getByRole("button", { name: "Toggle Sidebar" }).click();
     await page
       .getByRole("button", { name: "Open Streaming voice input Orc" })
       .click();
@@ -126,22 +130,24 @@ for (const [name, viewport] of [
     await expect(failed.getByRole("status")).toContainText(
       "Synthetic rejection",
     );
-    const retry = failed.getByRole("button", { name: "Retry", exact: true });
+    const retry = failed
+      .last()
+      .getByRole("button", { name: "Retry", exact: true });
     await expect(retry).toBeVisible();
     const bubble = await failed.boundingBox(),
       button = await retry.boundingBox();
     expect(button!.x + button!.width).toBeLessThanOrEqual(bubble!.x);
     await page.screenshot({
-      path: `../.scratch/conversation-region-spinner/${viewport.width}-failed-send.png`,
+      path: testInfo.outputPath(`${viewport.width}-failed-send.png`),
     });
     await page.reload();
     await expect(retry).toBeVisible();
     await expect(input).toHaveValue("New draft");
     await retry.click();
-    await expect(failed.getByRole("status")).toContainText(
+    await expect(failed).toHaveCount(2);
+    await expect(failed.last().getByRole("status")).toContainText(
       "Synthetic rejection",
     );
-    await expect(failed).toHaveCount(1);
     await request.post(origin + "/fixture/change", {
       data: { sendMode: "held" },
     });
@@ -154,12 +160,13 @@ for (const [name, viewport] of [
       (el as HTMLButtonElement).click();
       (el as HTMLButtonElement).click();
     });
-    await expect(retry).toHaveCount(0);
-    await expect(failed.getByRole("status")).toHaveCount(0);
+    // Failed predecessors remain visible until a native successor is visible.
+    await expect(failed).toHaveCount(3);
+    await expect(failed.last().getByRole("status")).toHaveCount(0);
     await expect(page.locator(".detail-status")).toContainText("Working");
     await expect(input).toHaveValue("New draft");
     await page.screenshot({
-      path: `../.scratch/conversation-region-spinner/${viewport.width}-retrying.png`,
+      path: testInfo.outputPath(`${viewport.width}-retrying.png`),
     });
     await request.post(origin + "/fixture/change", {
       data: { sendMode: "accepted" },
@@ -181,7 +188,7 @@ for (const [name, viewport] of [
       ]),
     ).toEqual([1, 3]);
     await page.screenshot({
-      path: `../.scratch/conversation-region-spinner/${viewport.width}-retried.png`,
+      path: testInfo.outputPath(`${viewport.width}-retried.png`),
     });
     await request.post(origin + "/fixture/change", {
       data: { sendMode: "uncertain" },
@@ -191,6 +198,7 @@ for (const [name, viewport] of [
     const pending = page
       .locator(".user-message")
       .filter({ hasText: "Unknown content" });
+    await expect(pending).toHaveCount(1);
     await expect(pending.getByRole("status")).toHaveCount(0);
     await expect(page.locator(".delivery-error")).toHaveCount(0);
     await page.reload();
@@ -205,7 +213,7 @@ for (const [name, viewport] of [
       (await (await request.get(origin + "/fixture/info")).json()).inputs,
     ).toHaveLength(4);
     await page.screenshot({
-      path: `../.scratch/flickgrove-results/send-null-pending-${name}.png`,
+      path: testInfo.outputPath(`send-null-pending-${name}.png`),
       animations: "disabled",
     });
   });

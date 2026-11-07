@@ -199,6 +199,17 @@ export const deliveries = sqliteTable(
     index("deliveries_order").on(t.sessionId, t.position),
   ],
 );
+export const submissionFences = sqliteTable(
+  "submission_fences",
+  {
+    sessionId: text("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    operationId: text("operation_id").notNull(),
+    envelopeHash: text("envelope_hash").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.sessionId, t.operationId] })],
+);
 export const treeUserActivity = sqliteTable(
   "tree_user_activity",
   {

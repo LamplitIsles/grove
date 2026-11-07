@@ -343,12 +343,19 @@ export class HostService {
     operationId: string,
     text: string,
     files: File[],
+    authorUserId?: string,
   ) {
     const raw = this.raw(id);
     const agent = this.workspace.detail(raw);
     if (agent.role !== "orc" || agent.closed)
       throw new Error("Choose an open Orc conversation");
-    return this.workspace.images.upload(raw, operationId, text, files);
+    return this.workspace.uploadSubmissionImages(
+      raw,
+      operationId,
+      text,
+      files,
+      authorUserId,
+    );
   }
   media(id: string, imageId: string, preview: boolean) {
     const raw = this.raw(id);
@@ -360,21 +367,21 @@ export class HostService {
     text: string,
     operationId: string,
     images?: MessageImage[],
-    retry?: import("../src/chord-contract").RetrySend,
     authorUserId?: string,
+    predecessor?: import("./submission-admission").SubmissionEnvelope,
+    claimToken?: string,
   ) {
     const result = await this.workspace.send(
       this.raw(id),
       text,
       operationId,
       images,
-      retry,
       authorUserId,
+      true,
+      predecessor,
+      claimToken,
     );
-    return {
-      ...qualified(this.local(), result),
-      retryNotAdmitted: result.retryNotAdmitted,
-    };
+    return qualified(this.local(), result);
   }
   async enqueueFollowUp(
     id: string,
@@ -447,6 +454,8 @@ export class HostService {
     answers: Answer[],
     operationId: string,
     authorUserId?: string,
+    predecessor?: import("./submission-admission").SubmissionEnvelope,
+    claimToken?: string,
   ) {
     return qualified(
       this.local(),
@@ -455,6 +464,9 @@ export class HostService {
         answers,
         operationId,
         authorUserId,
+        true,
+        predecessor,
+        claimToken,
       ),
     );
   }
@@ -462,12 +474,54 @@ export class HostService {
     return this.workspace.retryDelivery(this.raw(id), deliveryId);
   }
   lookup(id: string, operationId: string) {
-    return this.workspace.lookup(this.raw(id), operationId);
+    return this.workspace.inspectSubmission(this.raw(id), operationId);
   }
-  async deleteFailedSubmission(id: string, operationId: string) {
+  reserveSubmission(id: string, authorUserId?: string) {
+    return this.workspace.reserveSubmission(this.raw(id), authorUserId);
+  }
+  reserveRetry(id: string, operationId: string, authorUserId?: string) {
+    return this.workspace.reserveRetry(this.raw(id), operationId, authorUserId);
+  }
+  inspectRetry(
+    id: string,
+    operationId: string,
+    envelope: import("./submission-admission").SubmissionEnvelope,
+    authorUserId?: string,
+  ) {
+    return this.workspace.inspectRetry(
+      this.raw(id),
+      operationId,
+      envelope,
+      authorUserId,
+    );
+  }
+  finalizeSubmission(
+    id: string,
+    operationId: string,
+    envelope: import("./submission-admission").SubmissionEnvelope,
+    authorUserId?: string,
+    predecessor?: import("./submission-admission").SubmissionEnvelope,
+  ) {
+    return this.workspace.finalizeSubmission(
+      this.raw(id),
+      operationId,
+      envelope,
+      authorUserId,
+      predecessor,
+    );
+  }
+  async deleteFailedSubmission(
+    id: string,
+    operationId: string,
+    authorUserId?: string,
+  ) {
     return qualified(
       this.local(),
-      await this.workspace.deleteFailedSubmission(this.raw(id), operationId),
+      await this.workspace.deleteFailedSubmission(
+        this.raw(id),
+        operationId,
+        authorUserId,
+      ),
     );
   }
   async stop(id: string, turnId: string) {

@@ -143,6 +143,7 @@ export type OutputSpeed = {
   status: "loading" | "ready" | "unavailable";
 };
 export interface Delivery {
+  supersededBy?: string;
   authorUserId?: string;
   admissionAt?: number;
   author?: Human;

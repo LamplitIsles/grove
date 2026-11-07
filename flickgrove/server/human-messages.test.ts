@@ -37,8 +37,8 @@ test("authors and independent participant times survive messages, agent activity
         })
         .run();
     const orc = await app.createOrc("alpha");
-    await app.send(orc.id, "hello", "a1", undefined, undefined, "a");
-    await app.send(orc.id, "world", "b1", undefined, undefined, "b");
+    await app.send(orc.id, "hello", "a1", undefined, "a");
+    await app.send(orc.id, "world", "b1", undefined, "b");
     const detail = detailSchema.parse(app.detail(orc.id));
     expect(detail.messages.find((m) => m.clientId === "a1")?.author?.name).toBe(
       "Alice",
@@ -63,14 +63,7 @@ test("authors and independent participant times survive messages, agent activity
       app.detail(orc.id).messages.find((m) => m.id === "external")?.author,
     ).toBeUndefined();
     const queuedOrc = await app.createOrc("beta");
-    await app.send(
-      queuedOrc.id,
-      "first",
-      "queued-first",
-      undefined,
-      undefined,
-      "a",
-    );
+    await app.send(queuedOrc.id, "first", "queued-first", undefined, "a");
     const firstTurn = app.detail(queuedOrc.id).turnId!;
     await app.enqueueFollowUp(
       queuedOrc.id,

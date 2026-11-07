@@ -25,7 +25,9 @@
   import ConversationTimeline from "./ConversationTimeline.svelte";
   import Composer from "./Composer.svelte";
   import Questions from "./Questions.svelte";
+  import { isDismissedPending } from "./outgoing.svelte";
   import QuestionRecord from "./QuestionRecord.svelte";
+  import LegacyPendingAction from "./LegacyPendingAction.svelte";
   import * as m from "./paraglide/messages";
   let { globalActions, showAuthors, users, detail, ready = true, queueReady = false, onenqueue, oncheckqueue, onqueueaction, tree, owner, skills, now, connected, mediaConnected, workers, lastSeen, actionError, closeError, onrefresh, onstop, onupdate, onrename, onclose, onopen, onsend, onanswer, onretry, onretryuser, retryErrors = {}, dispatching = [], optimisticWorking = false }: { globalActions: Snippet; showAuthors: boolean; users?: import("./contracts").Human[]; detail: Detail; ready?: boolean; queueReady?: boolean; onenqueue: (id:string,text:string,operationId:string,images:ImageDraft[]) => Promise<{status:"accepted" | "rejected" | "unknown"; error?:string}>; oncheckqueue: (id:string,operationId:string) => Promise<Delivery | null>; onqueueaction: (id:string,member:"cancelFollowUp" | "resumeFollowUps",operationId?:string) => Promise<void>; tree?: Agent; owner?: Agent; skills: Skill[]; now: number; connected: boolean; mediaConnected: boolean; workers: Agent[]; lastSeen?: number; actionError: string; closeError?: string; onupdate: (value: Detail) => void; onrefresh: () => Promise<void>; onstop: () => Promise<boolean>; onrename: (title: string) => Promise<string | undefined>; onclose: () => void; onopen: (id: string) => void; onsend: (agentId: string, text: string, requestId: string, images?: ImageDraft[]) => Promise<boolean>; onanswer: (answers: Answer[], operationId: string, text?: string) => Promise<void>; onretry: (id: string) => Promise<void>; onretryuser: (agentId:string,operationId:string,delivery?:Delivery) => Promise<void>; retryErrors?: Record<string,string>; dispatching?: string[]; optimisticWorking?: boolean; } = $props();
   let recoveryRecords = $state<Delivery[]>([]), recoveryCursor = $state<string | null | undefined>(undefined), recoveryError = $state("");
@@ -135,7 +137,7 @@
   const batchReferences = $derived([...new Map([
     ...fullQuestions.flatMap(q => q.answerOperation && detail.questions.find(ref => ref.id === q.id)?.state !== "answered" ? [q.answerOperation] : []),
     ...detail.deliveries.filter(d => d.source === "question" && d.status !== "sent").map(d => ({id:d.id,status:d.status})),
-  ].map(ref => [ref.id, ref])).values()].filter(ref => detail.deliveries.find(d => d.id === ref.id)?.status !== "sent"));
+  ].map(ref => [ref.id, ref])).values()].filter(ref => detail.deliveries.find(d => d.id === ref.id)?.status !== "sent" && !isDismissedPending(detail.id, ref.id, ref.status)));
   const batchReadKey = $derived(JSON.stringify(batchReferences));
   $effect(() => {
     const key = batchReadKey, revision = questionRevision;
@@ -151,7 +153,7 @@
     return () => controller.abort();
   });
   const shownQuestions = $derived(fullQuestions.filter(q => detail.questions.find(ref => ref.id === q.id)?.state !== "answered"));
-  const shownBatches = $derived(fullBatches.filter(d => detail.deliveries.find(ref => ref.id === d.id)?.status !== "sent").map(d => ({...d,status: detail.deliveries.find(ref => ref.id === d.id)?.status ?? d.status})));
+  const shownBatches = $derived(fullBatches.filter(d => detail.deliveries.find(ref => ref.id === d.id)?.status !== "sent" && !isDismissedPending(detail.id, d.id, detail.deliveries.find(ref => ref.id === d.id)?.status ?? d.status)).map(d => ({...d,status: detail.deliveries.find(ref => ref.id === d.id)?.status ?? d.status})));
   const pending = $derived(detail.questions.filter(q => q.state !== "answered"));
   const pendingCount = $derived(detail.role === "orc" ? detail.unansweredCount ?? pending.length : pending.length);
   $effect(() => {
@@ -169,7 +171,7 @@
   {#if detail.researchQuestion}<div class="review-target">Question: {detail.researchQuestion}</div>{/if}
   {#if detail.reviewTarget}<p class="review-target">{detail.reviewTarget.profile} · {detail.reviewTarget.spec} · {detail.reviewTarget.fixedPoint} → {detail.reviewTarget.reviewedHead}</p>{/if}
   {#if closeError}<p class="detail-close-error" role="alert">{closeError}</p>{/if}
-  <div class="detail-body"><div class="dialogue-column"><div class="conversation-wrap">{#key ready ? detail.threadId ?? "live" : "pending"}<ConversationTimeline bind:this={timeline} agentId={detail.id} boundary={ready ? detail.threadId : undefined} syncRevision={detail.readingRevision ?? 0} live={ready ? timelineMessages : []} {ready} {connected} detailError={!ready ? actionError : ""} reports={expandedReports} pinned={pinnedImage} onfollow={value => follow = value} onanchor={operation=>currentAnchor=operation}>
+  <div class="detail-body"><div class="dialogue-column"><div class="conversation-wrap">{#key ready ? detail.threadId ?? "live" : "pending"}<ConversationTimeline bind:this={timeline} agentId={detail.id} boundary={ready ? detail.threadId : undefined} syncRevision={detail.readingRevision ?? 0} live={ready ? timelineMessages : []} deliveries={recoveries} {ready} {connected} detailError={!ready ? actionError : ""} reports={expandedReports} pinned={pinnedImage} onfollow={value => follow = value} onanchor={operation=>currentAnchor=operation}>
     {#snippet header()}
     {#if !connected}<p class="host-outage" role="status">{m.host_offline()}{#if lastSeen}<br/>{m.last_seen({ time: new Date(lastSeen).toLocaleString() })}{/if}</p>{/if}
     {#if detail.closeRequest}<p class="model-note">{detail.closeRequest.reason}</p>{/if}
@@ -186,6 +188,7 @@
       {#if message.questionItemId || message.delivery?.source === "question"}<Button class="question-record-entry" variant="secondary" size="sm" onclick={() => openRecord(message)}><MessageCircle />View questions and answers</Button>{/if}
       {#if message.images?.length || message.localImageIds?.length}<MessageImages connected={mediaConnected} agentId={detail.id} operationId={message.id} images={message.images} localImageIds={message.localImageIds} onviewer={open => { if (open) pinnedImage = message.id; else if (pinnedImage === message.id) pinnedImage = undefined; }} />{/if}
       {#if delivery && submissionResult(delivery) === 'rejected' && !(delivery.source === "user" && dispatching.includes(delivery.id))}<small class="failed" role="status">{m.failed()}{#if retryErrors[detail.id + "/" + delivery.id] || delivery.error}<span> · {retryErrors[detail.id + "/" + delivery.id] || delivery.error}</span>{/if}</small>{/if}
+      {#if message.role === "user" && delivery?.source === "user" && submissionResult(delivery) === "pending" && !dispatching.includes(delivery.id)}<LegacyPendingAction agentId={detail.id} operationId={delivery.id} />{/if}
       {#if delivery?.status === "sent" && delivery.error}<small class="failed" role="status">{delivery.error}</small>{/if}
       </MessageBody></div>{/if}
     {/snippet}
