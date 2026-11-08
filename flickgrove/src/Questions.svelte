@@ -52,13 +52,13 @@
   function setDraft(q: Question, d: Draft) { if (locked) return; feedback = ""; select(q.id); drafts[q.id] = d; readingCache.writeDevice(storageKey, JSON.stringify(drafts)); }
   async function missing(q: Question) { select(q.id); feedback = "Answer this question before sending the batch."; await tick(); panel?.querySelector<HTMLTextAreaElement>('textarea')?.focus(); }
   async function submit() {
-    if (!connected || locked || recovering || hasDismissedAnswer(agentId, batch.map(q => q.id)) || !batch.length || composing || !onanswer) return;
+    if (!connected || locked || recovering || !batch.length || composing || !onanswer) return;
     const unfilled = batch.find(q => !value(q));
     if (unfilled) { await missing(unfilled); return; }
     const answers = batch.map(q => ({questionId:q.id,answer:value(q)}));
     const text = batch.map(q => `Question: ${q.text}\nAnswer: ${value(q)}`).join("\n\n");
     submitting = true; feedback = "";
-    try { const operationId = await reserveSubmission(agentId); if(active && !hasDismissedAnswer(agentId, answers.map(a => a.questionId))) await onanswer(answers, operationId, text); }
+    try { const operationId = await reserveSubmission(agentId); if(active) await onanswer(answers, operationId, text); }
     catch(e) { feedback = (e as Error).message; }
     finally { submitting = false; }
   }
@@ -77,7 +77,7 @@
 </script>
 <div class="questions-content" role="group" aria-label="Question navigation" bind:this={panel}>
   <div class="question-scroll">
-    {#if frozen}<section class="answer-batch" aria-label={m.answer_batch()} data-operation-id={frozen.id}><p class="batch-status" role="status">{submissionResult(frozen) === "pending" ? m.sending() : frozen.error ?? m.load_failure()}</p>{#each frozen.answers ?? [] as answer}<div class="answered-item"><Markdown text={questions.find(q => q.id === answer.questionId)?.text ?? ""} agentId={previewAgentId ?? undefined} {historyPreview} /><span>{answer.answer}</span></div>{/each}{#if submissionResult(frozen) === "pending"}<LegacyPendingAction {agentId} operationId={frozen.id} />{:else if submissionResult(frozen) === "rejected"}<Button variant="secondary" size="sm" disabled={!connected || submitting || answerUnconfirmed} onclick={async () => { if(hasDismissedAnswer(agentId,batch.map(q => q.id)))return; submitting = true; feedback = ""; try { await onretry?.(frozen.id, frozen); } catch(e) { feedback = (e as Error).message; } finally { submitting = false; } }}>{m.retry()}</Button>{/if}</section>
+    {#if frozen}<section class="answer-batch" aria-label={m.answer_batch()} data-operation-id={frozen.id}><p class="batch-status" role="status">{submissionResult(frozen) === "pending" ? m.pending_answer_delivery() : frozen.error ?? m.load_failure()}</p>{#each frozen.answers ?? [] as answer}<div class="answered-item"><Markdown text={questions.find(q => q.id === answer.questionId)?.text ?? ""} agentId={previewAgentId ?? undefined} {historyPreview} /><span>{answer.answer}</span></div>{/each}{#if submissionResult(frozen) === "pending"}<LegacyPendingAction {agentId} operationId={frozen.id} answer={frozen} />{:else if submissionResult(frozen) === "rejected"}<Button variant="secondary" size="sm" disabled={!connected || submitting} onclick={async () => { submitting = true; feedback = ""; try { await onretry?.(frozen.id, frozen); } catch(e) { feedback = (e as Error).message; } finally { submitting = false; } }}>{m.retry()}</Button>{/if}</section>
     {:else if current}
       {@const q = current}
       {@const d = draft(q)}
@@ -98,5 +98,5 @@
     {#if answerUnconfirmed && !readonly}<p class="inline-error" role="status">{m.pending_answer_unconfirmed()}</p>{/if}
     {#if feedback}<p class="inline-error" role="status">{feedback}</p>{/if}
   </div>
-  {#if batch.length}<div class="question-footer"><div class="question-arrows"><Button variant="ghost" size="icon-sm" aria-label="Previous question" disabled={index<=0 || !!frozen} onclick={() => move(-1)}><ChevronLeft /></Button><span>{m.question_position({current:index+1,total:batch.length})}</span><Button variant="ghost" size="icon-sm" aria-label="Next question" disabled={index>=batch.length-1 || !!frozen} onclick={() => move(1)}><ChevronRight /></Button></div>{#if !readonly && !frozen}<Button size="sm" disabled={!connected || locked || recovering || (index===batch.length-1 && answerUnconfirmed)} onclick={() => { if (index<batch.length-1) { if (current && !value(current)) void missing(current); else move(1); } else void submit(); }}>{index<batch.length-1 ? "Next" : m.send_all_answers()}</Button>{/if}</div>{/if}
+  {#if batch.length}<div class="question-footer"><div class="question-arrows"><Button variant="ghost" size="icon-sm" aria-label="Previous question" disabled={index<=0 || !!frozen} onclick={() => move(-1)}><ChevronLeft /></Button><span>{m.question_position({current:index+1,total:batch.length})}</span><Button variant="ghost" size="icon-sm" aria-label="Next question" disabled={index>=batch.length-1 || !!frozen} onclick={() => move(1)}><ChevronRight /></Button></div>{#if !readonly && !frozen}<Button size="sm" disabled={!connected || locked || recovering} onclick={() => { if (index<batch.length-1) { if (current && !value(current)) void missing(current); else move(1); } else void submit(); }}>{index<batch.length-1 ? "Next" : m.send_all_answers()}</Button>{/if}</div>{/if}
 </div>

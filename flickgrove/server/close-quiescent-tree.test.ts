@@ -642,3 +642,103 @@ for (const arrival of ["working", "question"] as const)
     }
     expect(reopened).toEqual([child.id]);
   });
+
+test("a failed root terminal permits ordinary Close tree", async () => {
+  const { app, runtime, owner, children, releases } = await fixture();
+  runtime.emit(owner.id, { type: "working", turnId: "root-turn" });
+  runtime.emit(owner.id, {
+    type: "completed",
+    turnId: "root-turn",
+    status: "failed",
+    error: "Provider rejected the request",
+  });
+  expect(app.detail(owner.id)).toMatchObject({
+    state: "error",
+    error: "Provider rejected the request",
+  });
+  await app.closeTree(owner.id);
+  expect(releases).toEqual([...children.map((c) => c.id), owner.id]);
+  expect(app.snapshot().agents).toEqual([]);
+});
+
+const answeredQuestion = (id: string) => ({
+  id,
+  itemId: "q",
+  index: 0,
+  at: 1,
+  text: "Choose?",
+  title: "Choose?",
+  state: "answered" as const,
+  answer: "Yes",
+  options: [],
+});
+const unknownAnswer = (questionIds: string[], source = "question") => ({
+  id: "unknown-answer",
+  text: "Question: Choose?\nAnswer: Yes",
+  source: source as "question" | "user",
+  status: "uncertain" as const,
+  questionIds,
+  at: 1,
+});
+
+test("an unknown answer only stops holding closure once its questions are answered", async () => {
+  const blocked: [(root: RuntimeAgent) => void, string][] = [
+    [
+      (root) => {
+        root.questions.push(answeredQuestion("kept"));
+        root.deliveries.push(unknownAnswer([]));
+      },
+      "is still working or has an unconfirmed delivery",
+    ],
+    [
+      (root) => {
+        root.questions.push(answeredQuestion("kept"));
+        root.deliveries.push(unknownAnswer(["kept", "gone"]));
+      },
+      "is still working or has an unconfirmed delivery",
+    ],
+    [
+      (root) => {
+        root.questions.push({
+          ...answeredQuestion("kept"),
+          state: "unanswered",
+        });
+        root.deliveries.push(unknownAnswer(["kept"]));
+      },
+      "is still working or has an unconfirmed delivery",
+    ],
+    [
+      (root) => {
+        root.questions.push(answeredQuestion("first"), {
+          ...answeredQuestion("second"),
+          state: "unanswered",
+        });
+        root.deliveries.push(unknownAnswer(["first", "second"]));
+      },
+      "is still working or has an unconfirmed delivery",
+    ],
+    [
+      (root) => {
+        root.questions.push(answeredQuestion("kept"));
+        root.deliveries.push(unknownAnswer(["kept"], "user"));
+      },
+      "is still working or has an unconfirmed delivery",
+    ],
+  ];
+  for (const [block, reason] of blocked) {
+    const { app, agents, owner } = await fixture();
+    block(agents.get(owner.id)!);
+    await expect(app.closeTree(owner.id)).rejects.toThrow(reason);
+    expect(app.snapshot().agents).toHaveLength(4);
+  }
+  {
+    // Every question of the unknown batch now carries a confirmed answer.
+    const { app, agents, owner, children, releases } = await fixture();
+    const root = agents.get(owner.id)!;
+    root.questions.push(answeredQuestion("kept"));
+    root.deliveries.push(unknownAnswer(["kept"]));
+    await app.closeTree(owner.id);
+    expect(releases).toEqual([...children.map((c) => c.id), owner.id]);
+    expect(app.snapshot().agents).toEqual([]);
+  }
+});

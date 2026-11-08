@@ -25,7 +25,7 @@
   import { api, editable, setClient } from "./api";
   import { RequestRejected, RequestTimeout } from "./chord-client";
   import { lookupSchema, inspectRetrySchema, abandonCloseSchema, deliverySchema, type Receipt } from "./chord-contract";
-  import { addOutgoing, observeRetry, observeRetryLink, observeOutgoing, outgoing, withOutgoing, acceptReceipt, unknownOutgoing, submissionResult, dismissedAnswerOperations, hasDismissedAnswer } from "./outgoing.svelte";
+  import { addOutgoing, observeRetry, observeRetryLink, observeOutgoing, outgoing, withOutgoing, acceptReceipt, unknownOutgoing, submissionResult, dismissedAnswerOperations } from "./outgoing.svelte";
   import { imageSchema } from "./chord-contract";
   import { loadImages, saveImages, operationKey, type ImageDraft } from "./image-drafts";
   import { receiptAlreadyAccepted, setOutgoingImages, clearClosedPending, closeRecovery, rememberCloseRecovery, forgetCloseRecovery } from "./outgoing.svelte";
@@ -455,14 +455,9 @@
       const envelope = "recoveryRef" in original && original.recoveryRef ? await reading<import("./contracts").Delivery>(`/recovery?${new URLSearchParams({agent:id,operation:operationId})}`, id) : original;
       if (!envelope.answers?.length) throw new Error("The original answers are unavailable.");
       const answers = $state.snapshot(envelope.answers);
-      if (hasDismissedAnswer(id,answers.map(answer=>answer.questionId))) throw new Error(m.pending_answer_unconfirmed());
       const predecessor:RetryEnvelope = {source:"question",answers};
       const retry = await retryReservation(id,operationId,predecessor);
       if (selectedId !== id) return;
-      if (hasDismissedAnswer(id,answers.map(answer=>answer.questionId))) {
-        observeRetry(id,envelope.text,retry.operationId,answers,{of:operationId,predecessor}); void lookup(id,retry.operationId);
-        return;
-      }
       if (retry.state === "won") await answerBatch(answers, retry.operationId, envelope.text, {of:operationId,predecessor,claimToken:retry.claimToken!});
       else { observeRetry(id,envelope.text,retry.operationId,answers,{of:operationId,predecessor}); void lookup(id,retry.operationId); }
       return;
@@ -708,7 +703,6 @@
   async function answerBatch(answers: Answer[], operationId: string, preparedText?: string, retry?:{of:string;predecessor:RetryEnvelope;claimToken:string}) {
     if (!selectedId || !hostConnected || !client || !detail) throw new Error("Connect to send your answer.");
     const id = selectedId;
-    if (hasDismissedAnswer(id,answers.map(answer=>answer.questionId))) throw new Error(m.pending_answer_unconfirmed());
     const text = preparedText ?? outgoing.entries.find(o => o.agentId === id && o.id === operationId)?.text ?? answers.map(answer => `Question: ${detail!.questions.find(q => q.id === answer.questionId)?.text}\nAnswer: ${answer.answer}`).join("\n\n");
     addOutgoing(id, text, operationId, answers, undefined, undefined, retry);
     try {

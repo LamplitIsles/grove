@@ -1,31 +1,34 @@
 <script lang="ts">
   import { Button } from "$lib/components/ui/button/index.js";
-  import { forgetLegacyPending, outgoing } from "./outgoing.svelte";
+  import { dismissPendingAnswer, forgetLegacyPending, outgoing, submissionResult } from "./outgoing.svelte";
+  import type { Delivery } from "./contracts";
   import * as m from "./paraglide/messages";
 
-  let { agentId, operationId }: { agentId: string; operationId: string } = $props();
+  let { agentId, operationId, answer }: { agentId: string; operationId: string; answer?: Delivery } = $props();
   let expanded = $state(false), feedback = $state("");
-  const item = $derived(outgoing.entries.find(o => o.agentId === agentId && o.id === operationId && o.status === "pending" && !o.admissionVersion));
+  const item = $derived(outgoing.entries.find(o => o.agentId === agentId && o.id === operationId && o.status === "pending" && (answer || !o.admissionVersion)));
+  const answerPending = $derived(answer?.source === "question" && submissionResult(answer) === "pending" && answer.questionIds.length > 0);
+  const text = $derived(item?.text ?? answer?.text ?? "");
 
   async function copy() {
-    if (!item) return;
-    try { await navigator.clipboard.writeText(item.text); feedback = m.pending_copied(); }
+    if (!text) return;
+    try { await navigator.clipboard.writeText(text); feedback = m.pending_copied(); }
     catch { feedback = m.pending_copy_failed(); }
   }
   function remove() {
-    try { forgetLegacyPending(agentId, operationId); expanded = false; feedback = ""; }
+    try { if (answer) dismissPendingAnswer(agentId, answer); else forgetLegacyPending(agentId, operationId); expanded = false; feedback = ""; }
     catch (error) { feedback = error instanceof Error ? error.message : m.load_failure(); }
   }
 </script>
 
-{#if item}
+{#if item || answerPending}
   {#if !expanded}<Button variant="ghost" size="sm" onclick={() => expanded = true}>{m.pending_remove()}</Button>
   {:else}<div class="legacy-pending-action">
     <p>{m.pending_remove_warning()}</p>
-    {#if item.text}<textarea readonly aria-label={m.pending_original_text()} value={item.text} rows="3"></textarea>{/if}
+    {#if text}<textarea readonly aria-label={m.pending_original_text()} value={text} rows="3"></textarea>{/if}
     {#if feedback}<p role="status">{feedback}</p>{/if}
     <div class="legacy-pending-buttons">
-      {#if item.text}<Button variant="ghost" size="sm" onclick={copy}>{m.pending_copy()}</Button>{/if}
+      {#if text}<Button variant="ghost" size="sm" onclick={copy}>{m.pending_copy()}</Button>{/if}
       <Button variant="ghost" size="sm" onclick={() => { expanded = false; feedback = ""; }}>{m.cancel()}</Button>
       <Button variant="secondary" size="sm" onclick={remove}>{m.pending_remove_confirm()}</Button>
     </div>

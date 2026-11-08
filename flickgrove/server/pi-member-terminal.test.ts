@@ -783,3 +783,218 @@ for (const kind of ["error", "progress"] as const)
       f.cleanup();
     }
   });
+
+test("a verified failed Orc terminal still permits Close tree", async () => {
+  const f = fixture();
+  try {
+    const owner = await f.app.createOrc("alpha");
+    f.runtime.sendOverride = async () => "turn-1";
+    await f.app.send(owner.id, "Read the images", "operation-1");
+    f.runtime.emit(owner.id, { type: "working", turnId: "turn-1" });
+    f.runtime.emit(owner.id, {
+      type: "item",
+      turnId: "turn-1",
+      item: {
+        id: "native-1",
+        type: "userMessage",
+        clientId: "operation-1",
+        text: "Read the images",
+      },
+    });
+    f.runtime.emit(owner.id, {
+      type: "completed",
+      turnId: "turn-1",
+      status: "failed",
+      verified: true,
+      error:
+        "Pi work ended without an answer. Inspect the conversation before continuing.",
+    });
+    expect(f.app.detail(owner.id)).toMatchObject({
+      state: "error",
+      error:
+        "Pi work ended without an answer. Inspect the conversation before continuing.",
+    });
+    // Nothing else holds closure: the accepted input is a settled delivery.
+    expect(f.app.detail(owner.id).deliveries.map((d) => d.status)).toEqual([
+      "sent",
+    ]);
+    expect(f.app.detail(owner.id).questions).toEqual([]);
+    await f.app.closeTree(owner.id);
+    expect(f.app.snapshot().agents).toEqual([]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("unverified or independently unknown work still refuses Close tree", async () => {
+  for (const cause of ["unverified", "unknown-answer", "question"] as const) {
+    const f = fixture();
+    try {
+      const owner = await f.app.createOrc("alpha");
+      f.runtime.emit(owner.id, { type: "working", turnId: "turn-question" });
+      if (cause === "question") {
+        f.runtime.emit(owner.id, {
+          type: "item",
+          turnId: "turn-question",
+          item: {
+            id: "ask-1",
+            type: "agentMessage",
+            delivery: "async",
+            text: "Which target?",
+            questions: [{ question: "Which target?" }],
+          },
+        });
+        expect(f.app.detail(owner.id).questions).toHaveLength(1);
+      }
+      if (cause === "unknown-answer") {
+        f.runtime.emit(owner.id, {
+          type: "item",
+          turnId: "turn-question",
+          item: {
+            id: "ask-2",
+            type: "agentMessage",
+            delivery: "async",
+            text: "Which target?",
+            questions: [{ question: "Which target?" }],
+          },
+        });
+        f.runtime.sendOverride = async () => {
+          throw new Error("socket closed after write");
+        };
+        await f.app.answerBatch(
+          owner.id,
+          [
+            {
+              questionId: f.app.detail(owner.id).questions[0]!.id,
+              answer: "A",
+            },
+          ],
+          "answer-operation",
+        );
+        expect(f.app.detail(owner.id).deliveries.at(-1)).toMatchObject({
+          source: "question",
+          status: "uncertain",
+        });
+      }
+      f.runtime.emit(owner.id, {
+        type: "completed",
+        turnId: "turn-question",
+        status: "failed",
+        ...(cause === "unverified" ? { verified: false } : { verified: true }),
+      });
+      expect(f.app.detail(owner.id).state).toBe("error");
+      await expect(f.app.closeTree(owner.id)).rejects.toThrow(
+        cause === "question"
+          ? "has unanswered questions"
+          : "is still working or has an unconfirmed delivery",
+      );
+      expect(f.app.snapshot().agents).toHaveLength(1);
+    } finally {
+      f.cleanup();
+    }
+  }
+});
+
+test("a verified failed Orc terminal still permits Close tree after recreation", async () => {
+  const f = fixture();
+  try {
+    const owner = await f.app.createOrc("alpha");
+    f.runtime.emit(owner.id, { type: "working", turnId: "turn-1" });
+    f.runtime.emit(owner.id, {
+      type: "completed",
+      turnId: "turn-1",
+      status: "failed",
+      verified: true,
+      error:
+        "Pi work ended without an answer. Inspect the conversation before continuing.",
+    });
+    await f.recreate();
+    expect(f.app.detail(owner.id)).toMatchObject({
+      state: "error",
+      error:
+        "Pi work ended without an answer. Inspect the conversation before continuing.",
+    });
+    await f.app.closeTree(owner.id);
+    expect(f.app.snapshot().agents).toEqual([]);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("an unknown answer confirmed by a new answer no longer blocks Close tree", async () => {
+  const f = fixture();
+  try {
+    const owner = await f.app.createOrc("alpha");
+    f.runtime.sendOverride = async () => "turn-1";
+    await f.app.send(owner.id, "Start", "operation-1");
+    f.runtime.emit(owner.id, { type: "working", turnId: "turn-1" });
+    f.runtime.emit(owner.id, {
+      type: "item",
+      turnId: "turn-1",
+      item: {
+        id: "ask-1",
+        type: "agentMessage",
+        delivery: "async",
+        text: "Continue?",
+        questions: [{ question: "Continue?" }],
+      },
+    });
+    const questionId = f.app.detail(owner.id).questions[0]!.id;
+    // The answer's admission outcome is unknown.
+    f.runtime.sendOverride = async () => {
+      throw new Error("socket closed after write");
+    };
+    const unknown = await f.app.reserveSubmission(owner.id);
+    await f.app.answerBatch(
+      owner.id,
+      [{ questionId, answer: "Yes" }],
+      unknown.operationId,
+      undefined,
+      true,
+    );
+    f.runtime.emit(owner.id, {
+      type: "completed",
+      turnId: "turn-1",
+      status: "failed",
+      verified: true,
+      error:
+        "Pi work ended without an answer. Inspect the conversation before continuing.",
+    });
+    // The unknown answer still holds closure while its question is unanswered.
+    await expect(f.app.closeTree(owner.id)).rejects.toThrow(
+      "is still working or has an unconfirmed delivery",
+    );
+    // The user answers again explicitly; that starts a fresh turn.
+    f.runtime.sendOverride = async () => "turn-2";
+    const next = await f.app.reserveSubmission(owner.id);
+    await f.app.answerBatch(
+      owner.id,
+      [{ questionId, answer: "Yes" }],
+      next.operationId,
+      undefined,
+      true,
+    );
+    f.runtime.emit(owner.id, {
+      type: "completed",
+      turnId: "turn-2",
+      status: "completed",
+      verified: true,
+    });
+    // The original operation keeps its unknown outcome and was never replayed.
+    expect(f.app.lookup(owner.id, unknown.operationId)).toBeNull();
+    expect(
+      f.app
+        .detail(owner.id)
+        .deliveries.find((d) => d.id === unknown.operationId),
+    ).toMatchObject({ source: "question", status: "uncertain" });
+    expect(f.app.detail(owner.id).questions[0]!.state).toBe("answered");
+    // The same rule keeps the abandon preflight reachable for other unknowns.
+    await expect(f.app.abandonCloseCandidate(owner.id)).rejects.toThrow(
+      "No unconfirmed user submissions to abandon",
+    );
+    await f.app.closeTree(owner.id);
+    expect(f.app.snapshot().agents).toEqual([]);
+  } finally {
+    f.cleanup();
+  }
+});

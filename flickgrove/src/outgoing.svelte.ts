@@ -330,6 +330,7 @@ export function withOutgoing(detail: Detail): Detail {
     (o) =>
       o.status !== "accepted" &&
       o.agentId === detail.id &&
+      !isDismissedPending(detail.id, o.id, journalStatus(o.status)) &&
       !detail.messages.some((m) => m.id === o.id || m.clientId === o.id),
   );
   const unobserved = detail.deliveries.filter(
@@ -537,6 +538,32 @@ export function forgetLegacyPending(agentId: string, id: string) {
   outgoing.entries = outgoing.entries.filter(
     (o) => o.agentId !== agentId || o.id !== id,
   );
+}
+
+// Hide an unknown answer locally without discarding its reconciliation journal.
+export function dismissPendingAnswer(
+  agentId: string,
+  delivery: import("./contracts").Delivery,
+) {
+  if (
+    delivery.source !== "question" ||
+    submissionResult(delivery) !== "pending" ||
+    !delivery.questionIds.length ||
+    receiptAlreadyAccepted(agentId, delivery.id)
+  )
+    throw new Error("This submission is no longer awaiting confirmation");
+  const local = outgoing.entries.find(
+    (o) => o.agentId === agentId && o.id === delivery.id,
+  );
+  if (local && !local.admissionVersion) {
+    forgetLegacyPending(agentId, delivery.id);
+    return;
+  }
+  readingCache.writeDevice(
+    dismissalKey(agentId, delivery.id),
+    JSON.stringify({ questionIds: delivery.questionIds }),
+  );
+  dismissals.revision++;
 }
 
 // Only call after the owning Peer confirms this explicitly abandoned session closed.

@@ -1675,3 +1675,125 @@ test("inspectRetry verifies the complete question envelope without changing ques
     f.runtime.inputs.filter((i) => i.clientId === next.operationId),
   ).toHaveLength(0);
 });
+
+async function unknownQuestion() {
+  const f = await fixture();
+  await f.app.send(f.id, "start", "fixture-start");
+  const detail = f.app.detail(f.id);
+  f.runtime.emit(f.id, {
+    type: "item",
+    turnId: detail.turnId!,
+    item: {
+      id: "q",
+      type: "agentMessage",
+      delivery: "async",
+      questions: [{ question: "Continue?" }],
+    },
+  });
+  const answers = [{ questionId: "q:0", answer: "Yes" }];
+  const old = await f.app.reserveSubmission(f.id);
+  f.runtime.sendOverride = async () => {
+    throw new Error("Synthetic unknown outcome");
+  };
+  await f.app.answerBatch(f.id, answers, old.operationId, undefined, true);
+  f.runtime.sendOverride = async () => "fixture-answer";
+  expect(f.app.detail(f.id).deliveries.at(-1)).toMatchObject({
+    id: old.operationId,
+    source: "question",
+    status: "uncertain",
+  });
+  return { f, answers, old };
+}
+
+test("an unknown answer batch does not block a new explicit answer", async () => {
+  const { f, answers, old } = await unknownQuestion();
+  const next = await f.app.reserveSubmission(f.id);
+  await f.app.answerBatch(f.id, answers, next.operationId, undefined, true);
+  const detail = f.app.detail(f.id);
+  // The original operation keeps its unknown outcome and is never replayed.
+  expect(detail.deliveries.find((d) => d.id === old.operationId)).toMatchObject(
+    { source: "question", status: "uncertain" },
+  );
+  expect(
+    detail.deliveries.find((d) => d.id === old.operationId)!.supersededBy,
+  ).toBeUndefined();
+  expect(f.app.lookup(f.id, old.operationId)).toBeNull();
+  expect(
+    detail.deliveries.find((d) => d.id === next.operationId),
+  ).toMatchObject({ source: "question", status: "sent" });
+  expect(f.app.detail(f.id).questions[0].state).toBe("answered");
+  // One native input per explicit submission.
+  expect(f.runtime.inputs.map((i) => i.clientId)).toEqual([
+    "fixture-start",
+    old.operationId,
+    next.operationId,
+  ]);
+});
+
+test("a second device is refused once another answer was confirmed", async () => {
+  const { f, answers, old } = await unknownQuestion();
+  const first = await f.app.reserveSubmission(f.id);
+  const second = await f.app.reserveSubmission(f.id);
+  await f.app.answerBatch(f.id, answers, first.operationId, undefined, true);
+  await expect(
+    f.app.answerBatch(f.id, answers, second.operationId, undefined, true),
+  ).rejects.toThrow("remain unanswered");
+  // Only the confirmed answer and the retained unknown batch reached the model.
+  expect(f.runtime.inputs.map((i) => i.clientId)).toEqual([
+    "fixture-start",
+    old.operationId,
+    first.operationId,
+  ]);
+  expect(
+    f.runtime.inputs.filter((i) => i.clientId === second.operationId),
+  ).toHaveLength(0);
+});
+
+test("a late native confirmation of the unknown answer retains both facts", async () => {
+  const { f, answers, old } = await unknownQuestion();
+  const next = await f.app.reserveSubmission(f.id);
+  await f.app.answerBatch(f.id, answers, next.operationId, undefined, true);
+  f.runtime.emit(f.id, {
+    type: "item",
+    turnId: "late-turn",
+    item: {
+      id: "late-native",
+      type: "userMessage",
+      clientId: old.operationId,
+      text: "Question: Continue?\nAnswer: Yes",
+    },
+  });
+  expect(f.app.lookup(f.id, old.operationId)).toMatchObject({
+    state: "accepted",
+  });
+  expect(
+    [old.operationId, next.operationId].map(
+      (id) => f.app.detail(f.id).deliveries.find((d) => d.id === id)!.status,
+    ),
+  ).toEqual(["sent", "sent"]);
+  expect(f.app.detail(f.id).questions[0].state).toBe("answered");
+  expect(f.runtime.inputs).toHaveLength(3);
+});
+
+test("an interrupted answer stays re-answerable after a restart", async () => {
+  const { f, answers, old } = await unknownQuestion();
+  // Model a process that stopped while the answer was still sending.
+  f.app.store.sqlite.run(
+    "UPDATE deliveries SET status='sending' WHERE session_id=? AND operation_id=?",
+    [f.id, old.operationId],
+  );
+  f.restart();
+  expect(f.app.detail(f.id).deliveries.at(-1)).toMatchObject({
+    id: old.operationId,
+    source: "question",
+    status: "uncertain",
+    error:
+      "Backend restarted before delivery was confirmed. Check the conversation before sending again.",
+  });
+  const next = await f.app.reserveSubmission(f.id);
+  await f.app.answerBatch(f.id, answers, next.operationId, undefined, true);
+  expect(f.app.detail(f.id).questions[0].state).toBe("answered");
+  expect(
+    f.app.detail(f.id).deliveries.find((d) => d.id === old.operationId),
+  ).toMatchObject({ status: "uncertain" });
+});

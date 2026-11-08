@@ -1660,7 +1660,7 @@ test("one immutable answer batch sends once, confirms original IDs, excludes new
   expect(resumedRuntime.inputs).toHaveLength(0);
 });
 
-test("rejected batch retries its persisted answers; unknown batch lookup and duplicate never resend", async () => {
+test("rejected batch retries its persisted answers; unknown batch keeps its unreceipted outcome across replays and later answers", async () => {
   const { app, runtime } = fixture();
   const a = await app.createOrc("alpha");
   await app.send(a.id, "Start", "first");
@@ -1715,17 +1715,20 @@ test("rejected batch retries its persisted answers; unknown batch lookup and dup
   };
   await app.answerBatch(a.id, next, "unknown-batch");
   const count = runtime.inputs.length;
+  // Repeating the same operation never sends again.
   await app.answerBatch(a.id, next, "unknown-batch");
-  await expect(app.answerBatch(a.id, next, "different-batch")).rejects.toThrow(
-    "original answer batch",
-  );
+  expect(runtime.inputs).toHaveLength(count);
   await expect(app.retryDelivery(a.id, "unknown-batch")).rejects.toThrow(
     "rejected",
   );
+  // A different explicit operation is a new answer, never a replay of the
+  // unknown one; the unknown operation keeps its unreceipted outcome.
+  runtime.sendOverride = undefined;
+  await app.answerBatch(a.id, next, "different-batch");
+  expect(runtime.inputs).toHaveLength(count + 1);
   expect(app.lookup(a.id, "unknown-batch")).toBeNull();
   expect(app.lookup(a.id, "never-submitted")).toBeNull();
-  expect(runtime.inputs).toHaveLength(count);
-  expect(app.detail(a.id).questions.at(-1)?.state).toBe("unanswered");
+  expect(app.detail(a.id).questions.at(-1)?.state).toBe("answered");
 });
 
 test("a rejected answer retry validates originals already accepted by another operation", async () => {

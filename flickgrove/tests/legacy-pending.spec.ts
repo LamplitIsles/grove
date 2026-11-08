@@ -2,8 +2,12 @@ import { expect, test } from "@playwright/test";
 
 const origin = "http://127.0.0.1:14319";
 
-for (const kind of ["message", "question"] as const) {
-  test(`dismissed legacy ${kind} remains local and native confirmation remains visible`, async ({
+for (const { kind, current } of [
+  { kind: "message", current: false },
+  { kind: "question", current: false },
+  { kind: "question", current: true },
+] as const) {
+  test(`dismissed ${current ? "current" : "legacy"} ${kind} remains local and native confirmation remains visible`, async ({
     page,
     browser,
     request,
@@ -73,16 +77,17 @@ for (const kind of ["message", "question"] as const) {
           ).orcDeliveries.find((d: any) => d.id === item.id)?.status,
       )
       .toBe("uncertain");
-    await page.evaluate((id) => {
-      for (const key of Object.keys(localStorage))
-        if (key.includes("/outgoing/")) {
-          const value = JSON.parse(localStorage.getItem(key)!);
-          if (value.id === id) {
-            delete value.admissionVersion;
-            localStorage.setItem(key, JSON.stringify(value));
+    if (!current)
+      await page.evaluate((id) => {
+        for (const key of Object.keys(localStorage))
+          if (key.includes("/outgoing/")) {
+            const value = JSON.parse(localStorage.getItem(key)!);
+            if (value.id === id) {
+              delete value.admissionVersion;
+              localStorage.setItem(key, JSON.stringify(value));
+            }
           }
-        }
-    }, item.id);
+      }, item.id);
     await page.reload();
     if (kind === "question")
       await page.getByRole("button", { name: "Toggle Sidebar" }).click();
@@ -93,6 +98,18 @@ for (const kind of ["message", "question"] as const) {
       await page.getByRole("button", { name: /pending question/ }).click();
     await page.getByRole("button", { name: "Remove pending message" }).click();
     await page.getByRole("button", { name: "Remove from this device" }).click();
+    if (current)
+      expect(
+        await page.evaluate(
+          (id) =>
+            Object.keys(localStorage).some(
+              (key) =>
+                key.includes("/outgoing/") &&
+                JSON.parse(localStorage.getItem(key)!).id === id,
+            ),
+          item.id,
+        ),
+      ).toBe(true);
     await expect(
       page.getByRole("button", { name: "Remove pending message" }),
     ).toHaveCount(0);
@@ -186,11 +203,129 @@ for (const kind of ["message", "question"] as const) {
   });
 }
 
+for (const scenario of ["current journal", "server only"] as const) {
+  test(`an unknown answer with ${scenario} can be dismissed and answered explicitly`, async ({
+    page,
+    request,
+  }) => {
+    await request.post(`${origin}/fixture/reset`, {
+      data: { mode: "working" },
+    });
+    await request.post(`${origin}/fixture/change`, {
+      data: { sendMode: "uncertain" },
+    });
+    await page.goto(origin);
+    await page
+      .getByRole("button", { name: "Open Streaming voice input Orc" })
+      .click();
+    await request.post(`${origin}/fixture/change`, {
+      data: {
+        question: true,
+        questionId: "legacy-server",
+        questionOptions: false,
+      },
+    });
+    const question = page.locator(".question-panel");
+    await question.locator("textarea").fill("First answer");
+    await question.locator("textarea").press("Enter");
+    const oldId = await expect
+      .poll(async () => {
+        const info = await (await request.get(`${origin}/fixture/info`)).json();
+        return info.orcDeliveries.find(
+          (d: { source: string; status: string }) =>
+            d.source === "question" && d.status === "uncertain",
+        )?.id;
+      })
+      .toBeTruthy()
+      .then(async () => {
+        const info = await (await request.get(`${origin}/fixture/info`)).json();
+        return info.orcDeliveries.find(
+          (d: { source: string; status: string }) =>
+            d.source === "question" && d.status === "uncertain",
+        ).id as string;
+      });
+    const storedBefore = await page.evaluate(
+      ({ id, scenario }) => {
+        for (const key of Object.keys(localStorage))
+          if (key.includes("/outgoing/")) {
+            const value = JSON.parse(localStorage.getItem(key)!);
+            if (value.id === id) {
+              if (scenario === "server only") localStorage.removeItem(key);
+              return value.admissionVersion;
+            }
+          }
+      },
+      { id: oldId, scenario },
+    );
+    expect(storedBefore).toBe(1);
+    await page.reload();
+    await page
+      .getByRole("button", { name: "Open Streaming voice input Orc" })
+      .click();
+    if (!(await question.isVisible()))
+      await page.getByRole("button", { name: /pending question/ }).click();
+    const remove = page.getByRole("button", { name: "Remove pending message" });
+    await expect(remove).toBeVisible();
+    await expect(
+      question.getByText("Answer delivery unconfirmed."),
+    ).toBeVisible();
+    await remove.click();
+    await page.getByRole("button", { name: "Remove from this device" }).click();
+    const retained = await page.evaluate(
+      (id) =>
+        Object.keys(localStorage).some(
+          (key) =>
+            key.includes("/outgoing/") &&
+            JSON.parse(localStorage.getItem(key)!).id === id,
+        ),
+      oldId,
+    );
+    expect(retained).toBe(scenario === "current journal");
+    await page.reload();
+    await page
+      .getByRole("button", { name: "Open Streaming voice input Orc" })
+      .click();
+    if (!(await question.isVisible()))
+      await page.getByRole("button", { name: /pending question/ }).click();
+    await expect(
+      question.getByText(/sending again may answer the question twice/i),
+    ).toBeVisible();
+    const before = (await (await request.get(`${origin}/fixture/info`)).json())
+      .inputs.length;
+    await request.post(`${origin}/fixture/change`, {
+      data: { sendMode: "accepted" },
+    });
+    await question.locator("textarea").fill("New answer");
+    const send = question.getByRole("button", { name: "Send all answers" });
+    await expect(send).toBeEnabled();
+    await expect(
+      question.getByText(/sending again may answer the question twice/i),
+    ).toBeVisible();
+    expect(
+      (await (await request.get(`${origin}/fixture/info`)).json()).inputs,
+    ).toHaveLength(before);
+    await send.click();
+    await expect
+      .poll(
+        async () =>
+          (await (await request.get(`${origin}/fixture/info`)).json()).inputs
+            .length,
+      )
+      .toBe(before + 1);
+    const info = await (await request.get(`${origin}/fixture/info`)).json();
+    expect(info.inputs.at(-1).text).toContain("New answer");
+    expect(info.inputs.at(-1).clientId).not.toBe(oldId);
+    expect(
+      info.orcDeliveries.find((d: { id: string }) => d.id === oldId).status,
+    ).toBe("uncertain");
+  });
+}
+
 for (const scenario of [
   "already dismissed",
   "dismissed during reservation",
 ] as const) {
-  test(`question retry remains safe when an unknown answer is ${scenario}`, async ({
+  test(`question retry remains available when an unknown answer is ${scenario}`, async ({
     page,
     context,
     request,
@@ -248,6 +383,9 @@ for (const scenario of [
       .getAttribute("data-operation-id");
     const before = (await (await request.get(`${origin}/fixture/info`)).json())
       .inputs.length;
+    await request.post(`${origin}/fixture/change`, {
+      data: { sendMode: "accepted" },
+    });
     const second = await context.newPage();
     await second.goto(origin);
     const dismiss = () =>
@@ -263,56 +401,30 @@ for (const scenario of [
       );
     if (scenario === "already dismissed") {
       await dismiss();
-      await expect(retry).toBeDisabled();
-      await retry.dispatchEvent("click");
+      await expect(retry).toBeEnabled();
+      await retry.click();
     } else {
       await retry.click();
       await expect.poll(() => !!release).toBe(true);
       await dismiss();
       release!();
-      await expect
-        .poll(async () =>
-          page.evaluate(
-            (failedId) =>
-              Object.keys(localStorage)
-                .filter((k) => k.includes("/outgoing/"))
-                .map((k) => JSON.parse(localStorage.getItem(k)!))
-                .some(
-                  (item) =>
-                    item.retryOf === failedId && !("claimToken" in item),
-                ),
-            failedId,
-          ),
-        )
-        .toBe(true);
     }
-    await expect(
-      question.getByText(/earlier answer may have been received/i),
-    ).toBeVisible();
     await expect
       .poll(
         async () =>
           (await (await request.get(`${origin}/fixture/info`)).json()).inputs
             .length,
       )
-      .toBe(before);
-    await page.waitForTimeout(500);
-    expect(
-      (await (await request.get(`${origin}/fixture/info`)).json()).inputs,
-    ).toHaveLength(before);
-    await page.reload();
-    await page
-      .getByRole("button", { name: "Open Streaming voice input Orc" })
-      .click();
-    await expect(
-      question.getByText(/earlier answer may have been received/i),
-    ).toBeVisible();
+      .toBe(before + 1);
+    const info = await (await request.get(`${origin}/fixture/info`)).json();
+    expect(info.inputs.at(-1).text).toContain("Failed separate answer");
+    expect(info.inputs.at(-1).clientId).not.toBe(failedId);
     await second.close();
   });
 }
 
 for (const width of [1440, 390]) {
-  test(`dismissed answer without a server row cannot be submitted again at ${width}`, async ({
+  test(`dismissed answer without a server row can be submitted again at ${width}`, async ({
     page,
     request,
   }, testInfo) => {
@@ -374,7 +486,7 @@ for (const width of [1440, 390]) {
     await question.locator("textarea").fill("An edited answer");
     await expect(
       question.getByRole("button", { name: "Send all answers" }),
-    ).toBeDisabled();
+    ).toBeEnabled();
     await expect(
       question.getByText(/earlier answer may have been received/i),
     ).toBeVisible();
@@ -384,10 +496,6 @@ for (const width of [1440, 390]) {
     const nativeBefore = (
       await (await request.get(`${origin}/fixture/info`)).json()
     ).inputs.length;
-    await question
-      .getByRole("button", { name: "Send all answers" })
-      .dispatchEvent("click");
-    await question.locator("textarea").press("Enter");
     let info = await (await request.get(`${origin}/fixture/info`)).json();
     expect(info.inputs).toHaveLength(nativeBefore);
     expect(
@@ -406,9 +514,17 @@ for (const width of [1440, 390]) {
     await expect(question.locator("textarea")).toHaveValue("An edited answer");
     await expect(
       question.getByRole("button", { name: "Send all answers" }),
-    ).toBeDisabled();
-    await question.locator("textarea").press("Enter");
+    ).toBeEnabled();
+    await question.getByRole("button", { name: "Send all answers" }).click();
+    await expect
+      .poll(
+        async () =>
+          (await (await request.get(`${origin}/fixture/info`)).json()).inputs
+            .length,
+      )
+      .toBe(nativeBefore + 1);
     info = await (await request.get(`${origin}/fixture/info`)).json();
-    expect(info.inputs).toHaveLength(nativeBefore);
+    expect(info.inputs.at(-1).text).toContain("An edited answer");
+    expect(info.inputs.at(-1).clientId).not.toBe("legacy-answer-no-row");
   });
 }

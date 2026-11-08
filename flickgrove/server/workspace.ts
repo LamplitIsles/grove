@@ -104,6 +104,21 @@ function uncertainExecution(d: RuntimeDelivery) {
       d.steerEvidence.attemptId !== (d.attemptId ?? d.id))
   );
 }
+/**
+ * An unknown answer batch whose questions all carry a later confirmed answer.
+ * The batch's own outcome stays unknown and is retained as such; only its
+ * effect on the questions is superseded, so it no longer keeps the tree open.
+ */
+function answeredUnknownAnswer(a: RuntimeAgent, d: RuntimeDelivery) {
+  return (
+    d.status === "uncertain" &&
+    d.source === "question" &&
+    d.questionIds.length > 0 &&
+    d.questionIds.every(
+      (id) => a.questions.find((q) => q.id === id)?.state === "answered",
+    )
+  );
+}
 const interruptedWork = "Previous work was interrupted.";
 
 function followUpInspectionCandidate(a: RuntimeAgent) {
@@ -3874,7 +3889,9 @@ export class Workspace {
           pendingFollowUp(d) ||
           d.status === "queued" ||
           d.status === "sending" ||
-          (d.status === "uncertain" && d.source !== "user"),
+          (d.status === "uncertain" &&
+            d.source !== "user" &&
+            !answeredUnknownAnswer(a, d)),
       )
     )
       throw new Error(
@@ -4064,12 +4081,15 @@ export class Workspace {
             );
           if (!answer.answer || answer.answer.length > 100_000)
             throw new Error("Write a valid answer for every question");
+          // An earlier batch that already settled as unknown does not block a
+          // new explicit answer: it is neither replayed nor rewritten, and its
+          // receipt stays unknown. Work that is still in flight does block.
           if (
             a.deliveries.some(
               (d) =>
                 d.source === "question" &&
                 d.questionIds.includes(q.id) &&
-                ["sending", "queued", "uncertain"].includes(d.status),
+                ["sending", "queued"].includes(d.status),
             )
           )
             throw new Error(
@@ -4705,8 +4725,13 @@ export class Workspace {
       throw new Error(
         `${a.title} has a follow-up turn with an unconfirmed outcome`,
       );
+    // A verified terminal failure settles its turn even though it leaves the
+    // Orc in state "error": Pi projects a failed provider turn that way. Work
+    // in progress, stopping, an unverified outcome and every unknown delivery
+    // in the conditions below still refuse closure.
+    const settledFailure = a.state === "error" && a.turnEnded === true;
     if (
-      a.state !== "idle" ||
+      (a.state !== "idle" && !settledFailure) ||
       (localCodex(a) &&
         (a.turnEnded === false ||
           a.stop?.status === "pending" ||
@@ -4716,7 +4741,7 @@ export class Workspace {
         (d) =>
           d.status === "queued" ||
           d.status === "sending" ||
-          d.status === "uncertain",
+          (d.status === "uncertain" && !answeredUnknownAnswer(a, d)),
       )
     )
       throw new Error(
