@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Workspace } from "./workspace";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "./testing";
 import { DeliveryRejected, StaleTurn } from "./runtime";
 
 const cleanups: (() => void)[] = [];
@@ -18,6 +22,7 @@ function fixture() {
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(
     () => rmSync(directory, { recursive: true, force: true }),
@@ -225,7 +230,6 @@ test("new Orcs capture defaults and retain their own project and conversation", 
   const second = await app.createOrc("beta", {
     fast: false,
     orc: { model: "luna", effort: "low" },
-    worker: { model: "sol", effort: "high" },
   });
   await app.send(first.id, "Build a reader", "message-1");
   expect(
@@ -356,6 +360,7 @@ test("backend restart restores questions and captured models and resumes an exis
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restarted.dispose());
   expect(restarted.detail(a.id)).toMatchObject({
@@ -700,7 +705,6 @@ test("each tree captures independent Orc and Worker settings while other trees c
   const { app, runtime } = fixture();
   const settings = {
     orc: { model: "sol", effort: "high" },
-    worker: { model: "sol", effort: "medium" },
   };
   const first = await app.createOrc("alpha");
   const second = await app.createOrc("alpha", { ...settings, fast: true });
@@ -812,6 +816,7 @@ test("queued Worker reports survive restart and unknown delivery keeps closure b
     directory,
     runtime: resumedRuntime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restarted.dispose());
   await restarted.send(a.id, "Resume explicitly", "resume");
@@ -914,6 +919,7 @@ test("queued async-question forwarding is durable before the owner queue runs", 
     directory,
     runtime: new FakeRuntime(),
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restarted.dispose());
   expect(restarted.detail(w.id).questions[0].state).toBe("delegated");
@@ -1058,6 +1064,7 @@ test("backend restart keeps a requested stop unknown and cannot replay it agains
     directory,
     runtime: nextRuntime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restarted.dispose());
   expect(restarted.detail(orc.id).stop?.status).toBe("unknown");
@@ -1301,6 +1308,7 @@ test("restart retains pending closure without pretending an interrupted turn com
     directory,
     runtime: resumedRuntime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restarted.dispose());
   expect(restarted.detail(worker.id)).toMatchObject({
@@ -1392,6 +1400,7 @@ test("Orc title edits update the runtime name, survive restart and never send a 
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restarted.dispose());
   await Bun.sleep(0);
@@ -1409,6 +1418,7 @@ test("selecting a restored Orc reads its canonical name without resuming turns a
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restored.dispose());
   const inputCount = runtime.inputs.length;
@@ -1433,6 +1443,7 @@ test("selecting a restored Orc reads its canonical name without resuming turns a
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => offline.dispose());
   await Bun.sleep(0);
@@ -1448,6 +1459,7 @@ test("resuming an Orc refreshes its cached name but Worker task titles stay loca
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restored.dispose());
   await Bun.sleep(0);
@@ -1492,6 +1504,7 @@ test("a rejected rename after disconnect preserves the visible and persisted tit
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restored.dispose());
   await Bun.sleep(0);
@@ -1639,6 +1652,7 @@ test("one immutable answer batch sends once, confirms original IDs, excludes new
     directory,
     runtime: resumedRuntime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restored.dispose());
   expect(restored.lookup(a.id, "batch-one")?.state).toBe("accepted");
@@ -2013,6 +2027,7 @@ test("a delayed title result cannot replace the reopened aggregate or durably cl
     directory,
     runtime: new FakeRuntime(),
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restarted.dispose());
   expect(restarted.snapshot().agents.some((v) => v.id === a.id)).toBe(true);

@@ -788,7 +788,6 @@ test("native isolated process reads validated localImage on start and steer exac
     const agent = await workspace.createOrc("fixture", {
       fast: false,
       orc: { model: "fixture-model", effort: "medium" },
-      worker: { model: "fixture-model", effort: "medium" },
     });
     const images = await workspace.images.upload(agent.id, "start", "", [file]);
     await workspace.send(agent.id, "", "start", images);
@@ -872,7 +871,6 @@ test("isolated app-server wire reads a multi-megabyte native page and oversized 
     const a = await app.createOrc("wire", {
       fast: false,
       orc: { model: "fixture-model", effort: "medium" },
-      worker: { model: "fixture-model", effort: "medium" },
     });
     // Populate only after the first native input; thread/start itself is empty.
     await app.send(a.id, "Establish native history", "wire-initial-input");

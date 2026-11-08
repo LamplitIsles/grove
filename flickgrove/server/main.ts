@@ -13,6 +13,10 @@ import { PiRuntime } from "./pi";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { CodexRuntime } from "./codex";
 import { Workspace } from "./workspace";
+import {
+  initializeMemberPresets,
+  memberPresetsDirectory,
+} from "./member-presets";
 import { ProjectEnvironments } from "./project-environments";
 import { HostService } from "./hosts";
 import { servePeer } from "./http";
@@ -70,6 +74,8 @@ if (values.auth) {
   process.exit(0);
 }
 await initializeReviewerConfig(configPath);
+const presetsDirectory = memberPresetsDirectory(configPath);
+await initializeMemberPresets(presetsDirectory);
 const environments = new ProjectEnvironments(configPath);
 const codexRuntime = new CodexRuntime({
   environments,
@@ -95,6 +101,7 @@ const app: Workspace = new Workspace({
   orcPrompt: () => orcPrompt(configPath),
   researcherSnapshot: () => researcherSnapshot(configPath),
   reviewerSnapshot: (profile) => reviewerSnapshot(configPath, profile),
+  memberPresets: { directory: presetsDirectory },
 });
 const auth = new GroveAuth(app.store, directory, origin);
 const service = new HostService(app, {

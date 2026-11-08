@@ -6,7 +6,11 @@ import { Workspace } from "./workspace";
 import sharp from "sharp";
 import { DeliveryRejected } from "./runtime";
 import { HostService, qualify } from "./hosts";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "./testing";
 import { servePeer } from "./http";
 import { openGrove, MAX_FRAME } from "../src/chord-client";
 import { socketWithHeaders } from "./socket-testing";
@@ -24,6 +28,7 @@ function fixture() {
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   let origin = "";
   const service = new HostService(app, { directory, origin: () => origin });
@@ -131,6 +136,7 @@ test("native client identity associates equal reports in one turn across arrival
     directory: f.directory,
     runtime: restoredRuntime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(f.directory),
   });
   cleanups.push(() => restored.dispose());
   const restoredReports = (await restored.agentHistory(a.id)).messages.filter(

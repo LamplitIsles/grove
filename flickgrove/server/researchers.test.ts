@@ -3,7 +3,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Workspace } from "./workspace";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixture,
+  writeMemberPreset,
+} from "./testing";
 import { DeliveryRejected } from "./runtime";
 import { HostService, qualify } from "./hosts";
 import { createHandler, createUpgrade } from "./http";
@@ -22,24 +27,21 @@ async function until(check: () => boolean) {
 async function peer() {
   const directory = await mkdtemp(join(tmpdir(), "grove-researcher-peer-"));
   let runtime = new FakeRuntime();
-  let prompt = "Initial research scope",
-    model = "sol",
-    effort = "high";
+  let prompt = "Initial research scope";
+  const memberPresets = await memberPresetsFixture(directory, {
+    researcher: { model: "sol", effort: "high" },
+  });
+  await writeMemberPreset(memberPresets.directory, "luna-researcher", {
+    researcher: { model: "luna", effort: "low" },
+  });
   const make = () =>
     new Workspace({
       directory,
       runtime,
       projects: async () => fixtureProjects,
-      researcherSnapshot: async () => ({
-        model,
-        effort,
-        prompt,
-      }),
-      reviewerSnapshot: async () => ({
-        model: "sol",
-        effort: "high",
-        prompt: "Review scope",
-      }),
+      researcherSnapshot: async () => ({ prompt }),
+      reviewerSnapshot: async () => ({ prompt: "Review scope" }),
+      memberPresets,
     });
   let app = make(),
     origin = "";
@@ -75,10 +77,9 @@ async function peer() {
       return service;
     },
     client,
-    configure(value: string) {
+    async configure(value: string) {
       prompt = value;
-      model = "luna";
-      effort = "low";
+      await app.selectMemberPreset("luna-researcher");
     },
     restart() {
       service.dispose();
@@ -173,7 +174,7 @@ test("Researcher survives two real Peer/Chord boundaries, async questions/report
     ).rejects.toThrow("Orc");
     await expect(
       a.client.call("updateSettings", { id, model: "luna", effort: "low" }),
-    ).rejects.toThrow("profile");
+    ).rejects.toThrow("Only Orc");
     await expect(
       a.app.tool(rt, "researcher_report", {
         question: "wrong task",
@@ -215,15 +216,17 @@ test("Researcher survives two real Peer/Chord boundaries, async questions/report
       researchQuestion: start.question,
     });
     expect(report.reviewTarget).toBeUndefined();
-    a.configure("New research scope");
+    await a.configure("New research scope");
     const fresh = (await a.app.tool(
       token,
       "researcher_start",
       start,
     )) as Detail;
-    expect(a.runtime.agents.get(fresh.id)!.researcherSnapshot).toEqual({
+    expect(a.app.detail(fresh.id)).toMatchObject({
       model: "luna",
       effort: "low",
+    });
+    expect(a.runtime.agents.get(fresh.id)!.researcherSnapshot).toEqual({
       prompt: "New research scope",
     });
     await a.app.tool(token, "researcher_send", {
@@ -333,9 +336,11 @@ test("Researcher survives two real Peer/Chord boundaries, async questions/report
       researchQuestion: start.question,
       state: "error",
     });
-    expect(a.runtime.agents.get(fresh.id)!.researcherSnapshot).toEqual({
+    expect(a.app.detail(fresh.id)).toMatchObject({
       model: "luna",
       effort: "low",
+    });
+    expect(a.runtime.agents.get(fresh.id)!.researcherSnapshot).toEqual({
       prompt: "New research scope",
     });
     await a.app.synchronizeDetail(owner.id);

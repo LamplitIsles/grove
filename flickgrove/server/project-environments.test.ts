@@ -17,7 +17,11 @@ import {
   type ProjectReadCommand,
 } from "./project-environments";
 import { Workspace } from "./workspace";
-import { FakeRuntime } from "./testing";
+import {
+  FakeRuntime,
+  memberPresetsFixture,
+  writeMemberPreset,
+} from "./testing";
 import { createHandler } from "./http";
 import { invoke } from "./chord-methods";
 import { HostService } from "./hosts";
@@ -124,7 +128,27 @@ printf '%s' '${JSON.stringify({
   const environments = new ProjectEnvironments(config, codex, command);
   const binding = await environments.binding("mac");
   const runtime = new FakeRuntime();
-  let roleBackend: "codex" | "pi" = "codex";
+  const memberPresets = await memberPresetsFixture(join(root, "state"));
+  await writeMemberPreset(memberPresets.directory, "pi-members", {
+    worker: {
+      backend: "pi",
+      provider: "fixture",
+      model: "sol",
+      effort: "medium",
+    },
+    researcher: {
+      backend: "pi",
+      provider: "fixture",
+      model: "sol",
+      effort: "medium",
+    },
+    standards: {
+      backend: "pi",
+      provider: "fixture",
+      model: "sol",
+      effort: "medium",
+    },
+  });
   const options = {
     directory: join(root, "state"),
     runtime,
@@ -133,18 +157,9 @@ printf '%s' '${JSON.stringify({
       id === "local"
         ? [{ alias: "same", name: "Local same", path: local }]
         : environments.projects(id),
-    reviewerSnapshot: async () => ({
-      backend: roleBackend,
-      model: "sol",
-      effort: "medium",
-      prompt: "owned reviewer",
-    }),
-    researcherSnapshot: async () => ({
-      backend: roleBackend,
-      model: "sol",
-      effort: "medium",
-      prompt: "owned researcher",
-    }),
+    reviewerSnapshot: async () => ({ prompt: "owned reviewer" }),
+    researcherSnapshot: async () => ({ prompt: "owned researcher" }),
+    memberPresets,
     branches: { read: async () => null, intervalMs: 60000 },
   };
   let app = new Workspace(options);
@@ -157,7 +172,6 @@ printf '%s' '${JSON.stringify({
   const settings = {
     fast: false,
     orc: { backend: "codex" as const, model: "sol", effort: "medium" },
-    worker: { backend: "codex" as const, model: "sol", effort: "medium" },
   };
   return {
     root,
@@ -176,7 +190,7 @@ printf '%s' '${JSON.stringify({
     get app() {
       return app;
     },
-    setRole: (b: "codex" | "pi") => (roleBackend = b),
+    setRole: (id: string) => app.selectMemberPreset(id),
     retarget: () => (host = "other-device.test"),
     rotateKey: () => (hostKey = "OTHER_TEST_KEY"),
     disconnect: () => (unavailable = true),
@@ -298,17 +312,24 @@ test("same aliases/paths remain isolated through delegation, history, restart an
     environment: f.binding,
   });
   const before = f.app.snapshot().agents.length;
-  for (const field of ["orc", "worker"] as const) {
-    await expect(
-      f.app.createOrc("mac:same", {
-        ...f.settings,
-        [field]: { ...f.settings[field], backend: "pi" },
-      }),
-    ).rejects.toThrow("Pi supports");
-  }
+  await expect(
+    f.app.createOrc("mac:same", {
+      ...f.settings,
+      orc: { ...f.settings.orc, backend: "pi" },
+    }),
+  ).rejects.toThrow("Pi supports");
   expect(f.app.snapshot().agents.length).toBe(before);
-  f.setRole("pi");
+  await f.setRole("pi-members");
   for (const [tool, args] of [
+    [
+      "worker_start",
+      {
+        project: "same",
+        title: "work",
+        spec: "#4424",
+        message: "work",
+      },
+    ],
     [
       "reviewer_start",
       {
@@ -1289,12 +1310,7 @@ for (const fault of ["offline", "removed", "retarget"] as const) {
     expect(f.runtime.inputs.length).toBe(before.sends);
     if (fault !== "offline")
       await expect(
-        app.resumeHistory(
-          saved.historyRef!,
-          remote.threadId!,
-          false,
-          f.settings,
-        ),
+        app.resumeHistory(saved.historyRef!, remote.threadId!, false),
       ).rejects.toThrow();
     expect(writerOpens).toBe(before.writerOpens);
     expect(f.runtime.inputs.length).toBe(before.sends);

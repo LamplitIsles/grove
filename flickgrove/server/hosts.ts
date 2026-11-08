@@ -242,15 +242,10 @@ export class HostService {
       this.qualifyMessage(m),
     );
   }
-  async resumeHistory(
-    alias: string,
-    threadId: string,
-    archived: boolean,
-    settings: Settings,
-  ) {
+  async resumeHistory(alias: string, threadId: string, archived: boolean) {
     return qualified(
       this.local(),
-      await this.workspace.resumeHistory(alias, threadId, archived, settings),
+      await this.workspace.resumeHistory(alias, threadId, archived),
     );
   }
   async createOrc(alias: string, settings: Settings) {

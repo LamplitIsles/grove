@@ -42,7 +42,6 @@ const configKeys = [
   "orcPromptSnapshot",
   "reviewerSnapshot",
   "researcherSnapshot",
-  "workerDefaults",
 ] as const;
 const deliveryKeys = [
   "mode",

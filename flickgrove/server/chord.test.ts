@@ -7,7 +7,11 @@ import { DeliveryRejected } from "./runtime";
 import { lookupSchema, receiptSchema } from "../src/chord-contract";
 import { Workspace } from "./workspace";
 import { HostService, qualify } from "./hosts";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "./testing";
 import { createUpgrade, createHandler } from "./http";
 import { groveWebsocket } from "./chord-socket";
 import { socketWithHeaders } from "./socket-testing";
@@ -98,6 +102,7 @@ function fixture(transport: "tcp" | "ordered" = "tcp") {
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   let origin = "";
   let service = new HostService(app, { directory, origin: () => origin });
@@ -156,6 +161,7 @@ function fixture(transport: "tcp" | "ordered" = "tcp") {
         orcPrompt,
         runtime: restoredRuntime,
         projects: async () => fixtureProjects,
+        memberPresets: memberPresetsFixtureSync(directory),
       });
       service = new HostService(app, { directory, origin: () => origin });
       return restoredRuntime;

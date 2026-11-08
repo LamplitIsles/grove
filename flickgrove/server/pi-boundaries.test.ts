@@ -161,8 +161,7 @@ async function fixture(
     model: "vision",
     effort: "off",
   };
-  const create = () =>
-    app.createOrc("owned", { fast: false, orc: defaults, worker: defaults });
+  const create = () => app.createOrc("owned", { fast: false, orc: defaults });
   const idle = async (id: string) => {
     for (let i = 0; i < 1000; i++) {
       if (app.detail(id).state !== "working") return;

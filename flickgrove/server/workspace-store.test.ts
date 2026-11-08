@@ -134,7 +134,6 @@ test("real Bun migrator converts all durable roles, envelopes and order atomical
     stop: { turnId: "unknown", status: "unknown" },
     closeRequest: { reason: "wait" },
     orcPromptSnapshot: "captured",
-    workerDefaults: { model: "sol", effort: "high", serviceTier: "default" },
     readingRevision: 88,
     historyCursor: "old",
     workingSince: 100,
@@ -195,12 +194,7 @@ test("real Bun migrator converts all durable roles, envelopes and order atomical
     threadId: "review-thread",
     closed: true,
     reviewTarget: { ...target, reviewedHead: "current-head" },
-    reviewerSnapshot: {
-      model: "sol",
-      effort: "high",
-      prompt: "review",
-      serviceTier: "default",
-    } as RuntimeAgent["reviewerSnapshot"],
+    reviewerSnapshot: { prompt: "review" },
     deliveries: [
       {
         id: "same-op",
@@ -216,12 +210,7 @@ test("real Bun migrator converts all durable roles, envelopes and order atomical
     role: "researcher",
     ownerId: "parent",
     researchQuestion: "Why?",
-    researcherSnapshot: {
-      model: "sol",
-      effort: "high",
-      prompt: "research",
-      serviceTier: "default",
-    } as RuntimeAgent["researcherSnapshot"],
+    researcherSnapshot: { prompt: "research" },
   });
   legacy(path, [
     parent,
@@ -239,7 +228,6 @@ test("real Bun migrator converts all durable roles, envelopes and order atomical
     stop: parent.stop,
     closeRequest: parent.closeRequest,
     project: parent.project,
-    workerDefaults: parent.workerDefaults,
     orcPromptSnapshot: "captured",
   });
   expect(loaded.deliveries).toEqual(parent.deliveries);
@@ -269,14 +257,14 @@ test("real Bun migrator converts all durable roles, envelopes and order atomical
   ).toBeNull();
   expect(
     db.sqlite.query("SELECT count(*) AS n FROM __drizzle_migrations").get(),
-  ).toEqual({ n: 7 });
+  ).toEqual({ n: 8 });
   const reopened = store(path);
   expect(reopened.byId("parent")?.deliveries).toEqual(parent.deliveries);
   expect(
     reopened.sqlite
       .query("SELECT count(*) AS n FROM __drizzle_migrations")
       .get(),
-  ).toEqual({ n: 7 });
+  ).toEqual({ n: 8 });
 });
 test("conversion failure rolls back schema, data and success log and refuses Workspace startup", () => {
   const { path, directory } = fixture();
@@ -908,25 +896,28 @@ test("0001 upgrades deployed 0000 Codex records atomically, retaining custom sna
     join(prior, first.tag + ".sql"),
   );
   legacy(path, [
-    agent("custom", {
-      threadId: "native-preserved",
-      orcPromptSnapshot: "custom prompt",
+    // A deployed 0000 row still carried worker defaults; 0001 upgrades it.
+    {
+      ...agent("custom", {
+        threadId: "native-preserved",
+        orcPromptSnapshot: "custom prompt",
+        deliveries: [
+          {
+            id: "unknown",
+            text: "immutable envelope",
+            status: "uncertain",
+            source: "user",
+            questionIds: [],
+            at: 7,
+          },
+        ],
+      }),
       workerDefaults: {
         model: "custom-model",
         effort: "high",
         serviceTier: "default",
       },
-      deliveries: [
-        {
-          id: "unknown",
-          text: "immutable envelope",
-          status: "uncertain",
-          source: "user",
-          questionIds: [],
-          at: 7,
-        },
-      ],
-    }),
+    } as unknown as RuntimeAgent,
   ]);
   const deployed = new Database(path);
   migrate(drizzle(deployed), { migrationsFolder: prior });
@@ -954,12 +945,6 @@ test("0001 upgrades deployed 0000 Codex records atomically, retaining custom sna
   const upgraded = store(path).byId("custom")!;
   expect(upgraded.backend).toBe("codex");
   expect(upgraded.threadId).toBe("native-preserved");
-  expect(upgraded.workerDefaults).toEqual({
-    backend: "codex",
-    model: "custom-model",
-    effort: "high",
-    serviceTier: "default",
-  });
   expect(upgraded.orcPromptSnapshot).toBe("custom prompt");
   expect(upgraded.deliveries[0]).toMatchObject({
     id: "unknown",

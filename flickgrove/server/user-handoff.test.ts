@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Workspace } from "./workspace";
-import { FakeRuntime } from "./testing";
+import { FakeRuntime, memberPresetsFixtureSync } from "./testing";
 import { HostService } from "./hosts";
 import { createHandler } from "./http";
 import type { RuntimeEvent, RuntimeAgent } from "./runtime";
@@ -25,16 +25,9 @@ async function fixture() {
     directory,
     runtime,
     projects: async () => [{ alias: "alpha", name: "Alpha", path: directory }],
-    reviewerSnapshot: async () => ({
-      model: "sol",
-      effort: "medium",
-      prompt: "Fixture",
-    }),
-    researcherSnapshot: async () => ({
-      model: "sol",
-      effort: "medium",
-      prompt: "Fixture",
-    }),
+    reviewerSnapshot: async () => ({ prompt: "Fixture" }),
+    researcherSnapshot: async () => ({ prompt: "Fixture" }),
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanup.push(
     () => rmSync(directory, { recursive: true, force: true }),

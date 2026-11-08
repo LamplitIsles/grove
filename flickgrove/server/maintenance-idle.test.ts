@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Workspace } from "./workspace";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "./testing";
 import { HostService } from "./hosts";
 import { InstanceControls } from "./instance-controls";
 import { createHandler } from "./http";
@@ -14,6 +18,7 @@ function fixture() {
   const options = {
     directory,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   };
   let app = new Workspace({ ...options, runtime });

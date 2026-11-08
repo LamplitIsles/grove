@@ -4,7 +4,11 @@ import { mkdtempSync, rmSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Workspace } from "./workspace";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "./testing";
 import type { HistorySession } from "../src/contracts";
 
 const cleanup: (() => void)[] = [];
@@ -18,6 +22,7 @@ function fixture() {
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanup.push(() => {
     app.dispose();

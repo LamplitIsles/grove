@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Workspace } from "./workspace";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "./testing";
 import type { RuntimeAgent } from "./runtime";
 
 const cleanups: (() => void)[] = [];
@@ -29,6 +33,7 @@ async function fixture() {
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     reviewerSnapshot: snapshot,
     researcherSnapshot: snapshot,
   });
@@ -105,6 +110,7 @@ test("ordinary Close releases all three roles before root, preserves history and
     directory,
     runtime: restoredRuntime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restored.dispose());
   expect(restored.snapshot().agents).toEqual([]);
@@ -129,6 +135,7 @@ test("restored root with unconfirmed startup refuses Close before releasing chil
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restored.dispose());
   await Promise.all(
@@ -318,7 +325,7 @@ test("native release gate refuses tree mutations before admission and leaves ano
       app.answerBatch(owner.id, [{ questionId: "q", answer: "yes" }], "answer"),
     ).rejects.toThrow("closing");
     await expect(
-      app.updateSettings(children[0]!.id, { model: "sol", effort: "high" }),
+      app.updateSettings(owner.id, { model: "sol", effort: "high" }),
     ).rejects.toThrow("closing");
     await expect(app.updateTreeFast(owner.id, false)).rejects.toThrow(
       "closing",
@@ -371,7 +378,7 @@ test("native release gate refuses tree mutations before admission and leaves ano
 
 for (const operation of ["settings", "start", "send"] as const)
   test(`preflight refuses an already executing ${operation} without release`, async () => {
-    const { app, runtime, owner, token, children, releases } = await fixture();
+    const { app, runtime, owner, token, releases } = await fixture();
     const gate = Promise.withResolvers<void>(),
       entered = Promise.withResolvers<void>();
     let pending: Promise<unknown>;
@@ -380,7 +387,7 @@ for (const operation of ["settings", "start", "send"] as const)
         entered.resolve();
         await gate.promise;
       };
-      pending = app.updateSettings(children[0]!.id, {
+      pending = app.updateSettings(owner.id, {
         model: "sol",
         effort: "high",
       });
@@ -431,6 +438,7 @@ test("native resume reveals active work before any release; disconnect never con
     directory,
     runtime: restoredRuntime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restored.dispose());
   const releases: string[] = [];
@@ -473,6 +481,7 @@ test("restart after partial release keeps remaining identities without replaying
     directory,
     runtime: next,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanups.push(() => restored.dispose());
   await Bun.sleep(0);

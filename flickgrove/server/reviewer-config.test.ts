@@ -6,10 +6,11 @@ import {
   initializeReviewerConfig,
   readReviewerConfig,
   reviewerSnapshot,
+  researcherSnapshot,
   orcPrompt,
 } from "./reviewer-config";
 
-test("configuration initializes missing files, retains customization, retries partial initialization and rejects errors", async () => {
+test("configuration initializes missing prompt files, retains customization, retries partial initialization and rejects errors", async () => {
   const root = await mkdtemp(join(tmpdir(), "grove-config-"));
   const path = join(root, "config.toml");
   try {
@@ -20,21 +21,13 @@ test("configuration initializes missing files, retains customization, retries pa
       "spec",
       "high_risk_spec",
     ]);
-    const highRisk = await reviewerSnapshot(path, "high_risk_spec");
-    expect(highRisk).toMatchObject({
-      backend: "codex",
-      model: "gpt-6.1-terra",
-      effort: "xhigh",
+    // Model selection belongs to member presets, never this file.
+    expect(original).not.toContain("model =");
+    expect(original).not.toContain("reasoning_effort =");
+    expect(await reviewerSnapshot(path, "high_risk_spec")).toEqual({
+      prompt: await readFile(join(root, "prompts/high_risk_spec.md"), "utf8"),
     });
-    await writeFile(
-      path,
-      original.replace('model = "gpt-6.1-terra"', 'model = "custom-model"'),
-    );
-    expect((await reviewerSnapshot(path, "high_risk_spec")).model).toBe(
-      "custom-model",
-    );
-    expect(highRisk.model).toBe("gpt-6.1-terra");
-    const customized = `${original}\n[reviewers.penpot]\nmodel = "old"\nprompt_file = "missing-old.md"\n`;
+    const customized = `${original}\n[reviewers.extra]\nprompt_file = "missing-old.md"\n`;
     await writeFile(path, customized);
     await initializeReviewerConfig(path);
     expect(await readFile(path, "utf8")).toBe(customized);
@@ -70,8 +63,6 @@ test("configuration initializes missing files, retains customization, retries pa
       "Invalid Grove reviewer configuration",
     );
     await writeFile(path, original);
-    const snapshot = await reviewerSnapshot(path, "standards");
-    expect(snapshot).toMatchObject({ model: "gpt-6-luna", effort: "high" });
     await writeFile(join(root, "prompts/standards.md"), "Custom axis scope");
     await unlink(join(root, "prompts/spec.md"));
     await initializeReviewerConfig(path);
@@ -82,7 +73,6 @@ test("configuration initializes missing files, retains customization, retries pa
     expect(
       (await reviewerSnapshot(path, "spec")).prompt.length,
     ).toBeGreaterThan(0);
-    expect(snapshot.prompt).not.toBe("Custom axis scope");
     await writeFile(
       path,
       original.replace("prompts/standards.md", "missing.md"),
@@ -90,7 +80,7 @@ test("configuration initializes missing files, retains customization, retries pa
     await expect(reviewerSnapshot(path, "standards")).rejects.toThrow(
       "Cannot read Reviewer prompt",
     );
-    await writeFile(path, '[reviewers.standards]\nmodel = ""');
+    await writeFile(path, '[reviewers.standards]\nprompt_file = ""');
     await expect(initializeReviewerConfig(path)).rejects.toThrow(
       "Invalid Grove reviewer configuration",
     );
@@ -98,6 +88,10 @@ test("configuration initializes missing files, retains customization, retries pa
     await expect(reviewerSnapshot(path, "spec")).rejects.toThrow(
       "Invalid Grove reviewer configuration",
     );
+    await writeFile(path, original);
+    await unlink(join(root, "prompts/researcher.md"));
+    await initializeReviewerConfig(path);
+    expect((await researcherSnapshot(path)).prompt.trim()).not.toBe("");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

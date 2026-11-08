@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CodexRuntime } from "./codex";
 import { Workspace } from "./workspace";
+import { memberPresetsFixtureSync } from "./testing";
 
 const until = async (f: () => boolean | Promise<boolean>) => {
   for (let i = 0; i < 300; i++) {
@@ -45,10 +46,10 @@ test("restart then shared native disconnect preserves confirmed idle and unknown
       runtime,
       projects: async () => [{ alias: "fixture", name: "fixture", path: dir }],
       branches: { read: async () => null },
-      reviewerSnapshot: async () => ({
-        model: "fixture-model",
-        effort: "medium",
-        prompt: "Fixture review",
+      reviewerSnapshot: async () => ({ prompt: "Fixture review" }),
+      memberPresets: memberPresetsFixtureSync(join(dir, "workspace"), {
+        worker: { model: "fixture-model", effort: "medium" },
+        researcher: { model: "fixture-model", effort: "medium" },
       }),
     });
     return { runtime, app };
@@ -255,6 +256,10 @@ test("idle startup waits for selection; a new input waits for recovery and faile
           { alias: "fixture", name: "fixture", path: dir },
         ],
         branches: { read: async () => null },
+        memberPresets: memberPresetsFixtureSync(join(dir, "workspace"), {
+          worker: { model: "fixture-model", effort: "medium" },
+          researcher: { model: "fixture-model", effort: "medium" },
+        }),
       }),
     };
   };
@@ -396,6 +401,10 @@ for (const ordering of ["event-first", "ack-first", "no-event"] as const) {
           { alias: "fixture", name: "fixture", path: dir },
         ],
         branches: { read: async () => null },
+        memberPresets: memberPresetsFixtureSync(join(dir, "workspace"), {
+          worker: { model: "fixture-model", effort: "medium" },
+          researcher: { model: "fixture-model", effort: "medium" },
+        }),
       });
       return { app, runtime };
     };

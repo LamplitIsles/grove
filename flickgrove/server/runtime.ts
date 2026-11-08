@@ -74,10 +74,6 @@ export interface RuntimeAgent extends Detail {
   orcPromptSnapshot?: string;
   researcherSnapshot?: import("./reviewer-config").ReviewerSnapshot;
   reviewerSnapshot?: import("./reviewer-config").ReviewerSnapshot;
-  workerDefaults?: ExecutionSettings & {
-    backend?: import("../src/contracts").Backend;
-    provider?: string;
-  };
   inheritSettings?: boolean;
   restoreArchived?: boolean;
   turnEnded?: boolean;

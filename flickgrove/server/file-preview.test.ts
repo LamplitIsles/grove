@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Workspace } from "./workspace";
 import { HostService } from "./hosts";
-import { FakeRuntime } from "./testing";
+import { FakeRuntime, memberPresetsFixtureSync } from "./testing";
 import { createHandler, createUpgrade } from "./http";
 import { filePreview, PREVIEW_BYTES, PREVIEW_TTL } from "./file-preview";
 import { localFile } from "../src/local-file";
@@ -42,12 +42,12 @@ async function fixture() {
       return catalogue.projects;
     },
     branches: { read: async () => null },
+    memberPresets: memberPresetsFixtureSync(join(root, "state")),
   });
   cleanup.push(() => app.dispose());
   const agent = await app.createOrc("test", {
     fast: false,
     orc: { model: "sol", effort: "medium" },
-    worker: { model: "sol", effort: "medium" },
   });
   let origin = "";
   const service = new HostService(app, {

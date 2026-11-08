@@ -455,7 +455,6 @@ test("native Pi tool turns do not create timestamp-only assistant rows in live o
       const current = await fallbackWorkspace.createOrc("fixture", {
         fast: false,
         orc: setting,
-        worker: setting,
       });
       await fallbackWorkspace.send(
         current.id,

@@ -27,7 +27,7 @@ import { groveWebsocket, type SocketData } from "../server/chord-socket";
 import { type RuntimeEvent, DeliveryRejected } from "../server/runtime";
 import { voiceHttp } from "../server/voice-http";
 import { fakeVoiceProvider } from "./voice-fixture";
-import { FakeRuntime } from "../server/testing";
+import { FakeRuntime, memberPresetsFixtureSync } from "../server/testing";
 import { projectCatalogue } from "../server/projects";
 import type { Detail, WeeklyUsage } from "../src/contracts";
 const directory = mkdtempSync(join(tmpdir(), "grove-design-preview-"));
@@ -58,7 +58,6 @@ let projectsFailure = false;
 const defaults = {
   fast: true,
   orc: { model: "gpt-6.1-sol", effort: "low" },
-  worker: { model: "gpt-6.1-sol", effort: "low" },
 };
 let usage: number | null = 72;
 let quotaFailure = false;
@@ -255,14 +254,15 @@ function unit(
       return unitProjects;
     },
     researcherSnapshot: async () => ({
-      model: "gpt-6.1-sol",
-      effort: "high",
       prompt: "Synthetic evidence investigation",
     }),
-    reviewerSnapshot: async () => ({
-      model: "gpt-6.1-sol",
-      effort: "high",
-      prompt: "Synthetic read-only review",
+    reviewerSnapshot: async () => ({ prompt: "Synthetic read-only review" }),
+    memberPresets: memberPresetsFixtureSync(join(stateDirectory, "config"), {
+      worker: { model: "gpt-6.1-sol", effort: "low" },
+      researcher: { model: "gpt-6.1-sol", effort: "high" },
+      standards: { model: "gpt-6.1-sol", effort: "high" },
+      spec: { model: "gpt-6.1-sol", effort: "high" },
+      high_risk_spec: { model: "gpt-6.1-sol", effort: "high" },
     }),
     ...(branchFixture
       ? {

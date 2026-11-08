@@ -2,25 +2,13 @@
 prompt_file = "prompts/orc.md"
 
 [researcher]
-backend = "codex"
-model = "gpt-6-luna"
-reasoning_effort = "high"
 prompt_file = "prompts/researcher.md"
 
 [reviewers.standards]
-backend = "codex"
-model = "gpt-6-luna"
-reasoning_effort = "high"
 prompt_file = "prompts/standards.md"
 
 [reviewers.spec]
-backend = "codex"
-model = "gpt-6-luna"
-reasoning_effort = "high"
 prompt_file = "prompts/spec.md"
 
 [reviewers.high_risk_spec]
-backend = "codex"
-model = "gpt-6.1-terra"
-reasoning_effort = "xhigh"
 prompt_file = "prompts/high_risk_spec.md"

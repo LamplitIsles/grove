@@ -182,7 +182,7 @@ test("Close tree releases a cold metadata-only Codex thread without resuming it"
     await import("@jaminzhou/codex-app-server-client");
   const { Workspace } = await import("./workspace");
   const { MixedRuntime } = await import("./mixed-runtime");
-  const { FakeRuntime } = await import("./testing");
+  const { FakeRuntime, memberPresetsFixtureSync } = await import("./testing");
   const root = await mkdtemp(join(tmpdir(), "grove-missing-rollout-"));
   const env: NodeJS.ProcessEnv = Object.fromEntries(
     Object.keys(process.env).map((key) => [key, undefined]),
@@ -240,7 +240,8 @@ test("Close tree releases a cold metadata-only Codex thread without resuming it"
       { alias: "owned", name: "Owned", path: root },
     ];
     const directory = join(root, "workspace");
-    app = new Workspace({ directory, runtime: fake, projects });
+    const memberPresets = memberPresetsFixtureSync(directory);
+    app = new Workspace({ directory, runtime: fake, projects, memberPresets });
     const owner = await app.createOrc("owned");
     const token = fake.agents.get(owner.id)!.token;
     const child = (await app.tool(token, "worker_start", {
@@ -260,6 +261,7 @@ test("Close tree releases a cold metadata-only Codex thread without resuming it"
       directory,
       runtime: new MixedRuntime(runtime, new FakeRuntime()),
       projects,
+      memberPresets,
     });
     // Wait for the existing startup reconciliation to settle, observing its
     // real resume failure before exercising the explicit Close entry point.
@@ -283,7 +285,7 @@ test("Close tree releases a cold metadata-only Codex thread without resuming it"
     expect(attempts).toEqual([]);
     expect(app.snapshot().agents).toEqual([]);
     app.dispose();
-    app = new Workspace({ directory, runtime: fake, projects });
+    app = new Workspace({ directory, runtime: fake, projects, memberPresets });
     expect(app.snapshot().agents).toEqual([]);
   } finally {
     app?.dispose();

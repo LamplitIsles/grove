@@ -1,3 +1,6 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type {
   Model,
   WeeklyUsage,
@@ -274,4 +277,84 @@ export class FakeRuntime implements Runtime {
   async close() {
     this.listeners.clear();
   }
+}
+
+export interface MemberChoiceFixture {
+  backend?: "codex" | "pi";
+  provider?: string;
+  model: string;
+  effort: string;
+}
+export interface MemberPresetFixture {
+  name?: string;
+  worker?: MemberChoiceFixture;
+  researcher?: MemberChoiceFixture;
+  standards?: MemberChoiceFixture;
+  spec?: MemberChoiceFixture;
+  high_risk_spec?: MemberChoiceFixture;
+}
+const fixtureChoice = (value: MemberChoiceFixture, indent = "") =>
+  [
+    `${indent}backend = "${value.backend ?? "codex"}"`,
+    ...(value.provider ? [`${indent}provider = "${value.provider}"`] : []),
+    `${indent}model = "${value.model}"`,
+    `${indent}reasoning_effort = "${value.effort}"`,
+  ].join("\n");
+export function memberPresetToml(
+  value: MemberPresetFixture = {},
+  id = "fixture",
+) {
+  const researcher = value.researcher ?? { model: "sol", effort: "high" };
+  return [
+    `name = ${JSON.stringify(value.name ?? id)}`,
+    "",
+    "[worker]",
+    fixtureChoice(value.worker ?? { model: "sol", effort: "medium" }),
+    "",
+    "[reviewers.standards]",
+    fixtureChoice(value.standards ?? researcher),
+    "",
+    "[reviewers.spec]",
+    fixtureChoice(value.spec ?? researcher),
+    "",
+    "[reviewers.high_risk_spec]",
+    fixtureChoice(value.high_risk_spec ?? researcher),
+    "",
+    "[researcher]",
+    fixtureChoice(researcher),
+    "",
+  ].join("\n");
+}
+/** Write one member preset file by its stable ID (the file name stem). */
+export async function writeMemberPreset(
+  directory: string,
+  id: string,
+  value: MemberPresetFixture = {},
+) {
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, `${id}.toml`), memberPresetToml(value, id));
+}
+/**
+ * Test-owned preset directory. The default `codex-only` file keeps the shipped
+ * default selection resolvable with FakeRuntime's own model catalogue.
+ */
+export async function memberPresetsFixture(
+  root: string,
+  value: MemberPresetFixture = {},
+  id = "codex-only",
+) {
+  const directory = join(root, "member-presets");
+  await writeMemberPreset(directory, id, value);
+  return { directory };
+}
+/** Synchronous variant for fixtures that build a Workspace outside an async body. */
+export function memberPresetsFixtureSync(
+  root: string,
+  value: MemberPresetFixture = {},
+  id = "codex-only",
+) {
+  const directory = join(root, "member-presets");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, `${id}.toml`), memberPresetToml(value, id));
+  return { directory };
 }

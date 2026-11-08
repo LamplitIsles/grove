@@ -44,7 +44,6 @@ test("production HTTP listener admits legal image bodies and rejects excess", as
     const agent = await service.createOrc("alpha", {
       fast: false,
       orc: { model: "sol", effort: "medium" },
-      worker: { model: "sol", effort: "medium" },
     });
     const headers = { Origin: origin, "X-Grove-Peer": service.identity.id };
     const url = (operation: string) =>

@@ -56,18 +56,8 @@ test("strict native wire disables model-aware collaboration on all role starts a
     deliveries: [],
     researchQuestion: index === 1 ? "What is the gate?" : undefined,
     researcherSnapshot:
-      index === 1
-        ? {
-            model: "fixture-model",
-            effort: "medium",
-            prompt: "Question evidence scope",
-          }
-        : undefined,
-    reviewerSnapshot: {
-      model: "fixture-model",
-      effort: "medium",
-      prompt: `axis-${id}`,
-    },
+      index === 1 ? { prompt: "Question evidence scope" } : undefined,
+    reviewerSnapshot: { prompt: `axis-${id}` },
     reviewTarget: {
       profile: index === 0 ? "standards" : "spec",
       spec: "#3573",

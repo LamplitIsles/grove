@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Workspace } from "./workspace";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "./testing";
 import { HostService, qualify } from "./hosts";
 import { InstanceControls } from "./instance-controls";
 import { createHandler } from "./http";
@@ -15,6 +19,7 @@ function fixture() {
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   const origin = "http://localhost:4318";

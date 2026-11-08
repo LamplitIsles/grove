@@ -1,3 +1,4 @@
+import { openSidebar } from "./browser-actions";
 import { chooseOption } from "./choice-interactions";
 import { expect, test, type Page } from "@playwright/test";
 const origin = "http://127.0.0.1:14319";
@@ -33,6 +34,7 @@ async function setup(page: Page, width = 1440) {
     data: { mode: "working" },
   });
   await page.goto(origin);
+  await openSidebar(page);
   await choose(page, "Reader performance");
   await expect(
     page.getByRole("button", { name: "Tree Fast", exact: true }),
@@ -41,7 +43,7 @@ async function setup(page: Page, width = 1440) {
 for (const width of [1440, 390])
   test(`${width} opened local settings atomic save/cancel, quick fast, next-turn and draft/caret; mobile click and Worker isolation`, async ({
     page,
-  }) => {
+  }, testInfo) => {
     await setup(page, width);
     const before = await info(page);
     const composer = page.getByRole("textbox", { name: "Message Orc" });
@@ -128,7 +130,7 @@ for (const width of [1440, 390])
     await expect(composer).toBeFocused();
     await page.waitForTimeout(150);
     await page.screenshot({
-      path: `../.scratch/flickgrove-first-detail-tree-fast/${width}-saved.png`,
+      path: testInfo.outputPath(`${width}-saved.png`),
     });
     await page.reload();
     await expect(page.locator(".detail-model")).toContainText(
@@ -145,7 +147,7 @@ for (const width of [1440, 390])
     await expect(panel.getByRole("switch", { name: "Fast" })).toHaveCount(0);
     await page.waitForTimeout(150);
     await page.screenshot({
-      path: `../.scratch/flickgrove-first-detail-tree-fast/${width}-panel.png`,
+      path: testInfo.outputPath(`${width}-panel.png`),
     });
     const box = await panel.boundingBox();
     expect(box!.width).toBeLessThanOrEqual(width - 32);
@@ -170,6 +172,14 @@ for (const width of [1440, 390])
       "aria-label",
       "Reader implementation",
     );
+    await expect(
+      page.getByRole("button", { name: "Session settings", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.locator(".detail-model")).toContainText("gpt-6.1-sol");
+    await page.keyboard.press("Alt+m");
+    await expect(
+      page.getByRole("dialog", { name: "Session settings" }),
+    ).toHaveCount(0);
     await expect(
       page.getByRole("button", { name: "Tree Fast", exact: true }),
     ).toBeEnabled();
@@ -202,7 +212,7 @@ for (const width of [1440, 390])
       treeAfter.localAgents.find((a: any) => a.id === "reader-orc").serviceTier,
     ).toBe("default");
     await page.screenshot({
-      path: `../.scratch/flickgrove-first-detail-tree-fast/${width}-tree-fast.png`,
+      path: testInfo.outputPath(`${width}-tree-fast.png`),
     });
   });
 test("model failure Cancel clears only model error; OptF toggles normally and tree unknown Retry retains its target", async ({

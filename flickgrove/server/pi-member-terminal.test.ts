@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Workspace } from "./workspace";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "./testing";
 import { HostService } from "./hosts";
 import { InstanceControls } from "./instance-controls";
 import { createHandler } from "./http";
@@ -29,6 +33,26 @@ function fixture() {
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory, {
+      worker: {
+        backend: "pi",
+        provider: "fixture",
+        model: "sol",
+        effort: "medium",
+      },
+      researcher: {
+        backend: "pi",
+        provider: "fixture",
+        model: "sol",
+        effort: "medium",
+      },
+      standards: {
+        backend: "pi",
+        provider: "fixture",
+        model: "sol",
+        effort: "medium",
+      },
+    }),
     branches: { read: async () => null },
     environments: {
       assert: () => assertEnvironment(),

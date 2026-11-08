@@ -87,7 +87,6 @@ test("large retained history does not hide a matching recent speed through Chord
     const agent = await app.createOrc("alpha", {
       fast: true,
       orc: { model: "sol", effort: "medium" },
-      worker: { model: "sol", effort: "medium" },
     });
     const id = qualify(service.identity.id, agent.id);
     await client.call("tps", { id });
@@ -151,7 +150,6 @@ test("real HTTP/HostService/Chord runs only lazy background analysis, shares TTL
     const agent = await app.createOrc("alpha", {
       fast: true,
       orc: { model: "sol", effort: "medium" },
-      worker: { model: "sol", effort: "medium" },
     });
     const id = qualify(service.identity.id, agent.id);
     expect(service.outputSpeed.diagnostics.starts).toBe(0);

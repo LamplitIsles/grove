@@ -31,6 +31,7 @@ import type {
   Answer,
   Delivery,
   Detail,
+  MemberPresetsStatus,
   Project,
   Settings,
   Snapshot,
@@ -58,6 +59,12 @@ import type { ProjectEnvironments } from "./project-environments";
 import { DeliveryRejected, RequestRefused, StaleTurn } from "./runtime";
 import { z } from "zod";
 import { roleTools, toolDefinitions, sessionTitle } from "./tools";
+import {
+  currentMemberPreset as resolveMemberPreset,
+  memberPresetsStatus as readMemberPresetsStatus,
+  selectMemberPreset as writeMemberPresetSelection,
+  type MemberModelChoice,
+} from "./member-presets";
 
 function reviewTargetText(target: ReviewTarget) {
   return `${target.profile} · spec ${target.spec} · fixed point ${target.fixedPoint} → reviewed HEAD ${target.reviewedHead}`;
@@ -471,6 +478,7 @@ export class Workspace {
       reviewerSnapshot?: (
         profile: import("../src/contracts").ReviewerProfile,
       ) => Promise<import("./reviewer-config").ReviewerSnapshot>;
+      memberPresets?: { directory: string };
       branches?: { read?: BranchReader; intervalMs?: number };
     },
   ) {
@@ -1173,7 +1181,6 @@ export class Workspace {
       piMemberTerminalVerified: _piMemberTerminalVerified,
       messages: _messages,
       deliveries: _deliveries,
-      workerDefaults: _workerDefaults,
       ...agent
     } = a;
     const owner = this.state.agents.find((o) => o.id === a.ownerId);
@@ -1542,9 +1549,9 @@ export class Workspace {
   ) {
     return this.serialize(id, async () => {
       const a = this.agent(id);
-      if (a.role === "reviewer" || a.role === "researcher")
+      if (a.role !== "orc")
         throw new Error(
-          "Reviewer/Researcher model and effort belong to its captured profile",
+          "Only Orc model and reasoning effort can be adjusted here",
         );
       if (a.closeRequest) throw new Error("Session is closing");
       const handle = await this.handle(a, false);
@@ -1711,6 +1718,19 @@ export class Workspace {
   }
   models() {
     return this.options.runtime.models();
+  }
+  memberPresetsStatus(): Promise<MemberPresetsStatus> {
+    return readMemberPresetsStatus(
+      this.options.memberPresets?.directory,
+      this.store,
+    );
+  }
+  selectMemberPreset(id: string) {
+    return writeMemberPresetSelection(
+      this.options.memberPresets?.directory,
+      this.store,
+      id,
+    );
   }
   projects(environment = "local") {
     return this.options.projects(environment);
@@ -1965,12 +1985,7 @@ export class Workspace {
     return page;
   }
 
-  async resumeHistory(
-    alias: string,
-    threadId: string,
-    archived: boolean,
-    settings?: Settings,
-  ) {
+  async resumeHistory(alias: string, threadId: string, archived: boolean) {
     return this.serialize(`history:${threadId}`, async () => {
       const project = await this.historyProject(alias);
       const existing =
@@ -2011,9 +2026,6 @@ export class Workspace {
         if (session.role !== "orc" && session.role !== "session")
           throw new Error("Continue this owned agent through its original Orc");
         await this.assertProject(project, existing?.backend ?? session.backend);
-        const workerDefaults = existing
-          ? existing.workerDefaults
-          : (await this.executionSettings(settings)).worker;
         const agent: RuntimeAgent = existing ?? {
           id: crypto.randomUUID(),
           token: crypto.randomUUID(),
@@ -2032,7 +2044,6 @@ export class Workspace {
           messages: [],
           deliveries: [],
           inheritSettings: true,
-          workerDefaults,
         };
         if (existing) this.store.track(agent);
         agent.restoreArchived = archived;
@@ -2073,12 +2084,6 @@ export class Workspace {
         model: first.id,
         effort: first.defaultEffort,
       },
-      worker: {
-        backend: first.backend ?? "codex",
-        provider: first.provider,
-        model: first.id,
-        effort: first.defaultEffort,
-      },
     };
     const capture = (defaults: Settings["orc"]) => {
       const backend = defaults.backend ?? "codex";
@@ -2096,7 +2101,7 @@ export class Workspace {
         serviceTier: value.fast ? (model.fastTier ?? "default") : "default",
       };
     };
-    return { orc: capture(value.orc), worker: capture(value.worker) };
+    return { orc: capture(value.orc) };
   }
   async createOrc(alias: string, settings?: Settings) {
     this.assertInstanceAvailable();
@@ -2107,13 +2112,9 @@ export class Workspace {
         (p) => p.alias === reference.alias,
       );
       if (!project) throw new Error("Registered project not found");
-      if (settings) {
-        await this.assertProject(project, settings.orc.backend);
-        await this.assertProject(project, settings.worker.backend);
-      }
+      if (settings) await this.assertProject(project, settings.orc.backend);
       const captured = await this.executionSettings(settings);
       await this.assertProject(project, captured.orc.backend);
-      await this.assertProject(project, captured.worker.backend);
       const a: RuntimeAgent = {
         id: crypto.randomUUID(),
         token: crypto.randomUUID(),
@@ -2122,7 +2123,6 @@ export class Workspace {
         title: "New session",
         ...captured.orc,
         treeFast: settings?.fast ?? false,
-        workerDefaults: captured.worker,
         orcPromptSnapshot: await this.options.orcPrompt?.(),
         state: "idle",
         closed: false,
@@ -4209,24 +4209,33 @@ export class Workspace {
             (p) => p.alias === requested.alias,
           );
           if (!project) throw new Error("Registered project not found");
+          // Members always resolve the instance's current preset, never the Orc's creation defaults.
+          const preset = await resolveMemberPreset(
+            this.options.memberPresets?.directory,
+            this.store,
+          );
+          const role = isReviewer
+            ? "reviewer"
+            : isResearcher
+              ? "researcher"
+              : "worker";
+          const assigned: MemberModelChoice = review
+            ? preset.reviewers[review.profile]
+            : isResearcher
+              ? preset.researcher
+              : preset.worker;
           const w: RuntimeAgent = {
             id: crypto.randomUUID(),
             token: crypto.randomUUID(),
-            role: isReviewer
-              ? "reviewer"
-              : isResearcher
-                ? "researcher"
-                : "worker",
+            role,
             ownerId: a.id,
             project,
             title: input.title,
-            ...(a.workerDefaults ?? {
-              backend: a.backend ?? "codex",
-              provider: a.provider,
-              model: a.model,
-              effort: a.effort,
-              serviceTier: a.serviceTier,
-            }),
+            backend: assigned.backend,
+            provider: assigned.provider,
+            model: assigned.model,
+            effort: assigned.effort,
+            serviceTier: "default",
             state: "idle",
             closed: false,
             questions: [],
@@ -4236,25 +4245,15 @@ export class Workspace {
           if ("question" in input) {
             if (!this.options.researcherSnapshot)
               throw new Error("Researcher configuration is unavailable");
-            const snapshot = await this.options.researcherSnapshot();
-            w.researcherSnapshot = snapshot;
-            w.backend = snapshot.backend ?? "codex";
-            w.provider = snapshot.provider;
-            w.model = snapshot.model;
-            w.effort = snapshot.effort;
+            w.researcherSnapshot = await this.options.researcherSnapshot();
             w.researchQuestion = input.question;
           }
           if (review) {
             if (!this.options.reviewerSnapshot)
               throw new Error("Reviewer configuration is unavailable");
-            const snapshot = await this.options.reviewerSnapshot(
+            w.reviewerSnapshot = await this.options.reviewerSnapshot(
               review.profile,
             );
-            w.reviewerSnapshot = snapshot;
-            w.backend = snapshot.backend ?? "codex";
-            w.provider = snapshot.provider;
-            w.model = snapshot.model;
-            w.effort = snapshot.effort;
             w.reviewTarget = {
               profile: review.profile,
               spec: review.spec,
@@ -4272,7 +4271,7 @@ export class Workspace {
             );
             if (!model || !model.efforts.includes(w.effort))
               throw new Error(
-                "Assigned model or reasoning effort is unavailable",
+                `Member preset ${preset.id} assigns an unavailable ${role} model or reasoning effort (${w.backend ?? "codex"}${w.provider ? `/${w.provider}` : ""}/${w.model} · ${w.effort}). Edit the preset or select another.`,
               );
             w.serviceTier =
               (a.treeFast ?? a.serviceTier !== "default")

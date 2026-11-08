@@ -8,7 +8,11 @@ import { HostService } from "../server/hosts";
 import { createHandler, createUpgrade } from "../server/http";
 import type { ServerWebSocket } from "bun";
 import { groveWebsocket, type SocketData } from "../server/chord-socket";
-import { FakeRuntime } from "../server/testing";
+import {
+  FakeRuntime,
+  memberPresetsFixtureSync,
+  writeMemberPreset,
+} from "../server/testing";
 import { GroveAuth } from "../server/auth";
 import { InstanceControls } from "../server/instance-controls";
 const directory = await mkdtemp(join(tmpdir(), "grove-file-browser-"));
@@ -31,7 +35,6 @@ const cdn = Bun.serve({
 const defaults = {
   fast: false,
   orc: { model: "sol", effort: "medium" },
-  worker: { model: "sol", effort: "medium" },
 };
 async function unit(name: string, color: string, origin: () => string) {
   const cwd = join(directory, crypto.randomUUID(), name);
@@ -65,11 +68,18 @@ async function unit(name: string, color: string, origin: () => string) {
     if (history.fail) throw new Error("Fixture navigation unavailable");
     return readWindow(thread, read);
   };
+  const memberPresets = memberPresetsFixtureSync(join(cwd, "config"), {
+    name: "Codex only",
+  });
+  await writeMemberPreset(memberPresets.directory, "alternative", {
+    name: "Alternative",
+  });
   const app = new Workspace({
     directory: join(cwd, "state"),
     runtime,
     projects: async () => [project, workerProject],
     branches: { read: async () => null },
+    memberPresets,
   });
   const agent = await app.createOrc("fixture", defaults);
   const owner = runtime.agents.get(agent.id)!;
@@ -516,7 +526,6 @@ const server = Bun.serve({
         "fixture",
         threadId,
         false,
-        defaults,
       );
       return Response.json({
         id: target.service.identity.id + ":" + restored.id,

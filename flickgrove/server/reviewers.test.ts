@@ -1,10 +1,15 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DeliveryRejected } from "./runtime";
 import { Workspace } from "./workspace";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+  writeMemberPreset,
+} from "./testing";
 import type { Detail } from "../src/contracts";
 import { HostService, qualify } from "./hosts";
 import { createHandler, createUpgrade } from "./http";
@@ -13,7 +18,7 @@ import { openGrove } from "../src/chord-client";
 import { socketWithHeaders } from "./socket-testing";
 import { initializeReviewerConfig, reviewerSnapshot } from "./reviewer-config";
 
-test("new Reviewers capture current configuration while existing snapshots remain unchanged", async () => {
+test("new Reviewers resolve the current member preset while existing members keep their captured model and prompt", async () => {
   const directory = await mkdtemp(join(tmpdir(), "grove-reviewer-config-"));
   const path = join(directory, "config", "config.toml");
   await initializeReviewerConfig(path);
@@ -30,11 +35,18 @@ test("new Reviewers capture current configuration while existing snapshots remai
       fastTier: null,
     })),
   ];
+  const memberPresets = memberPresetsFixtureSync(directory, {
+    high_risk_spec: { model: "gpt-6.1-terra", effort: "xhigh" },
+  });
+  await writeMemberPreset(memberPresets.directory, "custom-reviewer", {
+    high_risk_spec: { model: "custom-model", effort: "xhigh" },
+  });
   const app = new Workspace({
     directory: join(directory, "state"),
     runtime,
     projects: async () => fixtureProjects,
     reviewerSnapshot: (profile) => reviewerSnapshot(path, profile),
+    memberPresets,
   });
   try {
     const orc = await app.createOrc("alpha");
@@ -49,20 +61,31 @@ test("new Reviewers capture current configuration while existing snapshots remai
       message: "Review",
     };
     const first = (await app.tool(token, "reviewer_start", request)) as Detail;
-    const config = await readFile(path, "utf8");
-    await writeFile(
-      path,
-      config.replace('model = "gpt-6.1-terra"', 'model = "custom-model"'),
-    );
-    const second = (await app.tool(token, "reviewer_start", request)) as Detail;
-    expect(runtime.agents.get(first.id)!.reviewerSnapshot).toMatchObject({
+    expect(runtime.agents.get(first.id)).toMatchObject({
       model: "gpt-6.1-terra",
       effort: "xhigh",
     });
-    expect(runtime.agents.get(second.id)!.reviewerSnapshot).toMatchObject({
+    await writeFile(
+      join(directory, "config", "prompts", "high_risk_spec.md"),
+      "Custom axis scope",
+    );
+    await app.selectMemberPreset("custom-reviewer");
+    const second = (await app.tool(token, "reviewer_start", request)) as Detail;
+    expect(runtime.agents.get(second.id)).toMatchObject({
       model: "custom-model",
       effort: "xhigh",
     });
+    expect(runtime.agents.get(second.id)!.reviewerSnapshot).toEqual({
+      prompt: "Custom axis scope",
+    });
+    // The earlier Reviewer keeps its captured model and prompt.
+    expect(app.detail(first.id)).toMatchObject({
+      model: "gpt-6.1-terra",
+      effort: "xhigh",
+    });
+    expect(runtime.agents.get(first.id)!.reviewerSnapshot?.prompt).not.toBe(
+      "Custom axis scope",
+    );
   } finally {
     app.dispose();
     await rm(directory, { recursive: true, force: true });
@@ -80,12 +103,14 @@ test("Reviewer lifecycle crosses real Peer/Chord with target-bound reports, isol
   const directory = await mkdtemp(join(tmpdir(), "grove-reviewers-"));
   let runtime = new FakeRuntime();
   let prompt = "Original prompt";
+  const memberPresets = memberPresetsFixtureSync(directory);
   const make = () =>
     new Workspace({
       directory,
       runtime,
       projects: async () => fixtureProjects,
-      reviewerSnapshot: async () => ({ model: "sol", effort: "high", prompt }),
+      reviewerSnapshot: async () => ({ prompt }),
+      memberPresets,
     });
   let app = make();
   let origin = "";
@@ -124,7 +149,7 @@ test("Reviewer lifecycle crosses real Peer/Chord with target-bound reports, isol
     const other = await app.createOrc("beta");
     const token = runtime.agents.get(orc.id)!.token;
     await expect(
-      app.tool(token, "reviewer_start", { ...start, profile: "penpot" }),
+      app.tool(token, "reviewer_start", { ...start, profile: "unknown_axis" }),
     ).rejects.toThrow();
     expect(await app.tool(token, "reviewer_list", {})).toEqual([]);
     const a = (await app.tool(token, "reviewer_start", start)) as Detail;
@@ -135,11 +160,11 @@ test("Reviewer lifecycle crosses real Peer/Chord with target-bound reports, isol
     })) as Detail;
     expect(a.role).toBe("reviewer");
     expect(a.threadId).not.toBe(b.threadId);
-    expect(runtime.agents.get(a.id)!.reviewerSnapshot).toEqual({
+    expect(runtime.agents.get(a.id)).toMatchObject({
       model: "sol",
       effort: "high",
-      prompt,
     });
+    expect(runtime.agents.get(a.id)!.reviewerSnapshot).toEqual({ prompt });
     expect(await app.tool(token, "worker_list", {})).toEqual([]);
     expect(
       ((await app.tool(token, "reviewer_list", {})) as Detail[]).map(
@@ -167,7 +192,7 @@ test("Reviewer lifecycle crosses real Peer/Chord with target-bound reports, isol
     ).rejects.toThrow("Orc");
     await expect(
       client.call("updateSettings", { id, model: "luna", effort: "low" }),
-    ).rejects.toThrow("profile");
+    ).rejects.toThrow("Only Orc");
     await expect(
       app.tool(rt, "reviewer_report", {
         message: "PASS",
@@ -353,11 +378,8 @@ test("unconfirmed Reviewer startup remains inspectable and cannot replay creatio
     directory,
     runtime,
     projects: async () => fixtureProjects,
-    reviewerSnapshot: async () => ({
-      model: "sol",
-      effort: "high",
-      prompt: "Snapshot",
-    }),
+    memberPresets: memberPresetsFixtureSync(directory),
+    reviewerSnapshot: async () => ({ prompt: "Snapshot" }),
   });
   const target = { spec: "#3573", fixedPoint: "base", reviewedHead: "head" };
   try {

@@ -9,21 +9,8 @@ export const reviewerProfiles = [
   "spec",
   "high_risk_spec",
 ] as const;
+// Model selection belongs to the instance's member preset, never this file.
 const profileSchema = z.object({
-  backend: z.enum(["codex", "pi"]).default("codex"),
-  provider: z.string().trim().min(1).optional(),
-  model: z.string().trim().min(1),
-  reasoning_effort: z.enum([
-    "off",
-    "none",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-    "max",
-    "ultra",
-  ]),
   prompt_file: z.string().trim().min(1),
 });
 const configSchema = z.object({
@@ -36,10 +23,6 @@ const configSchema = z.object({
   }),
 });
 export interface ReviewerSnapshot {
-  backend?: "codex" | "pi";
-  provider?: string;
-  model: string;
-  effort: string;
   prompt: string;
 }
 const templates = fileURLToPath(new URL("../templates/", import.meta.url));
@@ -82,14 +65,10 @@ export async function initializeReviewerConfig(path: string) {
   ) {
     const defaults = await readFile(resolve(templates, "config.toml"), "utf8");
     const value = (Bun.TOML.parse(defaults) as Record<string, unknown>)
-      .researcher as {
-      model: string;
-      reasoning_effort: string;
-      prompt_file: string;
-    };
+      .researcher as { prompt_file: string };
     await writeFile(
       path,
-      `${text}${text.endsWith("\n") ? "" : "\n"}\n[researcher]\nmodel = ${JSON.stringify(value.model)}\nreasoning_effort = ${JSON.stringify(value.reasoning_effort)}\nprompt_file = ${JSON.stringify(value.prompt_file)}\n`,
+      `${text}${text.endsWith("\n") ? "" : "\n"}\n[researcher]\nprompt_file = ${JSON.stringify(value.prompt_file)}\n`,
       { mode: 0o600 },
     );
   }
@@ -111,13 +90,11 @@ export async function reviewerSnapshot(
   profile: ReviewerProfile,
 ): Promise<ReviewerSnapshot> {
   const value = (await readReviewerConfig(path)).reviewers[profile];
-  const promptPath = resolve(dirname(path), value.prompt_file);
   return {
-    backend: value.backend,
-    provider: value.provider,
-    model: value.model,
-    effort: value.reasoning_effort,
-    prompt: await readPrompt(promptPath, "Reviewer"),
+    prompt: await readPrompt(
+      resolve(dirname(path), value.prompt_file),
+      "Reviewer",
+    ),
   };
 }
 export async function researcherSnapshot(
@@ -125,10 +102,6 @@ export async function researcherSnapshot(
 ): Promise<ReviewerSnapshot> {
   const value = (await readReviewerConfig(path)).researcher;
   return {
-    backend: value.backend,
-    provider: value.provider,
-    model: value.model,
-    effort: value.reasoning_effort,
     prompt: await readPrompt(
       resolve(dirname(path), value.prompt_file),
       "Researcher",

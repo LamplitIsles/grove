@@ -40,12 +40,17 @@ test("native confirmed per-session settings serialize with start/steer, persist 
       FAKE_SERVER_PROCESS_LOG: join(directory, "processes"),
     },
   });
+  const memberPresets = await memberPresetsFixture(directory, {
+    worker: { model: "fixture-model", effort: "medium" },
+    researcher: { model: "fixture-model", effort: "medium" },
+  });
   const options = {
     directory: join(directory, "workspace"),
     runtime,
     projects: async () => [
       { alias: "fixture", name: "Fixture", path: directory },
     ],
+    memberPresets,
     branches: { read: async () => null },
   };
   let app = new Workspace(options);
@@ -194,14 +199,21 @@ test("native confirmed per-session settings serialize with start/steer, persist 
   }
 }, 20000);
 
-import { FakeRuntime, fixtureProjects } from "./testing";
-test("Worker and Orc settings leave captured Worker defaults and other sessions intact; queued close and late disposal refuse cache writes", async () => {
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixture,
+  writeMemberPreset,
+} from "./testing";
+test("members keep their preset model while Orc settings and other sessions change; queued close and late disposal refuse cache writes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "grove-settings-owner-"));
   const runtime = new FakeRuntime();
+  const memberPresets = await memberPresetsFixture(directory);
   const app = new Workspace({
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets,
     branches: { read: async () => null },
   });
   try {
@@ -219,12 +231,12 @@ test("Worker and Orc settings leave captured Worker defaults and other sessions 
       message: "Work",
     });
     const worker = app.snapshot().agents.find((a) => a.ownerId === orc.id)!;
+    // The member resolves the preset, not the Orc's own captured model.
     expect(worker.model).toBe("sol");
     expect(worker.effort).toBe("medium");
-    await app.updateSettings(worker.id, {
-      model: "sol",
-      effort: "high",
-    });
+    await expect(
+      app.updateSettings(worker.id, { model: "sol", effort: "high" }),
+    ).rejects.toThrow("Only Orc");
     expect(app.detail(orc.id).model).toBe("luna");
     expect(app.detail(other.id)).toMatchObject({
       ...other,
@@ -232,8 +244,7 @@ test("Worker and Orc settings leave captured Worker defaults and other sessions 
       deliveries: [],
     });
     await app.updateTreeFast(worker.id, true);
-    await app.updateSettings(worker.id, { model: "luna", effort: "low" });
-    expect(app.detail(worker.id).serviceTier).toBe("default");
+    expect(app.detail(worker.id).serviceTier).toBe("priority");
     expect(app.detail(orc.id).treeFast).toBe(true);
     await app.tool(token, "worker_close", { workerId: worker.id });
     await expect(
@@ -261,10 +272,15 @@ test("Worker and Orc settings leave captured Worker defaults and other sessions 
 test("tree Fast from Worker preserves models/efforts, isolates roots, covers future Workers and confirms partial retry without replay", async () => {
   const directory = await mkdtemp(join(tmpdir(), "grove-tree-fast-"));
   const runtime = new FakeRuntime();
+  const memberPresets = await memberPresetsFixture(directory);
+  await writeMemberPreset(memberPresets.directory, "luna-worker", {
+    worker: { model: "luna", effort: "low" },
+  });
   const app = new Workspace({
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets,
     branches: { read: async () => null },
   });
   try {
@@ -279,8 +295,9 @@ test("tree Fast from Worker preserves models/efforts, isolates roots, covers fut
         message: "Work",
       }) as Promise<import("../src/contracts").Detail>;
     const w = await start();
+    await app.selectMemberPreset("luna-worker");
     const unsupported = await start();
-    await app.updateSettings(unsupported.id, { model: "luna", effort: "low" });
+    await app.selectMemberPreset("codex-only");
     const calls: string[] = [];
     let unknown = true;
     runtime.settingsOverride = async (id, value) => {
@@ -363,17 +380,20 @@ test("tree Fast from Worker preserves models/efforts, isolates roots, covers fut
 test("changing the initial Fast owner's model to unsupported retains tree policy and future Worker Fast", async () => {
   const directory = await mkdtemp(join(tmpdir(), "grove-initial-tree-policy-"));
   const runtime = new FakeRuntime();
+  const memberPresets = await memberPresetsFixture(directory, {
+    worker: { model: "sol", effort: "high" },
+  });
   const app = new Workspace({
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets,
     branches: { read: async () => null },
   });
   try {
     const orc = await app.createOrc("alpha", {
       fast: true,
       orc: { model: "sol", effort: "medium" },
-      worker: { model: "sol", effort: "high" },
     });
     const token = runtime.agents.get(orc.id)!.token;
     await app.updateSettings(orc.id, { model: "luna", effort: "low" });

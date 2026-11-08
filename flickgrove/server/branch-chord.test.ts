@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Workspace } from "./workspace";
 import { HostService, qualify } from "./hosts";
-import { FakeRuntime } from "./testing";
+import { FakeRuntime, memberPresetsFixtureSync } from "./testing";
 import { fixtureGit, temporaryGit } from "./branch-testing";
 import { readDirectoryBranch } from "./directory-branches";
 import { createHandler, createUpgrade } from "./http";
@@ -44,6 +44,7 @@ function peer(root: string, name: string) {
     directory,
     runtime,
     projects: async () => projects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: {
       intervalMs: 30,
       read: async (path, signal) => {

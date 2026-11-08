@@ -6,7 +6,11 @@ import { HostService } from "../server/hosts";
 import { createHandler, createUpgrade } from "../server/http";
 import { groveWebsocket } from "../server/chord-socket";
 import type { HistorySession } from "../src/contracts";
-import { FakeRuntime, fixtureProjects } from "../server/testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "../server/testing";
 import { fixtureAuth } from "./fixture-auth";
 const directory = mkdtempSync(join(tmpdir(), "flickgrove-browser-"));
 const runtime = new FakeRuntime();
@@ -53,6 +57,7 @@ const app = new Workspace({
   directory,
   runtime,
   projects: async () => fixtureProjects,
+  memberPresets: memberPresetsFixtureSync(join(directory, "config")),
 });
 let turn = 0;
 runtime.sendOverride = async (id, text, activeTurn) => {

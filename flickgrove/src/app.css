@@ -2389,24 +2389,6 @@ button.question-option {
   padding: 4px;
   overflow-y: auto;
 }
-.settings-content .role-tabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid var(--border);
-}
-.role-tabs button {
-  padding: 8px 12px;
-  color: var(--muted-foreground);
-  font-size: 13px;
-  border-bottom: 2px solid transparent;
-}
-.role-tabs button:hover,
-.role-tabs button.active {
-  color: var(--foreground);
-}
-.role-tabs button.active {
-  border-bottom-color: var(--primary);
-}
 .settings-content .role-settings {
   margin-top: 16px;
 }
@@ -2444,9 +2426,6 @@ button.question-option {
 }
 .settings-section > h2 {
   margin-bottom: 20px;
-}
-.settings-heading + .role-tabs {
-  margin-top: 16px;
 }
 .profile-form {
   display: grid;

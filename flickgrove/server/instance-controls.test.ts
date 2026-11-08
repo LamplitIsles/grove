@@ -6,7 +6,11 @@ import { matchingVersion } from "./instance-version";
 import { instanceManager, ManagerNotStarted } from "./instance-manager";
 import { InstanceControls } from "./instance-controls";
 import { Workspace } from "./workspace";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "./testing";
 import { StaleTurn } from "./runtime";
 import { Database } from "bun:sqlite";
 import { HostService } from "./hosts";
@@ -83,6 +87,7 @@ test("restart holds admission across manager verification and unknown result wit
     directory: dir,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(dir),
     branches: { read: async () => null },
   });
   try {
@@ -185,6 +190,7 @@ test("reload reports Codex uncertainty and Pi session partial results independen
     directory: dir,
     runtime: new Runtime(),
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(dir),
     branches: { read: async () => null },
   });
   try {
@@ -223,6 +229,7 @@ test("human session and same origin are required for instance routes", async () 
     directory: dir,
     runtime: new FakeRuntime(),
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(dir),
     branches: { read: async () => null },
   });
   const origin = "http://localhost:4318";
@@ -289,6 +296,7 @@ for (const role of ["orc", "worker"] as const) {
       const options = {
         directory,
         projects: async () => fixtureProjects,
+        memberPresets: memberPresetsFixtureSync(directory),
         branches: { read: async () => null },
       };
       app = new Workspace({ ...options, runtime: before });
@@ -372,6 +380,7 @@ test("unverified failure and disconnected outcomes remain busy", async () => {
       directory,
       runtime,
       projects: async () => fixtureProjects,
+      memberPresets: memberPresetsFixtureSync(directory),
       branches: { read: async () => null },
     });
     try {
@@ -408,6 +417,7 @@ test("active and disconnected Codex Worker keeps an idle owner busy", async () =
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   try {
@@ -454,6 +464,7 @@ test("an unverified Pi completion remains busy even when its display state is id
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   try {
@@ -487,6 +498,7 @@ test("a confirmed failure retains unknown delivery protection but permits an una
       directory,
       runtime,
       projects: async () => fixtureProjects,
+      memberPresets: memberPresetsFixtureSync(directory),
       branches: { read: async () => null },
     });
     try {
@@ -562,6 +574,14 @@ test("unverified Pi Worker failure remains busy after recovery", async () => {
     const options = {
       directory,
       projects: async () => fixtureProjects,
+      memberPresets: memberPresetsFixtureSync(directory, {
+        worker: {
+          backend: "pi",
+          provider: "fixture",
+          model: "sol",
+          effort: "medium",
+        },
+      }),
       branches: { read: async () => null },
     };
     app = new Workspace({ ...options, runtime: before });
@@ -612,6 +632,7 @@ test.each(["orc", "worker"] as const)(
       directory,
       runtime,
       projects: async () => fixtureProjects,
+      memberPresets: memberPresetsFixtureSync(directory),
       branches: { read: async () => null },
     };
     let app = new Workspace(options);
@@ -679,6 +700,7 @@ test("unverified member completion followed by disconnect does not create an idl
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   try {
@@ -731,6 +753,7 @@ test("an idle-looking unverified Orc completion cannot close its tree", async ()
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   try {
@@ -763,6 +786,7 @@ test("an unverified interruption cannot confirm Stop or establish an idle bounda
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   try {
@@ -798,17 +822,10 @@ test.each(["worker", "reviewer", "researcher"] as const)(
       directory,
       runtime,
       projects: async () => fixtureProjects,
+      memberPresets: memberPresetsFixtureSync(directory),
       branches: { read: async () => null },
-      reviewerSnapshot: async () => ({
-        model: "sol",
-        effort: "high",
-        prompt: "fixture",
-      }),
-      researcherSnapshot: async () => ({
-        model: "sol",
-        effort: "high",
-        prompt: "fixture",
-      }),
+      reviewerSnapshot: async () => ({ prompt: "fixture" }),
+      researcherSnapshot: async () => ({ prompt: "fixture" }),
     });
     try {
       const owner = await app.createOrc("alpha");
@@ -873,6 +890,7 @@ test("shutdown does not retry an unknown Stop admission", async () => {
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   try {
@@ -913,6 +931,7 @@ test("graceful shutdown does not start a waiting follow-up when the original tur
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   try {
@@ -935,6 +954,7 @@ test("graceful shutdown does not start a waiting follow-up when the original tur
       directory,
       runtime,
       projects: async () => fixtureProjects,
+      memberPresets: memberPresetsFixtureSync(directory),
       branches: { read: async () => null },
     });
     expect(app.detail(owner.id).followUpPaused).toBe(true);
@@ -952,6 +972,7 @@ test("graceful shutdown preserves an unknown admission and its original identity
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   };
   let app = new Workspace(options);
@@ -996,6 +1017,7 @@ test("a legacy disconnected turn with only a delivery turn ID remains unconfirme
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   };
   let app = new Workspace(options);
@@ -1046,6 +1068,7 @@ test("an unknown start is not tied to a terminal by timing alone", async () => {
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   };
   let app = new Workspace(options);
@@ -1112,6 +1135,7 @@ test("a verified interrupted turn stays idle through disconnect and restart with
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   };
   let app = new Workspace(options);
@@ -1210,6 +1234,7 @@ test("a terminal before an uncertain steer response preserves its verified targe
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   try {
@@ -1254,6 +1279,7 @@ test("a pending start remains unconfirmed when another turn terminates", async (
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   const entered = Promise.withResolvers<void>();
@@ -1307,6 +1333,7 @@ test("a pending same-turn steer can remain idle after its verified terminal", as
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   const entered = Promise.withResolvers<void>();
@@ -1364,6 +1391,7 @@ test("a failed steer evidence write never crosses the native admission seam", as
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   try {
@@ -1392,6 +1420,7 @@ test("a stale steer followed by an unknown start does not reuse the old target",
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   try {
@@ -1437,6 +1466,7 @@ for (const kind of ["replayed", "unverified"] as const) {
       directory,
       runtime,
       projects: async () => fixtureProjects,
+      memberPresets: memberPresetsFixtureSync(directory),
       branches: { read: async () => null },
     });
     try {
@@ -1480,6 +1510,7 @@ test("stored evidence for a different attempt cannot prove an uncertain steer st
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   };
   let app = new Workspace(options);
@@ -1528,6 +1559,7 @@ test("a terminal for another turn cannot resolve an unknown start on disconnect"
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   try {
@@ -1582,6 +1614,7 @@ test("shutdown observes an errored local turn when its original turn ID is still
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
     branches: { read: async () => null },
   });
   try {

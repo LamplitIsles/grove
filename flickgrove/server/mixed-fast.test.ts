@@ -3,32 +3,40 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Workspace } from "./workspace";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixture,
+  writeMemberPreset,
+} from "./testing";
 
 test("new Fast trees apply priority only to capable Orc and Worker models", async () => {
   const directory = await mkdtemp(join(tmpdir(), "grove-fast-"));
   const runtime = new FakeRuntime();
+  const memberPresets = await memberPresetsFixture(directory, {
+    worker: { model: "sol", effort: "medium" },
+  });
+  await writeMemberPreset(memberPresets.directory, "luna-worker", {
+    worker: { model: "luna", effort: "low" },
+  });
   const app = new Workspace({
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets,
   });
   try {
-    for (const [orc, worker] of [
-      ["sol", "luna"],
-      ["luna", "sol"],
-    ]) {
+    for (const [orc, worker, preset] of [
+      ["sol", "luna", "luna-worker"],
+      ["luna", "sol", "codex-only"],
+    ] as const) {
+      await app.selectMemberPreset(preset);
       const root = await app.createOrc("alpha", {
         fast: true,
         orc: {
           backend: "codex",
-          model: orc!,
+          model: orc,
           effort: orc === "sol" ? "medium" : "low",
-        },
-        worker: {
-          backend: "codex",
-          model: worker!,
-          effort: worker === "sol" ? "medium" : "low",
         },
       });
       const child = (await app.tool(

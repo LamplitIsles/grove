@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Workspace } from "./workspace";
 import { HostService, qualify } from "./hosts";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "./testing";
 import { createHandler, createUpgrade } from "./http";
 import { groveWebsocket, type SocketData } from "./chord-socket";
 import type { ServerWebSocket } from "bun";
@@ -17,7 +21,6 @@ afterEach(() => {
 const settings = {
   fast: false,
   orc: { model: "sol", effort: "medium" },
-  worker: { model: "luna", effort: "low" },
 };
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "grove-peer-"));
@@ -26,6 +29,7 @@ function fixture() {
     directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   let origin = "";
   const service = new HostService(app, {
@@ -232,12 +236,11 @@ test("single-session history qualifies known identities like the history list", 
     "does not belong",
   );
 });
-test("captured Worker settings survive workspace restart without browser or global settings", async () => {
+test("the current member preset supplies Workers after a workspace restart without browser settings", async () => {
   const f = fixture();
   const agent = await f.app.createOrc("alpha", settings);
   await f.app.createOrc("beta", {
     ...settings,
-    worker: { model: "sol", effort: "high" },
   });
   f.app.dispose();
   const runtime = new FakeRuntime();
@@ -245,6 +248,9 @@ test("captured Worker settings survive workspace restart without browser or glob
     directory: f.directory,
     runtime,
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(f.directory, {
+      worker: { model: "luna", effort: "low" },
+    }),
   });
   cleanup.push(() => app.dispose());
   await app.send(agent.id, "Resume", "resume");

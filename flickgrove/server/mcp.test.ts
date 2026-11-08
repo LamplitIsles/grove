@@ -6,7 +6,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Workspace } from "./workspace";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "./testing";
 import { HostService } from "./hosts";
 import { createHandler } from "./http";
 
@@ -17,16 +21,9 @@ test("a real stdio MCP client discovers role tools and delegates through the aut
     directory,
     runtime,
     projects: async () => fixtureProjects,
-    researcherSnapshot: async () => ({
-      model: "sol",
-      effort: "high",
-      prompt: "Synthetic research scope",
-    }),
-    reviewerSnapshot: async () => ({
-      model: "sol",
-      effort: "high",
-      prompt: "Synthetic Reviewer scope",
-    }),
+    researcherSnapshot: async () => ({ prompt: "Synthetic research scope" }),
+    reviewerSnapshot: async () => ({ prompt: "Synthetic Reviewer scope" }),
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   let origin = "";
   const http = Bun.serve({

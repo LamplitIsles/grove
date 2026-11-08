@@ -28,7 +28,8 @@ test("existing Peer initializes only missing Researcher config/prompt and preser
     expect(await orcPrompt(path)).toBe("Custom Orc");
     expect((await reviewerSnapshot(path, "spec")).prompt).toBe("Custom Spec");
     const first = await researcherSnapshot(path);
-    expect(first).toMatchObject({ model: "gpt-6-luna", effort: "high" });
+    expect(first.prompt.trim()).not.toBe("");
+    expect(first).toEqual({ prompt: first.prompt });
     await writeFile(
       join(root, "custom-research.md"),
       "Custom question evidence",
@@ -54,10 +55,7 @@ test("existing Peer initializes only missing Researcher config/prompt and preser
     );
     await writeFile(
       path,
-      custom.replace(
-        'reasoning_effort = "high"',
-        'reasoning_effort = "invalid"',
-      ),
+      custom.replace('prompt_file = "custom-research.md"', "prompt_file = 7"),
     );
     await expect(researcherSnapshot(path)).rejects.toThrow("Invalid Grove");
   } finally {

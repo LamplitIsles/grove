@@ -40,12 +40,7 @@ export async function invoke(
     }
     case "resumeHistory": {
       const p = parse(member);
-      return await app.resumeHistory(
-        p.project,
-        p.threadId,
-        p.archived,
-        p.settings,
-      );
+      return await app.resumeHistory(p.project, p.threadId, p.archived);
     }
     case "detail":
       return await app.detail(parse(member).id);

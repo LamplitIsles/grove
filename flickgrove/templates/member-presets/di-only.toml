@@ -1,0 +1,31 @@
+name = "DI only"
+
+[worker]
+backend = "pi"
+provider = "deepinfra"
+model = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+reasoning_effort = "high"
+
+[reviewers.standards]
+backend = "pi"
+provider = "deepinfra"
+model = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+reasoning_effort = "high"
+
+[reviewers.spec]
+backend = "pi"
+provider = "deepinfra"
+model = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+reasoning_effort = "high"
+
+[reviewers.high_risk_spec]
+backend = "pi"
+provider = "deepinfra"
+model = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+reasoning_effort = "xhigh"
+
+[researcher]
+backend = "pi"
+provider = "deepinfra"
+model = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
+reasoning_effort = "high"

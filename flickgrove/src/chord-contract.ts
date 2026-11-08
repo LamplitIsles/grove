@@ -42,7 +42,6 @@ const defaults = z.object({
 export const settingsSchema = z.object({
   fast: z.boolean(),
   orc: defaults,
-  worker: defaults,
 });
 export const submissionEnvelopeSchema = z.discriminatedUnion("source", [
   z
@@ -82,7 +81,6 @@ export const inputs = {
     project: id,
     threadId: id,
     archived: z.boolean(),
-    settings: settingsSchema,
   }),
   detail: z.object({ id }),
   skills: z.object({ id }),

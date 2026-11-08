@@ -53,7 +53,7 @@
     if (selection && previous instanceof HTMLTextAreaElement) previous.setSelectionRange(...selection);
   }
   function show(captured = false) {
-    if (!connected || tree?.treeFastBusy || navigation.details.at(-1) !== detail.id || navigation.surfaces.some(surface => surface !== "questions") || pending.has(tree?.id ?? detail.ownerId ?? detail.id)) return;
+    if (detail.role !== "orc" || !connected || tree?.treeFastBusy || navigation.details.at(-1) !== detail.id || navigation.surfaces.some(surface => surface !== "questions") || pending.has(tree?.id ?? detail.ownerId ?? detail.id)) return;
     if (!captured) capture(); provider = detail.provider; model = detail.model; effort = detail.effort; modelError = "";
     setSurface("session-settings", true);
   }
@@ -84,13 +84,14 @@
     if (event.defaultPrevented || composing || event.isComposing || event.keyCode === 229 || navigation.surfaces.length || navigation.details.at(-1) !== detail.id) return;
     if (!event.altKey || event.metaKey || event.ctrlKey || event.shiftKey || !["KeyF", "KeyM"].includes(event.code)) return;
     if (event.target instanceof HTMLElement && event.target.closest(".questions-panel, .questions-content, .question-card")) return;
+    if (event.code === "KeyM" && detail.role !== "orc") return;
     event.preventDefault();
     if (event.repeat || treeBusy || pending.has(tree?.id ?? detail.ownerId ?? detail.id)) return;
     if (event.code === "KeyM") show(); else if (connected) void save("tree", !!tree?.treeFastError || !!treeError);
   }
 </script>
 <svelte:window onkeydown={keydown} oncompositionstart={() => composing = true} oncompositionend={() => composing = false} />
-<div class="session-controls"><button class="detail-model session-model" tabindex="-1" disabled={!connected || treeBusy || !!detail.closeRequest} title={m.session_next_turn()} aria-label={m.session_settings()} onpointerdown={capture} onclick={() => show(true)}><span>{detail.backend === "pi" ? "Pi" : "Codex"} · {detail.provider ? detail.provider + "/" : ""}{detail.model} / {detail.effort}</span></button>
+<div class="session-controls">{#if detail.role === "orc"}<button class="detail-model session-model" tabindex="-1" disabled={!connected || treeBusy || !!detail.closeRequest} title={m.session_next_turn()} aria-label={m.session_settings()} onpointerdown={capture} onclick={() => show(true)}><span>{detail.backend === "pi" ? "Pi" : "Codex"} · {detail.provider ? detail.provider + "/" : ""}{detail.model} / {detail.effort}</span></button>{:else}<span class="detail-model">{detail.backend === "pi" ? "Pi" : "Codex"} · {detail.provider ? detail.provider + "/" : ""}{detail.model} / {detail.effort}</span>{/if}
 <Button variant="ghost" size="icon-sm" class="tree-fast" disabled={!connected || treeBusy || !!detail.closeRequest} aria-label={m.tree_fast()} aria-pressed={!!tree?.treeFast} title={fastTitle} onclick={() => save("tree", !!tree?.treeFastError || !!treeError)}><Zap size={14} class={tree?.treeFast ? "size-3.5 text-primary" : "size-3.5 text-muted-foreground"} /></Button></div>
 {#if (treeError || tree?.treeFastError) && !open}<span class="session-settings-error" role="alert">{treeError || tree?.treeFastError} <button disabled={!connected || treeBusy} onclick={() => save("tree", !!tree?.treeFastError || !!treeError)}>{m.retry()}</button></span>{/if}
 <Dialog.Root {open} onOpenChange={value => { if (!value) void back(); }}>

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Workspace } from "./workspace";
 import { HostService } from "./hosts";
-import { FakeRuntime } from "./testing";
+import { FakeRuntime, memberPresetsFixtureSync } from "./testing";
 import { MixedRuntime } from "./mixed-runtime";
 import { PiRuntime } from "./pi";
 import { threadIdentity } from "./backend";
@@ -165,25 +165,39 @@ test("real Pi and Codex adapter form both mixed trees, with questions, reports, 
     tool: (token, name, args) => app.tool(token, name, args),
   });
   const runtime = new MixedRuntime(codex, pi);
-  const snapshot = {
+  const prompt = "Owned configured role prompt";
+  const piChoice = {
     backend: "pi" as const,
     provider: "fixture",
     model: "fake",
     effort: "off",
-    prompt: "Owned configured role prompt",
   };
   const configPath = join(home, "config", "config.toml");
   await initializeReviewerConfig(configPath);
-  const config = (await readFile(configPath, "utf8"))
-    .replaceAll('backend = "codex"', 'backend = "pi"\nprovider = "fixture"')
-    .replace(/^model = .*$/gm, 'model = "fake"')
-    .replace(/^reasoning_effort = .*$/gm, 'reasoning_effort = "off"');
-  await writeFile(configPath, config);
   for (const role of ["standards", "spec", "high_risk_spec", "researcher"])
-    await writeFile(
-      join(home, "config", "prompts", role + ".md"),
-      snapshot.prompt,
-    );
+    await writeFile(join(home, "config", "prompts", role + ".md"), prompt);
+  const memberPresets = memberPresetsFixtureSync(
+    home,
+    {
+      worker: piChoice,
+      researcher: piChoice,
+      standards: piChoice,
+      spec: piChoice,
+      high_risk_spec: piChoice,
+    },
+    "pi-members",
+  );
+  memberPresetsFixtureSync(
+    home,
+    {
+      worker: { backend: "codex", model: "sol", effort: "medium" },
+      researcher: piChoice,
+      standards: piChoice,
+      spec: piChoice,
+      high_risk_spec: piChoice,
+    },
+    "codex-worker",
+  );
   const options = {
     directory,
     runtime,
@@ -191,8 +205,10 @@ test("real Pi and Codex adapter form both mixed trees, with questions, reports, 
     reviewerSnapshot: (profile: Parameters<typeof reviewerSnapshot>[1]) =>
       reviewerSnapshot(configPath, profile),
     researcherSnapshot: () => researcherSnapshot(configPath),
+    memberPresets,
   };
   app = new Workspace(options);
+  await app.selectMemberPreset("pi-members");
   const until = async (predicate: () => boolean) => {
     for (let i = 0; i < 1000; i++) {
       if (predicate()) return;
@@ -221,12 +237,6 @@ test("real Pi and Codex adapter form both mixed trees, with questions, reports, 
     const owner = await app.createOrc("owned", {
       fast: true,
       orc: { backend: "codex", model: "sol", effort: "medium" },
-      worker: {
-        backend: "pi",
-        provider: "fixture",
-        model: "fake",
-        effort: "off",
-      },
     });
     plans.push(
       {
@@ -332,10 +342,10 @@ test("real Pi and Codex adapter form both mixed trees, with questions, reports, 
       ),
     ).toBe(false);
     // Native Pi Orc invokes the same management bridge to create a Codex child.
+    await app.selectMemberPreset("codex-worker");
     const piOwner = await app.createOrc("owned", {
       fast: false,
       orc: { backend: "pi", provider: "fixture", model: "fake", effort: "off" },
-      worker: { backend: "codex", model: "sol", effort: "medium" },
     });
     plans.push({ name: "worker_start", args: start }, undefined);
     await app.send(piOwner.id, "Dispatch a Codex worker", "dispatch");
@@ -418,9 +428,8 @@ test("real Pi and Codex adapter form both mixed trees, with questions, reports, 
         message: "Review owned evidence",
       })) as Agent;
       await until(() => app.detail(reviewer.id).state === "idle");
-      expect(captured.get(reviewer.id)?.reviewerSnapshot).toMatchObject(
-        snapshot,
-      );
+      expect(captured.get(reviewer.id)).toMatchObject(piChoice);
+      expect(captured.get(reviewer.id)?.reviewerSnapshot).toEqual({ prompt });
       expect(
         app
           .detail(owner.id)
@@ -455,9 +464,10 @@ test("real Pi and Codex adapter form both mixed trees, with questions, reports, 
       message: "Find evidence",
     })) as Agent;
     await until(() => app.detail(researcher.id).state === "idle");
-    expect(captured.get(researcher.id)?.researcherSnapshot).toMatchObject(
-      snapshot,
-    );
+    expect(captured.get(researcher.id)).toMatchObject(piChoice);
+    expect(captured.get(researcher.id)?.researcherSnapshot).toEqual({
+      prompt,
+    });
     expect(
       app
         .detail(owner.id)

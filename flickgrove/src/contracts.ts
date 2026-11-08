@@ -42,7 +42,18 @@ export interface Defaults {
 export interface Settings {
   fast: boolean;
   orc: Defaults;
-  worker: Defaults;
+}
+export interface MemberPresetSummary {
+  id: string;
+  name: string;
+  error?: string;
+}
+export interface MemberPresetsStatus {
+  presets: MemberPresetSummary[];
+  /** Selected member preset ID, or the shipped default until one is saved. */
+  current: string;
+  /** Why the selected preset cannot be used; never a fallback selection. */
+  currentError?: string;
 }
 export interface MessageImage {
   id: string;

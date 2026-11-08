@@ -144,7 +144,6 @@ for (const [title, model, fast] of [
   const a = await app.createOrc("alpha", {
     fast,
     orc: { model, effort: model === "luna" ? "low" : "medium" },
-    worker: { model: "sol", effort: "medium" },
   });
   await app.rename(a.id, title);
   agents.push(a.id);

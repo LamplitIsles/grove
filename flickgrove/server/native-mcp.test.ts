@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { Workspace } from "./workspace";
 import { HostService } from "./hosts";
 import { createHandler } from "./http";
-import { FakeRuntime } from "./testing";
+import { FakeRuntime, memberPresetsFixtureSync } from "./testing";
 import { roleTools } from "./tools";
 
 // Installed-native discovery/config and out-of-band MCP only. No provider turn.
@@ -22,16 +22,9 @@ test("installed shared native isolates all role tool catalogs and authenticated 
     directory,
     runtime,
     projects: async () => [{ alias: "alpha", name: "Alpha", path: project }],
-    reviewerSnapshot: async () => ({
-      model: "sol",
-      effort: "high",
-      prompt: "Synthetic review",
-    }),
-    researcherSnapshot: async () => ({
-      model: "sol",
-      effort: "high",
-      prompt: "Synthetic research",
-    }),
+    reviewerSnapshot: async () => ({ prompt: "Synthetic review" }),
+    researcherSnapshot: async () => ({ prompt: "Synthetic research" }),
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   let origin = "";
   const service = new HostService(app, { directory, origin: () => origin });

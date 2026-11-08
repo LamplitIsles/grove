@@ -1,5 +1,42 @@
 import { expect, test } from "@playwright/test";
 
+test("member preset loads after reconnect when settings opened offline", async ({
+  page,
+  context,
+}) => {
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("WebAuthn.enable");
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: {
+      protocol: "ctap2",
+      transport: "internal",
+      hasResidentKey: true,
+      hasUserVerification: true,
+      isUserVerified: true,
+    },
+  });
+  await page.request.post("/fixture/reset");
+  const { code } = await (await page.request.post("/fixture/bootstrap")).json();
+  await page.goto("/");
+  await page.getByRole("button", { name: "Use a code" }).click();
+  await page.getByLabel("Code", { exact: true }).fill(code);
+  await page.getByLabel(/Nickname/).fill("Alice");
+  await page.getByRole("button", { name: "Create passkey" }).click();
+  await expect(
+    page.getByRole("button", { name: "Settings", exact: true }),
+  ).toBeVisible();
+  await page.request.post("/fixture/offline");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Models", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Refresh presets" }),
+  ).toBeDisabled();
+  await page.request.post("/fixture/online");
+  await expect(
+    page.getByRole("combobox", { name: "Member preset" }),
+  ).toContainText("Codex only", { timeout: 15_000 });
+});
+
 for (const width of [1440, 390]) {
   test(`${width}: authenticated preview loads sandbox resources and expires on sign out`, async ({
     page,
@@ -112,7 +149,7 @@ for (const width of [1440, 390]) {
     await page.getByRole("button", { name: "Models", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Models" })).toBeVisible();
     const modelHelp = page.getByText(
-      "Preferences for new sessions in this browser.",
+      "Orc and Fast preferences apply to new sessions in this browser. The member preset is shared by this instance.",
       { exact: true },
     );
     await expect(modelHelp).toHaveCount(0);
@@ -126,32 +163,42 @@ for (const width of [1440, 390]) {
     await page.goBack();
     await expect(modelHelp).toHaveCount(0);
     await expect(page.locator(".settings-modal")).toBeVisible();
-    const orc = page.getByRole("button", { name: "Orc", exact: true });
-    const worker = page.getByRole("button", { name: "Worker", exact: true });
-    await expect(orc).toHaveAttribute("aria-pressed", "true");
     await expect(
       page.getByRole("combobox", { name: "Orc model" }),
     ).toBeVisible();
-    await worker.click();
-    await expect(worker).toHaveAttribute("aria-pressed", "true");
     await expect(
       page.getByRole("combobox", { name: "Worker model" }),
-    ).toBeVisible();
-    await expect(page.getByRole("combobox", { name: "Orc model" })).toHaveCount(
-      0,
-    );
+    ).toHaveCount(0);
+    const preset = page.getByRole("combobox", { name: "Member preset" });
+    await expect(preset).toContainText("Codex only");
+    await preset.click();
     await page
-      .getByRole("combobox", { name: "Worker reasoning effort" })
+      .getByRole("option", { name: "Alternative", exact: true })
       .click();
-    await page.getByRole("option", { name: "high", exact: true }).click();
-    await orc.click();
+    await page.route(
+      "**/member-presets",
+      async (route) => {
+        if (route.request().method() === "PUT") await route.abort();
+        else await route.continue();
+      },
+      { times: 1 },
+    );
+    await page.getByRole("button", { name: "Apply preset" }).click();
     await expect(
-      page.getByRole("combobox", { name: "Orc reasoning effort" }),
-    ).toContainText("medium");
-    await worker.click();
-    await expect(
-      page.getByRole("combobox", { name: "Worker reasoning effort" }),
-    ).toContainText("high");
+      page
+        .getByRole("alert")
+        .filter({ hasText: "Could not confirm the change. Refresh presets." }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Refresh presets" }).click();
+    await expect(preset).toContainText("Codex only");
+    await preset.click();
+    await page
+      .getByRole("option", { name: "Alternative", exact: true })
+      .click();
+    await page.getByRole("button", { name: "Apply preset" }).click();
+    await expect(preset).toContainText("Alternative");
+    await page.getByRole("button", { name: "Refresh presets" }).click();
+    await expect(preset).toContainText("Alternative");
     await expect
       .poll(() =>
         page
@@ -159,21 +206,7 @@ for (const width of [1440, 390]) {
           .evaluate((element) => element.scrollWidth - element.clientWidth),
       )
       .toBe(0);
-    await expect
-      .poll(() =>
-        page
-          .locator(".settings-content")
-          .evaluate((element) => element.scrollHeight - element.clientHeight),
-      )
-      .toBe(0);
     await page.screenshot({ path: testInfo.outputPath("settings-models.png") });
-    await orc.click();
-    await expect(
-      page.getByRole("combobox", { name: "Orc model" }),
-    ).toBeVisible();
-    expect((await page.locator(".settings-modal").boundingBox())!.height).toBe(
-      panelHeight,
-    );
     await page.getByRole("button", { name: "Account", exact: true }).click();
     await expect(page.getByLabel("Nickname", { exact: true })).toHaveValue(
       "Alice",

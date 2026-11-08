@@ -26,10 +26,7 @@ export type SessionDiagnostics = Pick<
 >;
 export type CapturedConfig = Pick<
   RuntimeAgent,
-  | "orcPromptSnapshot"
-  | "reviewerSnapshot"
-  | "researcherSnapshot"
-  | "workerDefaults"
+  "orcPromptSnapshot" | "reviewerSnapshot" | "researcherSnapshot"
 >;
 export type DeliveryContext = Pick<
   Delivery,
@@ -135,6 +132,10 @@ export const authPairing = sqliteTable("authPairing", {
 export const voiceSettings = sqliteTable("voice_settings", {
   id: integer("id").primaryKey(),
   region: text("region").$type<"beijing" | "singapore">().notNull(),
+});
+export const memberPresetSettings = sqliteTable("member_preset_settings", {
+  id: integer("id").primaryKey(),
+  presetId: text("preset_id").notNull(),
 });
 export const sessions = sqliteTable(
   "sessions",

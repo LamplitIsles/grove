@@ -3,6 +3,7 @@ import { browserOrigin } from "./browser-origin";
 import { readingHttp } from "./reading-http";
 import { filePreview } from "./file-preview";
 import { voiceHttp } from "./voice-http";
+import { memberPresetsHttp } from "./member-presets-http";
 import type { VoiceOptions } from "./voice";
 import { imageHttp } from "./image-http";
 import { IMAGE_UPLOAD_BYTES } from "./images";
@@ -95,9 +96,13 @@ export function createHandler(workspace: Workspace, options: Options) {
           workspace.updateHuman(user),
         );
       }
-      if (url.pathname.startsWith("/api/")) {
+      if (
+        url.pathname.startsWith("/api/") ||
+        url.pathname === "/member-presets"
+      ) {
         human = await options.auth.session(request.headers);
-        if (!human) return json({ error: "Authentication required" }, 401);
+        if (!human && url.pathname.startsWith("/api/"))
+          return json({ error: "Authentication required" }, 401);
       }
     }
     // The preview handler validates each bearer grant against its issuing session.
@@ -128,6 +133,15 @@ export function createHandler(workspace: Workspace, options: Options) {
         403,
       );
     try {
+      const presets = await memberPresetsHttp(
+        request,
+        options.service,
+        origins,
+        options.auth && human
+          ? { auth: options.auth, human, authHeaders: request.headers }
+          : undefined,
+      );
+      if (presets) return presets;
       if (
         url.pathname === "/api/instance" ||
         url.pathname.startsWith("/api/instance/")

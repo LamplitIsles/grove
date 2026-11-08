@@ -68,7 +68,6 @@ test("same-origin reading, media and voice ignore stale bearer credentials", asy
   const agent = await f.service.createOrc("alpha", {
     fast: false,
     orc: { model: "sol", effort: "medium" },
-    worker: { model: "sol", effort: "medium" },
   });
   const bytes = await sharp({
     create: {
@@ -259,7 +258,6 @@ test("proxy browser admission covers reading, media, preview and hostile evidenc
   const agent = await f.service.createOrc("alpha", {
     fast: false,
     orc: { model: "sol", effort: "medium" },
-    worker: { model: "sol", effort: "medium" },
   });
   writeFileSync(
     join(f.directory, "report.md"),

@@ -1,0 +1,26 @@
+name = "Codex only"
+
+[worker]
+backend = "codex"
+model = "gpt-6.1-terra"
+reasoning_effort = "xhigh"
+
+[reviewers.standards]
+backend = "codex"
+model = "gpt-6-luna"
+reasoning_effort = "high"
+
+[reviewers.spec]
+backend = "codex"
+model = "gpt-6-luna"
+reasoning_effort = "high"
+
+[reviewers.high_risk_spec]
+backend = "codex"
+model = "gpt-6.1-terra"
+reasoning_effort = "xhigh"
+
+[researcher]
+backend = "codex"
+model = "gpt-6-luna"
+reasoning_effort = "high"

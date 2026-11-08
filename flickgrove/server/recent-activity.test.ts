@@ -14,7 +14,11 @@ import { Database } from "bun:sqlite";
 import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { HostService } from "./hosts";
-import { FakeRuntime, fixtureProjects } from "./testing";
+import {
+  FakeRuntime,
+  fixtureProjects,
+  memberPresetsFixtureSync,
+} from "./testing";
 import { Workspace } from "./workspace";
 import { WorkspaceStore } from "./workspace-store";
 import { detailSchema, snapshotSchema } from "../src/chord-contract";
@@ -31,16 +35,9 @@ function fixture() {
     directory,
     runtime,
     projects: async () => fixtureProjects,
-    reviewerSnapshot: async () => ({
-      model: "sol",
-      effort: "high",
-      prompt: "review",
-    }),
-    researcherSnapshot: async () => ({
-      model: "sol",
-      effort: "high",
-      prompt: "research",
-    }),
+    memberPresets: memberPresetsFixtureSync(directory),
+    reviewerSnapshot: async () => ({ prompt: "review" }),
+    researcherSnapshot: async () => ({ prompt: "research" }),
   });
   cleanup.push(
     () => rmSync(directory, { recursive: true, force: true }),
@@ -183,6 +180,7 @@ test("activity follows real turns and messages, excludes replays and stale event
     directory,
     runtime: new FakeRuntime(),
     projects: async () => fixtureProjects,
+    memberPresets: memberPresetsFixtureSync(directory),
   });
   cleanup.push(() => restarted.dispose());
   expect(restarted.detail(orc.id).lastActivityAt).toBe(4000);
