@@ -72,6 +72,8 @@ export interface RuntimeAgent extends Detail {
   token: string;
   deliveries: RuntimeDelivery[];
   orcPromptSnapshot?: string;
+  /** Captured default division of work; absent for pre-feature sessions. */
+  roleDivisionSnapshot?: string;
   researcherSnapshot?: import("./reviewer-config").ReviewerSnapshot;
   reviewerSnapshot?: import("./reviewer-config").ReviewerSnapshot;
   inheritSettings?: boolean;

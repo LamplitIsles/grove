@@ -29,6 +29,7 @@ import { join } from "node:path";
 import type {
   Agent,
   Answer,
+  ConfigFilesStatus,
   Delivery,
   Detail,
   MemberPresetsStatus,
@@ -65,6 +66,7 @@ import {
   selectMemberPreset as writeMemberPresetSelection,
   type MemberModelChoice,
 } from "./member-presets";
+import { listConfigFiles, type ConfigFileLocations } from "./config-files";
 
 function reviewTargetText(target: ReviewTarget) {
   return `${target.profile} · spec ${target.spec} · fixed point ${target.fixedPoint} → reviewed HEAD ${target.reviewedHead}`;
@@ -472,6 +474,7 @@ export class Workspace {
       projects: (environment?: string) => Promise<Project[]>;
       environments?: ProjectEnvironments;
       orcPrompt?: () => Promise<string>;
+      roleDivision?: () => Promise<string>;
       researcherSnapshot?: () => Promise<
         import("./reviewer-config").ReviewerSnapshot
       >;
@@ -479,6 +482,7 @@ export class Workspace {
         profile: import("../src/contracts").ReviewerProfile,
       ) => Promise<import("./reviewer-config").ReviewerSnapshot>;
       memberPresets?: { directory: string };
+      configFiles?: ConfigFileLocations;
       branches?: { read?: BranchReader; intervalMs?: number };
     },
   ) {
@@ -1732,6 +1736,11 @@ export class Workspace {
       id,
     );
   }
+  configFiles(): Promise<ConfigFilesStatus> {
+    if (!this.options.configFiles)
+      throw new Error("Configuration file locations are unavailable");
+    return listConfigFiles(this.options.configFiles);
+  }
   projects(environment = "local") {
     return this.options.projects(environment);
   }
@@ -2124,6 +2133,8 @@ export class Workspace {
         ...captured.orc,
         treeFast: settings?.fast ?? false,
         orcPromptSnapshot: await this.options.orcPrompt?.(),
+        // Captured once, at creation: later file changes affect only new Orcs.
+        roleDivisionSnapshot: await this.options.roleDivision?.(),
         state: "idle",
         closed: false,
         questions: [],
@@ -4261,6 +4272,10 @@ export class Workspace {
               reviewedHead: review.reviewedHead,
             };
           }
+          // A Worker inherits its owner's captured division and never reads the
+          // file itself; an owner without one keeps the fixed legacy duties.
+          if (role === "worker" && a.roleDivisionSnapshot !== undefined)
+            w.roleDivisionSnapshot = a.roleDivisionSnapshot;
           await this.assertProject(project, w.backend);
           {
             const model = (await this.models()).find(

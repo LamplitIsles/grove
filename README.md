@@ -52,16 +52,16 @@ In Grove, select **New session** (the plus button), search for and select the re
 
 Reopen a session from the sidebar to read progress, send follow-up instructions or answer an Orc's questions. Workers and other members appear under the Orc; their reports and questions return to the owner. You can attach images, use skill search and preview supported local files from conversations. Closing the browser does not stop an executing session. If a delivery has an unknown outcome, inspect its state before deciding what to do; Grove does not automatically resend it.
 
-The shipped collaboration pattern divides responsibilities:
+The shipped collaboration pattern provides a default task division, captured when an Orc is created and adjustable by the user for a particular task:
 
 | Role       | Responsibility                                                                                                                                                                                       |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Orc        | Investigates, plans, coordinates and owns the overall result. It owns frontend UI, schema and migrations, one-off operations, and prompts/agent instructions.                                        |
-| Worker     | Owns the other implementation in a shared checkout, including its verification and fixes. Mixed work is coordinated serially with the Orc.                                                           |
+| Orc        | Investigates, plans, coordinates and owns the overall result. By default it handles user and developer experience, schema and migrations, one-off operations, and prompts/agent instructions.         |
+| Worker     | By default handles other implementation in a shared checkout, including its verification and fixes. Mixed work is coordinated serially with the Orc.                                                |
 | Reviewer   | Independently examines the specified change and existing evidence against Standards or Spec, including a high-risk Spec profile. Reviewers report findings to the Orc; they do not run verification. |
 | Researcher | Investigates a bounded question and reports evidence and uncertainty. The Orc synthesizes the result and decides what to recommend.                                                                  |
 
-The implementation workflow calls for Orc self-review and independent whole-PR review before merge, with user approval where applicable. Codex Orc and Worker threads run with full access in their selected environment; Codex Reviewers and Researchers use a native read-only sandbox. The shipped workflow is guidance for agents, not a guarantee that an external forge or service is configured.
+The task division is editable in the instance's `prompts/role-division.md`; changes affect new Orcs, while existing sessions keep their prior division. The implementation workflow calls for Orc self-review and independent whole-PR review before merge, with user approval where applicable. Codex Orc and Worker threads run with full access in their selected environment; Codex Reviewers and Researchers use a native read-only sandbox. The shipped workflow is guidance for agents, not a guarantee that an external forge or service is configured.
 
 ### Workflow skills
 

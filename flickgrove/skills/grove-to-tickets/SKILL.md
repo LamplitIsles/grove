@@ -33,7 +33,7 @@ Break the work into **tracer bullet** tickets.
 - A completed slice is demoable or verifiable on its own
 - Each slice is sized to fit in a single fresh context window
 - Any necessary prefactoring is the minimum needed to unlock a requested slice
-- Record category ownership and any serial handoffs within a mixed slice: Orc owns frontend UI, database schema and migrations, one-off ops scripts, and prompts/agent instructions; the sole Worker owns other implementation. Each owner handles its tests and review fixes.
+- Record category ownership and any serial handoffs within a mixed slice: follow the captured task division and the user’s explicit assignments. Each owner handles its tests and review fixes.
 
 </vertical-slice-rules>
 

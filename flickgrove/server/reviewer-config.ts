@@ -44,6 +44,7 @@ export async function initializeReviewerConfig(path: string) {
       resolve(dirname(path), "prompts/researcher.md"),
       resolve(templates, "prompts/researcher.md"),
     ],
+    [roleDivisionFile(path), resolve(templates, "prompts/role-division.md")],
     ...reviewerProfiles.map((p) => [
       resolve(dirname(path), `prompts/${p}.md`),
       resolve(templates, `prompts/${p}.md`),
@@ -111,6 +112,13 @@ export async function researcherSnapshot(
 export async function orcPrompt(path: string) {
   const config = await readReviewerConfig(path);
   return readPrompt(resolve(dirname(path), config.orc.prompt_file), "Orc");
+}
+/** The division of work is a conventional prompt file beside the other prompts. */
+export function roleDivisionFile(path: string) {
+  return resolve(dirname(path), "prompts/role-division.md");
+}
+export async function roleDivision(path: string) {
+  return readPrompt(roleDivisionFile(path), "Task division");
 }
 async function readPrompt(promptPath: string, role: string) {
   let prompt: string;

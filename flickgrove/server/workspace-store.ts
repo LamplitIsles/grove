@@ -40,6 +40,7 @@ const sessionKeys = [
 ] as const;
 const configKeys = [
   "orcPromptSnapshot",
+  "roleDivisionSnapshot",
   "reviewerSnapshot",
   "researcherSnapshot",
 ] as const;

@@ -149,4 +149,4 @@ A change can pass one axis and fail the other:
 
 Reporting them separately stops one axis from masking the other.
 
-Orc owns frontend UI, database schema and migrations, one-off ops scripts, and prompts/agent instructions; Worker owns other implementation. Each owner handles its tests and fixes. Independent target-bound review belongs to Reviewer; bounded evidence investigation belongs to Researcher under `grove-research`. Researchers do not replace review axes or implement fixes. Use Grove collaboration tools; native collaboration is disabled in managed sessions.
+Follow the captured task division and the user’s explicit assignments. Each owner handles its tests and fixes. Independent target-bound review belongs to Reviewer; bounded evidence investigation belongs to Researcher under `grove-research`. Researchers do not replace review axes or implement fixes. Use Grove collaboration tools; native collaboration is disabled in managed sessions.

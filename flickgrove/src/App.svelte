@@ -38,6 +38,7 @@
   import AccountSettings from "./AccountSettings.svelte";
   import VoiceSettings from "./VoiceSettings.svelte";
   import MemberPresets from "./MemberPresets.svelte";
+  import ConfigFiles from "./ConfigFiles.svelte";
   import InstanceBlockers from "./InstanceBlockers.svelte";
   import { historyCache } from "./history-cache";
   import AgentDetail from "./AgentDetail.svelte";
@@ -897,6 +898,7 @@
               {#if instanceError}<p class="inline-error" role="alert">{instanceError}</p>{/if}
               {#if instanceNotice}<p role="status">{instanceNotice}</p>{/if}
               {#if instanceStatusError}<p class="inline-error" role="alert">{instanceStatusError}</p>{/if}
+              <ConfigFiles peerId={snapshot.entryId ?? ""} {connected} />
               <Dialog.Root open={navigation.surfaces.includes("maintenance-confirm")} onOpenChange={value => { if (!value) setSurface("maintenance-confirm", false); }}>
                 <Dialog.Content class="grove-dialog signout-dialog" showCloseButton={false} onEscapeKeydown={event => { event.preventDefault(); event.stopPropagation(); void back(); }}>
                   <Dialog.Header><Dialog.Title>{maintenanceAction === "reload" ? m.reload_mcp_confirm() : m.restart_grove_confirm()}</Dialog.Title><Dialog.Description>{#if maintenanceAction === "restart"}{m.restart_grove_help()}{/if}{#if instance?.busy}{maintenanceAction === "restart" ? " " : ""}{m.instance_busy_warning()}{/if}</Dialog.Description></Dialog.Header>

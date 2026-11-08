@@ -26,7 +26,10 @@ export type SessionDiagnostics = Pick<
 >;
 export type CapturedConfig = Pick<
   RuntimeAgent,
-  "orcPromptSnapshot" | "reviewerSnapshot" | "researcherSnapshot"
+  | "orcPromptSnapshot"
+  | "roleDivisionSnapshot"
+  | "reviewerSnapshot"
+  | "researcherSnapshot"
 >;
 export type DeliveryContext = Pick<
   Delivery,

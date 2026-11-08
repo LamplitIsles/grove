@@ -7,6 +7,7 @@ import {
   reviewerSnapshot,
   researcherSnapshot,
   orcPrompt,
+  roleDivision,
 } from "./reviewer-config";
 import { MixedRuntime } from "./mixed-runtime";
 import { PiRuntime } from "./pi";
@@ -86,10 +87,13 @@ const codexRuntime = new CodexRuntime({
 });
 if (values["pi-agent-dir"])
   process.env.PI_CODING_AGENT_DIR = values["pi-agent-dir"];
+// The same resolved locations drive Pi sessions and the configuration catalog.
+const piAgentDir = getAgentDir();
+const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
 const runtime: MixedRuntime = new MixedRuntime(
   codexRuntime,
   new PiRuntime({
-    agentDir: getAgentDir(),
+    agentDir: piAgentDir,
     tool: (token, name, args) => app.tool(token, name, args),
   }),
 );
@@ -99,9 +103,16 @@ const app: Workspace = new Workspace({
   projects: (id) => environments.projects(id),
   environments,
   orcPrompt: () => orcPrompt(configPath),
+  roleDivision: () => roleDivision(configPath),
   researcherSnapshot: () => researcherSnapshot(configPath),
   reviewerSnapshot: (profile) => reviewerSnapshot(configPath, profile),
   memberPresets: { directory: presetsDirectory },
+  configFiles: {
+    configPath,
+    memberPresetsDirectory: presetsDirectory,
+    piAgentDir,
+    codexHome,
+  },
 });
 const auth = new GroveAuth(app.store, directory, origin);
 const service = new HostService(app, {

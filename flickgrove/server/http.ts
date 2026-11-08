@@ -4,6 +4,7 @@ import { readingHttp } from "./reading-http";
 import { filePreview } from "./file-preview";
 import { voiceHttp } from "./voice-http";
 import { memberPresetsHttp } from "./member-presets-http";
+import { configFilesHttp } from "./config-files-http";
 import type { VoiceOptions } from "./voice";
 import { imageHttp } from "./image-http";
 import { IMAGE_UPLOAD_BYTES } from "./images";
@@ -98,7 +99,8 @@ export function createHandler(workspace: Workspace, options: Options) {
       }
       if (
         url.pathname.startsWith("/api/") ||
-        url.pathname === "/member-presets"
+        url.pathname === "/member-presets" ||
+        url.pathname === "/config-files"
       ) {
         human = await options.auth.session(request.headers);
         if (!human && url.pathname.startsWith("/api/"))
@@ -142,6 +144,15 @@ export function createHandler(workspace: Workspace, options: Options) {
           : undefined,
       );
       if (presets) return presets;
+      const configFiles = await configFilesHttp(
+        request,
+        options.service,
+        origins,
+        options.auth && human
+          ? { auth: options.auth, human, authHeaders: request.headers }
+          : undefined,
+      );
+      if (configFiles) return configFiles;
       if (
         url.pathname === "/api/instance" ||
         url.pathname.startsWith("/api/instance/")

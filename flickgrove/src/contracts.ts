@@ -55,6 +55,19 @@ export interface MemberPresetsStatus {
   /** Why the selected preset cannot be used; never a fallback selection. */
   currentError?: string;
 }
+export type ConfigFileSource = "grove" | "pi" | "codex";
+export interface ConfigFileEntry {
+  source: ConfigFileSource;
+  name: string;
+  /** Determined configuration location; it does not promise the file exists. */
+  path: string;
+  description: string;
+}
+export interface ConfigFilesStatus {
+  files: ConfigFileEntry[];
+  /** Short reasons a source could not be listed; other sources stay listed. */
+  issues: string[];
+}
 export interface MessageImage {
   id: string;
   name: string;

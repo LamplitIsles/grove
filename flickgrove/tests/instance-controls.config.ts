@@ -5,7 +5,11 @@ if (!process.env.INSTANCE_TEST_ASSETS)
 
 export default defineConfig({
   testDir: ".",
-  testMatch: ["instance-controls.browser.ts", "maintenance-state.browser.ts"],
+  testMatch: [
+    "instance-controls.browser.ts",
+    "maintenance-state.browser.ts",
+    "config-files.browser.ts",
+  ],
   workers: 1,
   use: {
     channel: "chrome",
