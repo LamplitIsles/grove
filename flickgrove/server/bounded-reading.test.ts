@@ -41,7 +41,6 @@ function fixture() {
   origin = `http://127.0.0.1:${server.port}`;
   cleanups.push(() => {
     server.stop(true);
-    service.dispose();
     app.dispose();
     rmSync(directory, { force: true, recursive: true });
   });

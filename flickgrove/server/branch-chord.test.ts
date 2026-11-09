@@ -74,7 +74,6 @@ function peer(root: string, name: string) {
   });
   origin = `http://127.0.0.1:${server.port}`;
   cleanups.push(() => {
-    service.dispose();
     server.stop(true);
     app.dispose();
   });

@@ -19,12 +19,10 @@ assert.ok(manifest.version.endsWith(`snapshot.g${sha}`));
 for (const resource of [
   "server/main.ts",
   "server/mcp.ts",
-  "server/tps-child.ts",
   "server/remote-project-read.py",
   "drizzle/meta/_journal.json",
   "skills/grove-code-review/SKILL.md",
   "templates/config.toml",
-  "vendor/codex-tps/index.ts",
   "dist/index.html",
 ])
   await access(join(pkg, resource));
@@ -101,27 +99,6 @@ try {
     db.query("SELECT count(*) AS n FROM __drizzle_migrations").get().n > 0,
   );
   db.close();
-  const analyzer = Bun.spawn(
-    [
-      process.execPath,
-      "--no-install",
-      join(pkg, "server/tps-child.ts"),
-      join(work, "home"),
-    ],
-    { env, cwd: work, stdin: "pipe", stdout: "pipe", stderr: "pipe" },
-  );
-  analyzer.stdin.write(
-    JSON.stringify({ model: "fixture", tier: "standard", now: Date.now() }) +
-      "\n",
-  );
-  analyzer.stdin.end();
-  const output = await new Response(analyzer.stdout).text();
-  assert.equal(
-    await analyzer.exited,
-    0,
-    await new Response(analyzer.stderr).text(),
-  );
-  assert.notEqual(JSON.parse(output).error, true);
   const fakeBridge = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,

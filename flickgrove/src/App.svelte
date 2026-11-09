@@ -802,7 +802,7 @@
 
 <Toaster theme="dark" position="bottom-center" />
 {#snippet globalActions()}
-  <div class="global-actions">{#if !loading && shownDetail?.backend !== "pi" && (!snapshot.agents.length || snapshot.agents.some(agent => agent.backend !== "pi"))}<Weekly agent={detail} hostId={snapshot.entryId} connected={!!hosts.find(h=>h.id===snapshot.entryId)?.connected} />{/if}</div>
+  <div class="global-actions">{#if !loading && shownDetail?.backend !== "pi" && (!snapshot.agents.length || snapshot.agents.some(agent => agent.backend !== "pi"))}<Weekly hostId={snapshot.entryId} connected={!!hosts.find(h=>h.id===snapshot.entryId)?.connected} />{/if}</div>
 {/snippet}
 <div class="workbench" class:close-recovery-layout={closeRecovery.entries.some(i => modal !== "abandon-close" || abandon?.id !== i.agentId)}>
 <main>

@@ -26,10 +26,6 @@ export async function invoke(
     case "weekly":
       parse(member);
       return await app.weekly();
-    case "tps": {
-      const p = parse(member);
-      return app.tps(p.id, p.refresh);
-    }
     case "history": {
       const p = parse(member);
       return await app.history(p.project, p.query, p.cursor);

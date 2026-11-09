@@ -102,19 +102,15 @@ test("cold restart original thread projects current idle and interrupted while p
       directory: join(root, "host"),
       origin: () => "http://127.0.0.1:9",
     });
-    try {
-      const qualified = qualify(service.identity.id, owner.id);
-      expect(
-        snapshotSchema
-          .parse(service.snapshot())
-          .agents.find((a) => a.id === qualified)?.currentExecution,
-      ).toEqual({ state: "idle", lastInterrupted: true });
-      expect(
-        detailSchema.parse(await service.detail(qualified)).currentExecution,
-      ).toEqual({ state: "idle", lastInterrupted: true });
-    } finally {
-      service.dispose();
-    }
+    const qualified = qualify(service.identity.id, owner.id);
+    expect(
+      snapshotSchema
+        .parse(service.snapshot())
+        .agents.find((a) => a.id === qualified)?.currentExecution,
+    ).toEqual({ state: "idle", lastInterrupted: true });
+    expect(
+      detailSchema.parse(await service.detail(qualified)).currentExecution,
+    ).toEqual({ state: "idle", lastInterrupted: true });
     expect(f.app.lookup(owner.id, "operation-original")).toBeNull();
     expect(f.app.recovery(owner.id, "operation-original").text).toBe(
       "original input",

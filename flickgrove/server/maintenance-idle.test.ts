@@ -25,7 +25,6 @@ function fixture() {
   let service: HostService | undefined;
   const origin = "http://localhost:4318";
   function http() {
-    service?.dispose();
     service = new HostService(app, { directory, origin: () => origin });
     const instance = new InstanceControls(app, null, {
       available: async () => false,
@@ -57,7 +56,6 @@ function fixture() {
     },
     http,
     async restart() {
-      service?.dispose();
       service = undefined;
       await runtime.close();
       app.dispose();
@@ -77,7 +75,6 @@ function fixture() {
         await Bun.sleep(2);
     },
     cleanup() {
-      service?.dispose();
       app.dispose();
       rmSync(directory, { recursive: true, force: true });
     },

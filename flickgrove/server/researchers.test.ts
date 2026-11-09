@@ -82,7 +82,6 @@ async function peer() {
       await app.selectMemberPreset("luna-researcher");
     },
     restart() {
-      service.dispose();
       app.dispose();
       const nativeHistory = runtime.historyItems;
       runtime = new FakeRuntime();
@@ -94,7 +93,6 @@ async function peer() {
     async close() {
       client.close();
       await server.stop(true);
-      service.dispose();
       app.dispose();
       await rm(directory, { recursive: true, force: true });
     },

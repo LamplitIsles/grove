@@ -270,7 +270,6 @@ test("real Pi and Codex adapter form both mixed trees, with questions, reports, 
     expect(
       projection.snapshot().agents.find((a) => a.id.endsWith(":" + worker.id)),
     ).toMatchObject({ backend: "pi", provider: "fixture" });
-    projection.dispose();
     expect(worker.backend).toBe("pi");
     expect(worker.serviceTier).toBe("default");
     expect(owner.serviceTier).toBe("priority");

@@ -200,7 +200,6 @@ const server = Bun.serve({
       new URL(req.url).pathname === "/fixture/restart" &&
       req.method === "POST"
     ) {
-      service.dispose();
       app.dispose();
       await runtime.close();
       app = new Workspace(workspaceOptions);
@@ -225,7 +224,6 @@ async function cleanup() {
   if (closing) return;
   closing = true;
   server.stop(true);
-  service.dispose();
   app.dispose();
   await runtime.close();
   model.stop(true);

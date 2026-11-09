@@ -32,29 +32,6 @@ for (const dir of [
   });
 }
 await cp(assets, join(output, "dist"), { recursive: true });
-await mkdir(join(output, "vendor", "codex-tps"), { recursive: true });
-await cp(
-  join(root, "codex-tps", "index.ts"),
-  join(output, "vendor", "codex-tps", "index.ts"),
-);
-await cp(
-  join(root, "codex-tps", "licenses"),
-  join(output, "vendor", "codex-tps", "licenses"),
-  { recursive: true },
-);
-for (const file of ["tps.ts", "tps-child.ts"]) {
-  const path = join(output, "server", file);
-  const source = await readFile(path, "utf8");
-  if (!source.includes('"@experiments/codex-tps"'))
-    throw new Error(`Missing workspace import in ${file}`);
-  await writeFile(
-    path,
-    source.replaceAll(
-      '"@experiments/codex-tps"',
-      '"../vendor/codex-tps/index.ts"',
-    ),
-  );
-}
 const original = JSON.parse(await readFile(join(app, "package.json"), "utf8"));
 const {
   private: _,
@@ -62,7 +39,6 @@ const {
   scripts: _scripts,
   ...manifest
 } = original;
-delete manifest.dependencies["@experiments/codex-tps"];
 for (const name of [
   "@fontsource/ibm-plex-mono",
   "@humanspeak/svelte-markdown",
@@ -83,7 +59,6 @@ manifest.files = [
   "templates",
   "licenses",
   "dist",
-  "vendor",
   "source.json",
 ];
 await writeFile(

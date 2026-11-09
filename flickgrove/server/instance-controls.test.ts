@@ -280,7 +280,6 @@ test("human session and same origin are required for instance routes", async () 
       status: "unavailable",
     });
   } finally {
-    service.dispose();
     app.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -365,7 +364,6 @@ for (const role of ["orc", "worker"] as const) {
       expect(post.status).toBe(200);
       expect(await post.json()).toEqual({ status: "unavailable" });
     } finally {
-      service?.dispose();
       app?.dispose();
       rmSync(directory, { recursive: true, force: true });
     }

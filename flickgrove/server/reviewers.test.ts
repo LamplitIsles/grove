@@ -313,7 +313,6 @@ test("Reviewer lifecycle crosses real Peer/Chord with target-bound reports, isol
     await app.tool(token, "reviewer_send", { ...target, reviewerId: b.id });
     expect(app.detail(b.id).deliveries.at(-1)?.status).toBe("uncertain");
     const oldRuntime = runtime;
-    service.dispose();
     app.dispose();
     const nativeHistory = runtime.historyItems;
     runtime = new FakeRuntime();
@@ -356,7 +355,6 @@ test("Reviewer lifecycle crosses real Peer/Chord with target-bound reports, isol
   } finally {
     client.close();
     await server.stop(true);
-    service.dispose();
     app.dispose();
     await rm(directory, { recursive: true, force: true });
   }

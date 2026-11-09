@@ -48,7 +48,6 @@ async function fixture() {
   cleanup = async () => {
     server.stop(true);
     provider.stop();
-    service.dispose();
     app.dispose();
     await rm(directory, { recursive: true, force: true });
   };

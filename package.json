@@ -2,8 +2,7 @@
   "name": "experiments",
   "private": true,
   "workspaces": [
-    "flickgrove",
-    "codex-tps"
+    "flickgrove"
   ],
   "scripts": {
     "prepare": "lefthook install",

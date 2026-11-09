@@ -36,7 +36,7 @@ steps:
         sha256sum .snapshot-artifacts/snapshot.tgz > .snapshot-artifacts/snapshot.sha256
         mkdir .snapshot-artifacts/install
         npm install --prefix .snapshot-artifacts/install --ignore-scripts --legacy-peer-deps --no-audit --no-fund --registry https://registry.npmjs.org/ "$${PWD}/.snapshot-artifacts/snapshot.tgz"
-        node -e 'const fs = require("node:fs"); for (const p of ["node_modules", "flickgrove/node_modules", "codex-tps/node_modules"]) fs.rmSync(p, { recursive: true, force: true });'
+        node -e 'const fs = require("node:fs"); for (const p of ["node_modules", "flickgrove/node_modules"]) fs.rmSync(p, { recursive: true, force: true });'
         bun --no-install flickgrove/scripts/package-smoke.ts .snapshot-artifacts/install/node_modules/@lamplitisles/flickgrove .snapshot-artifacts/smoke "$${CI_COMMIT_SHA}"
         sha256sum -c .snapshot-artifacts/snapshot.sha256
   - name: publish

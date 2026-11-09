@@ -27,7 +27,6 @@ try {
     directory: root,
     origin: () => origin,
   });
-  cleanup.push(() => service.dispose());
   let observers = 0;
   const subscribe = service.subscribe.bind(service);
   service.subscribe = (listener) => {

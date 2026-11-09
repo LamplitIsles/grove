@@ -54,7 +54,6 @@ async function fixture() {
     directory: join(root, "peer"),
     origin: () => origin,
   });
-  cleanup.push(() => service.dispose());
   const handler = createHandler(app, { service, origin: () => origin });
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: handler });
   origin = server.url.origin;

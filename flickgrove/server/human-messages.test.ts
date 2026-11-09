@@ -108,7 +108,6 @@ test("authors and independent participant times survive messages, agent activity
         .parse(service.snapshot())
         .agents.find((a) => a.id.endsWith(orc.id))?.participants,
     ).toHaveLength(2);
-    service.dispose();
     app.dispose();
     app = make();
     expect(app.store.participants(orc.id)).toEqual(before);

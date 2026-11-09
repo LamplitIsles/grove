@@ -181,7 +181,6 @@ test("subscribed conversations retain inspected follow-up text and images when t
     ).toHaveLength(1);
   } finally {
     subscriptions.forEach((unsubscribe) => unsubscribe());
-    service.dispose();
   }
 });
 

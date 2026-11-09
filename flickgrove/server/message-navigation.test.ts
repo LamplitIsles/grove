@@ -292,7 +292,6 @@ test("authorized passive target windows bind identity/direction, preserve metada
     expect(runtime.inputs.length).toBe(inputs);
     expect(runtime.agents.size).toBe(opens);
   } finally {
-    service.dispose();
     app.dispose();
     rmSync(directory, { recursive: true, force: true });
   }

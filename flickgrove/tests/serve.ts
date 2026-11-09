@@ -275,7 +275,6 @@ const server = Bun.serve({
 });
 function cleanup() {
   server.stop(true);
-  service.dispose();
   app.dispose();
   rmSync(directory, { recursive: true, force: true });
   process.exit();

@@ -149,7 +149,6 @@ const stop = async () => {
   await server.stop(true);
   await app.prepareShutdown();
   await runtime.close();
-  service.dispose();
   auth.close();
   app.dispose();
   process.exit(0);

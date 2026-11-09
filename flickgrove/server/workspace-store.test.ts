@@ -652,7 +652,6 @@ test("native confirmation and question answers roll back together when the deliv
     directory: join(directory, "peer"),
     origin: () => origin,
   });
-  cleanup.push(() => service.dispose());
   const reads = [
     () => app.detail("owner"),
     () => app.recovery("owner", "answer"),
@@ -798,7 +797,6 @@ for (const abandon of [false, true]) {
       directory: join(directory, "peer"),
       origin: () => "http://fixture.invalid",
     });
-    cleanup.push(() => service.dispose());
     const outcomes = await Promise.all(
       [
         () => app.abandonCloseCandidate("owner"),

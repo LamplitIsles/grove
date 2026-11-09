@@ -399,7 +399,6 @@ test("isolated native notifications through Workspace and real Chord preserve re
     ).toHaveLength(1);
   } finally {
     client?.close();
-    service.dispose();
     server.stop(true);
     app.dispose();
     await runtime.close();

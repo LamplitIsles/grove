@@ -19,7 +19,6 @@ test("local API creates a session, preserves work across visits and rejects fore
     projects: async () => fixtureProjects,
   });
   dispose = () => {
-    service.dispose();
     app.dispose();
     rmSync(directory, { recursive: true, force: true });
   };

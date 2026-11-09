@@ -50,7 +50,6 @@ function fixture() {
     instance,
     get,
     cleanup() {
-      service.dispose();
       app.dispose();
       rmSync(directory, { recursive: true, force: true });
     },

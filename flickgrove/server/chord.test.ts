@@ -120,7 +120,6 @@ function fixture(transport: "tcp" | "ordered" = "tcp") {
   });
   origin = `http://127.0.0.1:${server.port}`;
   cleanups.push(() => {
-    service.dispose();
     server.stop(true);
     app.dispose();
     rmSync(directory, { recursive: true, force: true });
@@ -153,7 +152,6 @@ function fixture(transport: "tcp" | "ordered" = "tcp") {
       return client;
     },
     restart(orcPrompt?: () => Promise<string>) {
-      service.dispose();
       app.dispose();
       const restoredRuntime = new FakeRuntime();
       app = new Workspace({

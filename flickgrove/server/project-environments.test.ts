@@ -168,7 +168,6 @@ printf '%s' '${JSON.stringify({
     directory: join(root, "peer"),
     origin: () => "http://fixture.invalid",
   });
-  cleanup.push(() => service.dispose());
   const settings = {
     fast: false,
     orc: { backend: "codex" as const, model: "sol", effort: "medium" },
@@ -1247,7 +1246,6 @@ for (const fault of ["offline", "removed", "retarget"] as const) {
       directory: join(f.root, "peer"),
       origin: () => origin,
     });
-    cleanup.push(() => service.dispose());
     expect(app.snapshot().agents).toHaveLength(0);
     if (fault === "offline") f.disconnect();
     if (fault === "removed") await writeFile(f.config, "");

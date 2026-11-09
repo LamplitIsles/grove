@@ -170,7 +170,6 @@ test("installed shared native isolates all role tool catalogs and authenticated 
   } finally {
     await client.close();
     await http.stop(true);
-    service.dispose();
     app.dispose();
     rmSync(directory, { recursive: true, force: true });
   }

@@ -762,7 +762,6 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
     void server.stop(true);
     provider.stop();
     auth.close();
-    service.dispose();
     app.dispose();
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1007,7 +1006,6 @@ test("authenticated connections receive the registered user list after registrat
     for (const client of clients) client.close();
     await server.stop(true);
     auth.close();
-    service.dispose();
     app.dispose();
     stopped = true;
     const restarted = new Workspace({
@@ -1038,7 +1036,6 @@ test("authenticated connections receive the registered user list after registrat
       for (const client of clients) client.close();
       void server.stop(true);
       auth.close();
-      service.dispose();
       app.dispose();
     }
     rmSync(dir, { recursive: true, force: true });
@@ -1329,7 +1326,6 @@ test("adding a passkey keeps this browser session revocable without affecting in
     independentSocket?.close();
     void server.stop(true);
     auth.close();
-    service.dispose();
     app.dispose();
     rmSync(dir, { recursive: true, force: true });
   }

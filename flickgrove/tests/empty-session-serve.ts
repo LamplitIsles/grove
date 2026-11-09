@@ -79,7 +79,6 @@ const server = Bun.serve({
     if (up) return up === true ? undefined : up;
     const url = new URL(request.url);
     if (url.pathname === "/fixture/restart" && request.method === "POST") {
-      service.dispose();
       app.dispose();
       await runtime.close();
       runtime = new FixtureRuntime(runtimeOptions);
@@ -128,7 +127,6 @@ async function cleanup() {
   if (closing) return;
   closing = true;
   server.stop(true);
-  service.dispose();
   app.dispose();
   await runtime.close();
   await rm(directory, { recursive: true, force: true });

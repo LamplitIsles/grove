@@ -408,7 +408,6 @@ const server = Bun.serve({
       offline = false;
       for (const unit of [local]) {
         unit.auth?.close();
-        unit.service.dispose();
         unit.app.dispose();
       }
       local = await unit("Local", "#355d98", () => origin);
@@ -711,7 +710,6 @@ async function cleanup() {
   cdn.stop(true);
   for (const unit of [local]) {
     unit.auth?.close();
-    unit.service.dispose();
     unit.app.dispose();
   }
   await rm(directory, { recursive: true, force: true });

@@ -60,7 +60,6 @@ function fixture(
     },
     runtime,
     async restart() {
-      service.dispose();
       await runtime.close();
       app.dispose();
       app = new Workspace({ ...options, runtime });
@@ -98,7 +97,6 @@ function fixture(
       );
     },
     cleanup() {
-      service.dispose();
       app.dispose();
       rmSync(directory, { recursive: true, force: true });
     },

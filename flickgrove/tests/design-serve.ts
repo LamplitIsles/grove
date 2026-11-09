@@ -460,7 +460,6 @@ async function reset(mode = "working") {
     socket.close(1001, "Synthetic fixture reset");
   browserSockets.clear();
   for (const unit of units) {
-    unit.service.dispose();
     unit.server?.stop(true);
     unit.app.dispose();
   }
@@ -957,7 +956,6 @@ const server = Bun.serve({
         const inputs = [...prior.runtime.inputs];
         for (const socket of browserSockets)
           socket.close(1001, "Synthetic Hub restart");
-        prior.service.dispose();
         prior.app.dispose();
         if (body.closedAgent) {
           // Simulate an externally authoritative closure in test-owned persisted state.
@@ -1181,7 +1179,6 @@ function cleanup() {
   voiceProvider.stop();
   server.stop(true);
   for (const unit of units) {
-    unit.service.dispose();
     unit.server?.stop(true);
     unit.app.dispose();
   }

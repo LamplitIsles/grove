@@ -195,7 +195,6 @@ const stop = async () => {
   if (stopping) return;
   stopping = true;
   await server.stop(true);
-  service.dispose();
   app.dispose();
   await rm(root, { recursive: true, force: true });
   process.exit(0);

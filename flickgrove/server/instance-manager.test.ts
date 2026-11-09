@@ -104,7 +104,6 @@ for (const unit of ["grove-isolated.service", "flickgrove.service"]) {
         args: ["--user", "--no-block", "restart", unit],
       });
     } finally {
-      service.dispose();
       app.dispose();
       rmSync(dir, { recursive: true, force: true });
     }

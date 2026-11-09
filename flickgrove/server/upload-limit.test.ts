@@ -100,7 +100,6 @@ test("production HTTP listener admits legal image bodies and rejects excess", as
     expect(runtime.inputs).toHaveLength(0);
   } finally {
     await server.stop(true);
-    service.dispose();
     app.dispose();
     rmSync(directory, { recursive: true, force: true });
   }
