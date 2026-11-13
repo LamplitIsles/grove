@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
+  import { slide } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import { reading } from "./api";
   import { navigation, setSurface, back, removeOutlineDrawer } from "./navigation.svelte";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -109,7 +111,7 @@
       {@render contents()}
     </Sheet.Content>
   </Sheet.Root>
-{:else if open}<aside class="outline-rail">{@render contents()}</aside>{/if}
+{:else if open}<aside class="outline-rail" inert={!open} aria-hidden={!open} transition:slide={{ axis: "x", duration: matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 180, easing: cubicOut }}>{@render contents()}</aside>{/if}
 <style>
   .outline-rail { width:280px; flex:none; min-height:0; border-left:1px solid var(--border); padding:12px 8px; display:flex; }
   .message-outline { overflow-y:auto; overflow-x:hidden; min-height:0; width:100%; font-size:13px; line-height:1.45; }

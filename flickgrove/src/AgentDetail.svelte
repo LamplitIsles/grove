@@ -53,6 +53,7 @@
   let outlineTrigger=$state<HTMLButtonElement|null>(null);
   let pinnedImage = $state<string>();
   const expandedReports = untrack(() => transcriptPositions.get(detail.id)?.reports ?? new Set<string>());
+  const closedReports = untrack(() => transcriptPositions.get(detail.id)?.closedReports ?? new Set<string>());
   let record = $state<{item?: string; operation?: string} | null>(null);
   let pendingItem = $state<string>();
   let beforeRecord = false;
@@ -94,6 +95,16 @@
     setQuestionPanel(detail.id, !pendingOpen);
     if (pendingOpen) removeQuestionDrawer();
   }
+  function jumpKey(event: KeyboardEvent) {
+    if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || !event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.key !== "ArrowDown") return;
+    if (navigation.surfaces.some(surface => surface !== "sidebar") || panelOpen) return;
+    event.preventDefault();
+    void timeline?.jumpToBottom();
+  }
+  onMount(() => {
+    window.addEventListener("keydown", jumpKey);
+    return () => window.removeEventListener("keydown", jumpKey);
+  });
   onMount(() => {
     const dismissRecord = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.isComposing || event.keyCode === 229 || !record || !panelVisible) return;
@@ -171,7 +182,7 @@
   {#if detail.researchQuestion}<div class="review-target">Question: {detail.researchQuestion}</div>{/if}
   {#if detail.reviewTarget}<p class="review-target">{detail.reviewTarget.profile} · {detail.reviewTarget.spec} · {detail.reviewTarget.fixedPoint} → {detail.reviewTarget.reviewedHead}</p>{/if}
   {#if closeError}<p class="detail-close-error" role="alert">{closeError}</p>{/if}
-  <div class="detail-body"><div class="dialogue-column"><div class="conversation-wrap">{#key ready ? detail.threadId ?? "live" : "pending"}<ConversationTimeline bind:this={timeline} agentId={detail.id} boundary={ready ? detail.threadId : undefined} syncRevision={detail.readingRevision ?? 0} live={ready ? timelineMessages : []} deliveries={recoveries} {ready} {connected} detailError={!ready ? actionError : ""} reports={expandedReports} pinned={pinnedImage} onfollow={value => follow = value} onanchor={operation=>currentAnchor=operation}>
+  <div class="detail-body"><div class="dialogue-column"><div class="conversation-wrap">{#key ready ? detail.threadId ?? "live" : "pending"}<ConversationTimeline bind:this={timeline} agentId={detail.id} boundary={ready ? detail.threadId : undefined} syncRevision={detail.readingRevision ?? 0} live={ready ? timelineMessages : []} deliveries={recoveries} {ready} {connected} detailError={!ready ? actionError : ""} reports={expandedReports} {closedReports} pinned={pinnedImage} onfollow={value => follow = value} onanchor={operation=>currentAnchor=operation}>
     {#snippet header()}
     {#if !connected}<p class="host-outage" role="status">{m.host_offline()}{#if lastSeen}<br/>{m.last_seen({ time: new Date(lastSeen).toLocaleString() })}{/if}</p>{/if}
     {#if detail.closeRequest}<p class="model-note">{detail.closeRequest.reason}</p>{/if}
@@ -179,11 +190,11 @@
     {#if !ready && (actionError || !connected)}<div class="detail-loading" role="status"><p>{actionError}</p>{#if actionError || !connected}<Button variant="ghost" size="sm" disabled={!connected} onclick={onrefresh}>{m.retry()}</Button>{/if}</div>{/if}
     {#if ready && !detail.historyCursor && !detail.messages.length && !detail.questions.length}<div class="first-message"><h2>{m.first_heading()}</h2><p>{m.first_help({ project: detail.project.alias })}</p></div>{/if}
     {/snippet}
-    {#snippet renderMessage(message: Message)}
+    {#snippet renderMessage(message: Message, grouped = false)}
       {@const author = message.author ? users?.find(person => person.id === message.author?.id) ?? message.author : undefined}
-      {@const report = message.delivery && ["worker", "reviewer", "researcher"].includes(message.delivery.source) ? message.delivery : undefined}
       {@const delivery = recoveries.find(d=>d.id===(message.clientId ?? message.id)) ?? message.delivery}
-      {#if report}<WorkerReport at={message.at} agentId={report.reportingResearcherId ?? report.reportingReviewerId ?? report.reportingWorkerId} kind={report.source === "researcher" ? "Researcher report" : report.source === "reviewer" ? "Reviewer report" : undefined} text={message.text} bodyRef={message.bodyRef} owningAgentId={detail.id} readPath={message.provisional ? `/recovery?${new URLSearchParams({agent: detail.id, operation: message.id})}` : undefined} sender={workers.find(w => w.id === (report.reportingResearcherId ?? report.reportingReviewerId ?? report.reportingWorkerId))?.title} initiallyExpanded={expandedReports.has(message.clientId ?? message.id)} onexpanded={value => { if (value) expandedReports.add(message.clientId ?? message.id); else expandedReports.delete(message.clientId ?? message.id); }} />
+      {@const report = delivery && ["worker", "reviewer", "researcher"].includes(delivery.source) ? delivery : undefined}
+      {#if report}<WorkerReport at={message.at} agentId={report.reportingResearcherId ?? report.reportingReviewerId ?? report.reportingWorkerId} kind={report.source === "researcher" ? "Researcher report" : report.source === "reviewer" ? "Reviewer report" : undefined} text={message.text} bodyRef={message.bodyRef} owningAgentId={detail.id} readPath={message.provisional ? `/recovery?${new URLSearchParams({agent: detail.id, operation: message.id})}` : undefined} sender={workers.find(w => w.id === (report.reportingResearcherId ?? report.reportingReviewerId ?? report.reportingWorkerId))?.title} initiallyExpanded={expandedReports.has(message.clientId ?? message.id) || (grouped && !closedReports.has(message.clientId ?? message.id))} onexpanded={value => { const id = message.clientId ?? message.id; if (value) { expandedReports.add(id); closedReports.delete(id); } else { expandedReports.delete(id); closedReports.add(id); } }} />
       {:else}<div class:user-message={message.role === "user"} class:failed-user={message.role === "user" && delivery?.source === "user" && submissionResult(delivery) === "rejected" && !dispatching.includes(delivery.id)} class:assistant-message={message.role === "assistant"}>{#if message.role === "user" && delivery?.source === "user" && submissionResult(delivery) === "rejected" && !dispatching.includes(delivery.id)}<Button class="retry-user" variant="ghost" size="icon-sm" aria-label={m.retry()} title={delivery.error || m.retry()} disabled={!connected} onclick={() => onretryuser(detail.id,delivery.id,delivery)}><RotateCcw /></Button>{/if}<div class="message-role">{#if showAuthors && author}<span class="message-author" style:--author-color={author.color}><span>{author.name.slice(0,1).toUpperCase()}</span>{author.name}</span>{:else}{message.role === "assistant" ? detail.role === "orc" ? m.orc() : detail.role === "reviewer" ? "Reviewer" : detail.role === "researcher" ? "Researcher" : m.worker() : ""}{/if}</div><MessageBody text={message.text} bodyRef={message.bodyRef} agentId={detail.id} copyMessage at={message.at} readPath={message.provisional ? `/recovery?${new URLSearchParams({agent: detail.id, operation: message.id})}` : undefined}>
       {#if message.questionItemId || message.delivery?.source === "question"}<Button class="question-record-entry" variant="secondary" size="sm" onclick={() => openRecord(message)}><MessageCircle />View questions and answers</Button>{/if}
       {#if message.images?.length || message.localImageIds?.length}<MessageImages connected={mediaConnected} agentId={detail.id} operationId={message.id} images={message.images} localImageIds={message.localImageIds} onviewer={open => { if (open) pinnedImage = message.id; else if (pinnedImage === message.id) pinnedImage = undefined; }} />{/if}

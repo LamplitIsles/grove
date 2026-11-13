@@ -3,7 +3,7 @@
 ## Product interface
 
 - Prioritize mouse and touch flows. Keyboard additions solely for accessibility have the lowest priority: keep primitive defaults minimal and expand only when explicitly requested, without adding visible controls, custom navigation or dedicated test matrices.
-- Reserve Tab and Shift+Tab for application actions, not focus traversal. Keep existing explicit Tab actions and browser/system shortcuts; do not add Tab navigation.
+- Reserve Tab and Shift+Tab for application actions, not focus traversal. Never propose, require, implement, test for, or flag the absence of Tab-based navigation in Grove specifications, designs, implementation or reviews. Preserve existing explicit Tab actions and browser/system shortcuts; an explicit future user instruction is needed to change this rule.
 
 - Show information that helps the user make a decision or complete a task. Keep low-value implementation and background-maintenance details out of ordinary product flows unless the user explicitly requests them.
 - Weekly quota displays the latest successfully retrieved value. Refresh requests a new value; if it fails, retain the previous value. Show unknown only when no value has been obtained. Do not add cached/stale badges, freshness timestamps, or background-refresh status copy.
@@ -14,6 +14,7 @@
 
 ## Managed collaboration
 
+- Worker, Reviewer, and Researcher are owned working agents; Reviewer and Researcher are conceptually specialized workers. Apply shared member behavior consistently unless the task or a role-specific contract says otherwise. Keep their distinct identities, tools, responsibilities, review/research restrictions, and lifecycle guards; this conceptual relationship does not grant implementation permissions or turn a Reviewer or Researcher into an implementation Worker.
 - Orc investigates and decides the scope and approach before dispatch. Apply the captured task division as a default and follow the user’s explicit assignment; one Worker handles its assigned implementation. Each owner handles its tests and review fixes. Mixed work uses one PR and serial work in the shared checkout, preserving others' changes. Orc substantively self-reviews the whole diff, spec, evidence and complexity before independent whole-PR Standards + Spec review. One-off ops without a PR receives Orc self-review; its execution still requires authorization. Reviewer reads code/spec/existing evidence and does not edit reviewed files or run tests, builds or browsers; missing evidence goes to its owner.
 - Use the shipped `grove-` workflows and Grove Reviewer lifecycle. Keep original reviewers and target-bound conclusions for focused re-review. Model/effort and axis prompt defaults live in local instance configuration; global skill/config files stay untouched.
 - Reviewer runtime, native discovery and browser checks must use test-owned configuration, homes and state. Do not use credentials or paid turns to validate discovery, roles or UI.

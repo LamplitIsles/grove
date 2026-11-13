@@ -42,6 +42,7 @@
   import InstanceBlockers from "./InstanceBlockers.svelte";
   import { historyCache } from "./history-cache";
   import AgentDetail from "./AgentDetail.svelte";
+  import SessionHoverPreview from "./SessionHoverPreview.svelte";
   import SessionHistory from "./SessionHistory.svelte";
   import * as m from "./paraglide/messages";
   let { user, colors, onlogout, ondisconnect } = $props<{user:Human; colors:string[]; onlogout:()=>void; ondisconnect:()=>void}>();
@@ -133,13 +134,13 @@
   let composing = false;
   let snapshot = $state<Snapshot>({ agents: [], settings: null, revision: 0 });
   const savedSelection = preferences.selection;
-  let treeOrder = $state(preferences.treeOrder);
-  $effect(() => { preferences.treeOrder = $state.snapshot(treeOrder); });
   const savedActivityWindow = readPreference<unknown>("activity-window", "1d");
   let activityWindow = $state<"1h" | "4h" | "1d" | "1w">(savedActivityWindow === "1h" || savedActivityWindow === "4h" || savedActivityWindow === "1w" ? savedActivityWindow : "1d");
   $effect(() => { writePreference("activity-window", activityWindow); });
   let remembered = $state<Record<string, string>>(savedSelection.sessions);
   let selectedId = $state<string | null>(savedSelection.sessions[savedSelection.host] ?? null);
+  let hoverId = $state<string | null>(null), hoverDetail = $state<Detail | null>(null), hoverLoading = $state(false), hoverCached = $state(false), hoverError = $state("");
+  let hoverSequence = 0, hoverPoll: ReturnType<typeof setInterval> | undefined, hoverDelay: ReturnType<typeof setTimeout> | undefined, hoverBusy = false;
   let navigationReady = $state(false); let connectionReady = $state(false);
   let detail = $state<Detail | null>(null); let skills = $state<Skill[]>([]);
   let queueAuthority = $state<string | null>(null);
@@ -188,6 +189,8 @@
   const hosts = $derived(snapshot.hosts ?? []);
   const selectedHost = $derived(hosts.find(h => h.id === shownDetail?.hostId));
   const hostConnected = $derived(!!selectedHost?.connected);
+  const hoverAgent = $derived(snapshot.agents.find(a => a.id === hoverId));
+  const hoverConnected = $derived(!!hoverAgent && connected && !!hosts.find(h => h.id === hoverAgent.hostId)?.connected);
   const visibleAgents = $derived(snapshot.agents.map(a => optimistic(a.id) && a.state !== "working" && a.state !== "stopping" ? {...a,state:"working" as const,currentExecution:undefined} : a));
   $effect(() => { if (navigationReady) preferences.selection = { host: instanceId, sessions: $state.snapshot(remembered) }; });
   let environments = $state<ProjectEnvironment[]>([]);
@@ -232,7 +235,49 @@
       if (selectedId === id && seq === sequence) { observeOutgoing(result); detail = retainReading(detail, result); queueAuthority = id; readingCache.saveDetail(detail); }
     } catch (e) { if (selectedId === id && seq === sequence && connected) error = e instanceof Error ? e.message : m.load_failure(); }
   }
-  function open(id: string, fromDetail = false) { openConversation(id, fromDetail, snapshot.agents.find(a => a.id === id)?.ownerId); }
+  function preview(id: string | null) {
+    if (!id || id === selectedId || !desktop || navigation.surfaces.length) {
+      ++hoverSequence; clearInterval(hoverPoll); clearTimeout(hoverDelay); hoverPoll = undefined; hoverDelay = undefined; hoverBusy = false;
+      hoverId = null; hoverDetail = null; hoverLoading = false; hoverCached = false; hoverError = "";
+      return;
+    }
+    if (hoverId === id) return;
+    const agent = snapshot.agents.find(a => a.id === id);
+    if (!agent) return;
+    const sequence = ++hoverSequence;
+    const saved = readingCache.readDetail(id);
+    hoverId = id; hoverDetail = saved; hoverCached = !!saved; hoverError = "";
+    clearInterval(hoverPoll); clearTimeout(hoverDelay); hoverBusy = false;
+    const refresh = () => {
+      if (sequence !== hoverSequence || hoverId !== id || hoverBusy) return;
+      if (!connected || !hosts.find(host => host.id === agent.hostId)?.connected) {
+        hoverLoading = false; hoverError = m.host_offline(); return;
+      }
+      hoverBusy = true; if (!hoverDetail) hoverLoading = true;
+      void api<Detail>(`/agents/${id}`).then(result => {
+        if (sequence !== hoverSequence || hoverId !== id) return;
+        // A cold detail can lack messages that are still available in the local reading copy.
+        if (!result.messages.length && saved?.messages.length) {
+          hoverDetail = { ...result, messages: saved.messages, deliveries: saved.deliveries };
+          hoverCached = true;
+        } else { hoverDetail = result; hoverCached = false; }
+        hoverError = "";
+      }).catch(() => {
+        if (sequence === hoverSequence && hoverId === id) hoverError = m.hover_preview_unavailable();
+      }).finally(() => {
+        if (sequence === hoverSequence && hoverId === id) { hoverBusy = false; hoverLoading = false; }
+      });
+    };
+    // Show the row identity immediately; avoid a request for a passing pointer.
+    if (!connected || !hosts.find(host => host.id === agent.hostId)?.connected) refresh();
+    else { hoverLoading = !hoverDetail; hoverDelay = setTimeout(refresh, 80); }
+    // Read the current detail while hovering without changing Chord's selection.
+    hoverPoll = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 1500);
+  }
+  $effect(() => {
+    if (hoverId && (!desktop || navigation.surfaces.length || hoverId === selectedId || !hoverAgent)) untrack(() => preview(null));
+  });
+  function open(id: string, fromDetail = false) { preview(null); openConversation(id, fromDetail, snapshot.agents.find(a => a.id === id)?.ownerId); }
   async function restoreDetail(id: string) {
     error = ""; selectedId = id;
     const host = id.split(":")[0];
@@ -255,16 +300,6 @@
     value = { ...value, agents: [...value.agents, ...retained], hosts: value.hosts?.map(h => !h.connected && !h.lastSeen ? { ...h, lastSeen: snapshot.hosts?.find(old => old.id === h.id)?.lastSeen } : h) };
     observeQuestions(value.agents, selectedId);
     if (selectedId && !value.agents.some(a => a.id === selectedId)) lostSelection = selectedId;
-    if (authoritative) {
-      const order = { ...treeOrder };
-      for (const host of value.hosts ?? []) {
-        if (!host.connected) continue;
-        const ids = value.agents.filter(a => a.hostId === host.id && a.role === "orc").map(a => a.id);
-        const saved = (order[host.id] ?? []).filter(id => ids.includes(id));
-        order[host.id] = [...saved, ...ids.filter(id => !saved.includes(id))];
-      }
-      treeOrder = order;
-    }
     snapshot = value;
     if (authoritative) for (const host of value.hosts ?? []) {
       if (!host.connected) continue;
@@ -796,7 +831,7 @@
     window.addEventListener("keydown", reserveTab, true);
     const installer = (e: Event) => { e.preventDefault(); install = e as Event & { prompt: () => Promise<void> }; };
     window.addEventListener("pointerdown", permission, { once: true }); window.addEventListener("keydown", permission, { once: true }); window.addEventListener("keydown", keydown); window.addEventListener("beforeinstallprompt", installer);
-    return () => { window.removeEventListener("compositionstart", compositionStart); window.removeEventListener("compositionend", compositionEnd); media.removeEventListener("change", resize); cleanupNavigation(); window.removeEventListener("keydown", reserveTab, true); disposed = true; client?.close(); setClient(undefined); clearInterval(timer);window.removeEventListener("pointerdown", permission); window.removeEventListener("keydown", permission); window.removeEventListener("keydown", keydown); window.removeEventListener("beforeinstallprompt", installer); };
+    return () => { ++hoverSequence; clearInterval(hoverPoll); clearTimeout(hoverDelay); window.removeEventListener("compositionstart", compositionStart); window.removeEventListener("compositionend", compositionEnd); media.removeEventListener("change", resize); cleanupNavigation(); window.removeEventListener("keydown", reserveTab, true); disposed = true; client?.close(); setClient(undefined); clearInterval(timer);window.removeEventListener("pointerdown", permission); window.removeEventListener("keydown", permission); window.removeEventListener("keydown", keydown); window.removeEventListener("beforeinstallprompt", installer); };
   });
 </script>
 
@@ -804,16 +839,20 @@
 {#snippet globalActions()}
   <div class="global-actions">{#if !loading && shownDetail?.backend !== "pi" && (!snapshot.agents.length || snapshot.agents.some(agent => agent.backend !== "pi"))}<Weekly hostId={snapshot.entryId} connected={!!hosts.find(h=>h.id===snapshot.entryId)?.connected} />{/if}</div>
 {/snippet}
+<svelte:window onkeydown={() => { if (hoverId) preview(null); }} />
 <div class="workbench" class:close-recovery-layout={closeRecovery.entries.some(i => modal !== "abandon-close" || abandon?.id !== i.agentId)}>
 <main>
   <Sidebar.Root>
-  <SessionList bind:this={sessionList} user={currentUser} version={instance?.version ?? null} {showAuthors} onsettings={() => show("settings")} onlogout={() => show("sign-out")} agents={visibleAgents} {projects} {projectsLoading} {instanceId} {activityWindow} onactivitywindow={value => activityWindow = value} {now} rootOrder={treeOrder[instanceId] ?? []} onreorder={ids => treeOrder = { ...treeOrder, [instanceId]: ids }} {hosts} {selectedId} {loading} {connected} {closingId} closeError={selectedId === closeError?.id && navigation.surfaces.at(-1) !== "sidebar" ? null : closeError} onclosetree={closeTree} onopen={open} onnew={() => show("new")}>
+  <SessionList bind:this={sessionList} user={currentUser} version={instance?.version ?? null} {showAuthors} onsettings={() => show("settings")} onlogout={() => show("sign-out")} agents={visibleAgents} {projects} {projectsLoading} {instanceId} {activityWindow} onactivitywindow={value => activityWindow = value} {now} {hosts} {selectedId} {loading} {connected} {closingId} closeError={selectedId === closeError?.id && navigation.surfaces.at(-1) !== "sidebar" ? null : closeError} onclosetree={closeTree} onopen={open} onpreview={preview} onnew={() => show("new")}>
     {#if !connected && !loading}<div class="connection-banner" role="status"><strong>{m.reconnecting()}</strong><span>{m.offline_help()}</span><Button variant="ghost" size="sm" onclick={load}>{m.retry()}</Button></div>{/if}
   </SessionList>
   </Sidebar.Root>
+  <div class="detail-slot">
   {#if !shownDetail}<div class="detail-empty"><div class="empty-tools"><Sidebar.Trigger />{@render globalActions()}</div><div class="empty-message" role="status"><p>{selectedId ? m.loading() : m.select_conversation()}</p>{#if selectedId}<Button variant="ghost" size="sm" onclick={closeDetail}>{m.back_sessions()}</Button>{/if}</div></div>{/if}
   {#if error && !modal && !shownDetail}<div class="app-error" role="alert"><span>{error}</span><Button variant="ghost" size="icon-sm" aria-label={m.close()} onclick={() => error = ""}><X /></Button></div>{/if}
   {#if shownDetail && selectedId}{#key selectedId}<AgentDetail {globalActions} {showAuthors} {users} detail={shownDetail!} ready={!!detail} queueReady={queueAuthority === selectedId && connected && hostConnected} onenqueue={enqueueFollowUp} oncheckqueue={lookupFollowUp} onqueueaction={queueAction} tree={shownDetail!.role === "orc" ? target : owner} {owner} {skills} {now} connected={hostConnected} mediaConnected={connected && hostConnected} onstop={stop} onupdate={result => { if (selectedId === result.id) detail = result; snapshot = { ...snapshot, agents: snapshot.agents.map(a => a.id === result.id ? { ...a, model: result.model, effort: result.effort, serviceTier: result.serviceTier } : a) }; }} onrename={rename} onrefresh={load} onretryuser={retryUser} {retryErrors} dispatching={dispatches.filter(d=>d.key.startsWith(selectedId + "/") && dispatchActive(d)).map(d=>d.key.slice(selectedId!.length+1))} optimisticWorking={optimistic(selectedId)} actionError={error} closeError={closeError?.id === shownDetail.id ? closeError.reason : undefined} lastSeen={selectedHost?.lastSeen} workers={snapshot.agents.filter(w => w.ownerId === detail?.id)} onclose={closeDetail} onopen={id => open(id, true)} onsend={send} onanswer={answerBatch} onretry={retryDelivery} />{/key}{/if}
+  {#if hoverAgent}{#key hoverAgent.id}<SessionHoverPreview agent={hoverAgent} detail={hoverDetail} loading={hoverLoading} error={hoverError} cached={hoverCached} connected={hoverConnected} agents={snapshot.agents} {showAuthors} {users} />{/key}{/if}
+  </div>
 </main>
 
 {#if closeRecovery.entries.some(i => modal !== "abandon-close" || abandon?.id !== i.agentId)}

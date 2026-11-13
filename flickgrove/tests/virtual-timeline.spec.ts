@@ -136,7 +136,7 @@ test("message timeline mounts a bounded window at representative nested Markdown
 });
 
 for (const width of [1440, 390])
-  test(`${width} virtual timeline preserves reading on append, follows same-message growth and delayed images, and reaches all loaded pages`, async ({
+  test(`${width} virtual timeline preserves reading on append, growth and delayed images, and reaches all loaded pages`, async ({
     page,
   }) => {
     await page.setViewportSize({ width, height: 900 });
@@ -278,8 +278,9 @@ for (const width of [1440, 390])
           "A measured stream paragraph.\n\n".repeat(20),
       },
     });
+    await expect.poll(bottom).toBeGreaterThan(80);
+    await page.getByRole("button", { name: "Jump to bottom" }).click();
     await expect(transcript).toContainText("A measured stream paragraph.");
-    await expect.poll(bottom).toBeLessThanOrEqual(1);
     let release!: () => void;
     const loaded = new Promise<void>((resolve) => (release = resolve));
     await page.route(origin + "/fixture/delayed-image", async (route) => {
@@ -342,8 +343,9 @@ for (const width of [1440, 390])
     ).toBeVisible();
     await page.getByRole("button", { name: "Jump to bottom" }).click();
     await expect.poll(bottom).toBeLessThanOrEqual(1);
+    const beforeResize = await anchor();
     await page.setViewportSize({ width, height: 760 });
-    await expect.poll(bottom).toBeLessThanOrEqual(1);
+    await sameAnchor(beforeResize);
     await page.screenshot({
       path: `../.scratch/flickgrove-navigation-perf/virtual-${width}-latest-image.png`,
     });

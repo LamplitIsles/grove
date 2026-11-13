@@ -279,35 +279,6 @@ test("Tab keeps focus in the sidebar and project selection", async ({
   await expect(dialog).toBeVisible();
 });
 
-test("opened tree order remains draggable and survives reload", async ({
-  page,
-  request,
-}) => {
-  await request.post(origin + "/fixture/reset", {
-    data: { mode: "org-groups-idle" },
-  });
-  await page.goto(origin);
-  const rows = opened(page).locator('.session-open[data-location="tree"]');
-  await expect(rows.locator("strong")).toHaveText([
-    "Streaming voice input",
-    "Forge repository in the same organization",
-  ]);
-  const target = rows.nth(1);
-  const box = (await target.boundingBox())!;
-  await rows
-    .first()
-    .dragTo(target, { targetPosition: { x: 10, y: box.height - 3 } });
-  await expect(rows.locator("strong")).toHaveText([
-    "Forge repository in the same organization",
-    "Streaming voice input",
-  ]);
-  await page.reload();
-  await expect(rows.locator("strong")).toHaveText([
-    "Forge repository in the same organization",
-    "Streaming voice input",
-  ]);
-});
-
 test("catalogue delay keeps the remembered organization and recovers", async ({
   page,
   request,

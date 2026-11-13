@@ -67,16 +67,7 @@ for (const width of [1440, 390]) {
         .toBe(900);
       await drawer.getByRole("button", { name: "Close preview" }).click();
     }
-    await page.locator(".worker-report summary").click();
-    await page.getByRole("link", { name: "Worker chart" }).click();
-    await expect(drawer.locator("img")).toBeVisible();
-    await expect
-      .poll(() =>
-        drawer
-          .locator("img")
-          .evaluate((img: HTMLImageElement) => img.naturalWidth),
-      )
-      .toBe(900);
+    await expect(page.locator(".worker-report")).toHaveCount(0);
   });
   test(`${width} HTML runs local resources and test CDN while iframe and direct tab remain isolated`, async ({
     page,

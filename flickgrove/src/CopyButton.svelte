@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
+  import { fade } from "svelte/transition";
   import { Check, Copy } from "@lucide/svelte";
   import { toast } from "svelte-sonner";
   import { Button } from "$lib/components/ui/button/index.js";
@@ -25,5 +26,13 @@
 </script>
 
 <Button variant="ghost" {size} class={`copy-button ${className}`} aria-label={label} title={copied ? m.copied() : label} onclick={copy}>
-  {#if copied}<Check aria-hidden="true" />{:else}<Copy aria-hidden="true" />{/if}
+  <span class="copy-icon" aria-hidden="true">
+    {#if copied}<span transition:fade={{ duration: matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 100 }}><Check /></span>{:else}<span transition:fade={{ duration: matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : 100 }}><Copy /></span>{/if}
+  </span>
 </Button>
+
+<style>
+  .copy-icon { position: relative; display: inline-flex; width: 1rem; height: 1rem; }
+  .copy-icon > span { position: absolute; inset: 0; }
+  .copy-icon :global(svg) { width: 100%; height: 100%; }
+</style>

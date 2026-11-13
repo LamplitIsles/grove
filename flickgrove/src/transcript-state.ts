@@ -9,6 +9,8 @@ export type TranscriptPosition = {
   width: number;
   height: number;
   reports: Set<string>;
+  closedReports?: Set<string>;
+  groups?: Set<string>;
 };
 // Device-local, bounded route state; no message copies or preview capabilities.
 export const transcriptPositions = new Map<string, TranscriptPosition>();

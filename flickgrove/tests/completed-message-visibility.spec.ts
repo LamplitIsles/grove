@@ -52,6 +52,7 @@ test("completed messages are readable during work without moving the reading anc
     .toBeLessThan(3);
   const down = page.getByRole("button", { name: "Jump to bottom" });
   await down.click();
+  await page.getByRole("button", { name: "Work details 1" }).click();
   await expect(conversation).toContainText("Complete commentary during work");
   await expect(conversation).toContainText("Complete final_answer during work");
   await expect(page.locator(".detail-status")).toContainText("Working");
@@ -60,21 +61,29 @@ test("completed messages are readable during work without moving the reading anc
     item: {
       type: "agentMessage",
       id: "following",
-      text: "Complete following message",
+      text: "Complete following message ".repeat(100),
     },
   });
-  await expect(conversation).toContainText("Complete following message");
   await expect
     .poll(() =>
       conversation.evaluate(
         (el) => el.scrollHeight - el.scrollTop - el.clientHeight,
       ),
     )
-    .toBeLessThan(3);
+    .toBeGreaterThan(80);
+  await page.getByRole("button", { name: "Jump to bottom" }).click();
+  await expect(conversation).toContainText("Complete following message");
   await page.screenshot({
     path: "../.scratch/completed-message-visibility/screenshots/working-complete.png",
   });
   await page.reload();
+  await expect(conversation).toContainText("Complete following message");
+  await conversation.evaluate((el) => {
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 500);
+  });
+  const group = page.getByRole("button", { name: "Work details 1" });
+  await expect(group).toBeVisible();
+  await group.click();
   await expect(conversation).toContainText("Complete commentary during work");
   await expect(
     page.getByText("Complete commentary during work", { exact: true }),

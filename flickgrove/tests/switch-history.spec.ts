@@ -119,6 +119,282 @@ for (const width of [1440, 390])
       "Current live response",
     );
   });
+test("returning to a previously read bottom does not follow content added while away", async ({
+  page,
+}) => {
+  await page.request.post(origin + "/fixture/reset");
+  const { id } = await fixture(page, { count: 40 });
+  await page.goto(origin);
+  await choose(page, "Historical reports");
+  const transcript = page.locator(".conversation");
+  await expect(transcript).toContainText("item 39");
+  await expect
+    .poll(() =>
+      transcript.evaluate(
+        (el) => el.scrollHeight - el.clientHeight - el.scrollTop,
+      ),
+    )
+    .toBeLessThan(2);
+  const anchor = await transcript.evaluate((el) => {
+    const top = el.getBoundingClientRect().top;
+    const row = [...el.querySelectorAll<HTMLElement>(".timeline-message")].find(
+      (item) => item.getBoundingClientRect().bottom > top,
+    )!;
+    return {
+      id: row.dataset.messageId!,
+      offset: row.getBoundingClientRect().top - top,
+    };
+  });
+  await choose(page, "Local reports");
+  await page.request.post(origin + "/fixture/history-live", {
+    data: { id, text: "New while away ".repeat(250) },
+  });
+  await choose(page, "Historical reports");
+  await expect
+    .poll(() =>
+      transcript.evaluate(
+        (el) => el.scrollHeight - el.clientHeight - el.scrollTop,
+      ),
+    )
+    .toBeGreaterThan(100);
+  await expect
+    .poll(() =>
+      transcript.evaluate((el, expected) => {
+        const row = [
+          ...el.querySelectorAll<HTMLElement>(".timeline-message"),
+        ].find((item) => item.dataset.messageId === expected.id);
+        return row
+          ? Math.abs(
+              row.getBoundingClientRect().top -
+                el.getBoundingClientRect().top -
+                expected.offset,
+            )
+          : Infinity;
+      }, anchor),
+    )
+    .toBeLessThan(3);
+});
+test("confirmed member reports stay hidden across session switches", async ({
+  page,
+}) => {
+  await page.request.post(origin + "/fixture/reset");
+  const { id } = await fixture(page, { count: 5 });
+  await page.goto(origin);
+  await choose(page, "Historical reports");
+  await page.request.post(origin + "/fixture/history-live", {
+    data: {
+      id,
+      text: "First result",
+      report: "Worker check\n\nVerified worker details",
+    },
+  });
+  await page.keyboard.press("Meta+ArrowDown");
+  await expect(page.locator(".conversation")).toContainText("First result");
+  await expect(page.locator(".worker-report")).toHaveCount(0);
+  await choose(page, "Local reports");
+  await choose(page, "Historical reports");
+  await page.keyboard.press("Meta+ArrowDown");
+  await expect(page.locator(".conversation")).toContainText("First result");
+  await expect(page.locator(".worker-report")).toHaveCount(0);
+});
+test("unconfirmed member reports retain their body and file actions", async ({
+  page,
+}) => {
+  await page.request.post(origin + "/fixture/reset");
+  const { provisional } = await (
+    await page.request.post(origin + "/fixture/reading-transition", {
+      data: {
+        unlinked: true,
+        reportText: "Recovery details\n\n[Chart](reports/plot.png)",
+      },
+    })
+  ).json();
+  await page.goto(origin);
+  await choose(page, "First reading transition");
+  const report = page.locator(
+    `[data-message-id="${provisional}"] .worker-report`,
+  );
+  await expect(report).toBeVisible();
+  await report.locator("summary").click();
+  await expect(report.locator(".report-content")).toContainText(
+    "Recovery details",
+  );
+  await report.getByRole("link", { name: "Chart" }).click();
+  await expect(page.locator(".file-preview img")).toBeVisible();
+});
+test("hovering an expanded large member record never loads its body", async ({
+  page,
+}) => {
+  await page.request.post(origin + "/fixture/reset");
+  const { id, provisional } = await (
+    await page.request.post(origin + "/fixture/reading-transition", {
+      data: { unlinked: true },
+    })
+  ).json();
+  await page.goto(origin);
+  await choose(page, "First reading transition");
+  const report = page.locator(
+    `[data-message-id="${provisional}"] .worker-report`,
+  );
+  await expect(report).toBeVisible();
+  await report.locator("summary").click();
+  await expect(report).toHaveAttribute("open", "");
+  await choose(page, "Local reports");
+  let bodyReads = 0;
+  await page.route("**/api/read/body?**", async (route) => {
+    bodyReads++;
+    await route.abort();
+  });
+  await page.request.post(origin + "/fixture/hover-large-report", {
+    data: { id, deliveryId: provisional },
+  });
+  await page
+    .getByRole("button", {
+      name: "Open First reading transition Orc",
+      exact: true,
+    })
+    .hover();
+  const preview = page.locator(".hover-preview");
+  await expect(preview.locator(".report-content .preview-status")).toHaveText(
+    "Open this session to read the full message.",
+  );
+  expect(bodyReads).toBe(0);
+});
+test("confirming a member delivery above the reader keeps the visible message anchored", async ({
+  page,
+}) => {
+  await page.request.post(origin + "/fixture/reset");
+  await page.goto(origin);
+  const session = page.getByRole("button", {
+    name: "Open Local reports Orc",
+    exact: true,
+  });
+  const id = await session.getAttribute("data-agent-id");
+  expect(id).toBeTruthy();
+  await page.request.post(origin + "/fixture/member-anchor", {
+    data: { id, confirmed: false },
+  });
+  await session.click();
+  const transcript = page.locator(".conversation");
+  await transcript.evaluate((el) => {
+    el.scrollTop = 0;
+  });
+  await expect(page.locator('[data-message-id="anchor-member"]')).toBeVisible();
+  await page.keyboard.press("Meta+ArrowDown");
+  await transcript.evaluate((el) => {
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight - 500);
+  });
+  const anchor = await transcript.evaluate((el) => {
+    const top = el.getBoundingClientRect().top;
+    const row = [
+      ...el.querySelectorAll<HTMLElement>('[data-message-id^="anchor-after-"]'),
+    ].find((item) => item.getBoundingClientRect().bottom > top + 5);
+    return row
+      ? {
+          id: row.dataset.messageId!,
+          offset: row.getBoundingClientRect().top - top,
+        }
+      : null;
+  });
+  expect(anchor).not.toBeNull();
+  await page.request.post(origin + "/fixture/member-anchor", {
+    data: { id, confirmed: true },
+  });
+  await expect(
+    transcript.locator(`[data-message-id="${anchor!.id}"]`),
+  ).toContainText("confirmed");
+  await expect
+    .poll(() =>
+      transcript.evaluate((el, expected) => {
+        const row = el.querySelector<HTMLElement>(
+          `[data-message-id="${expected.id}"]`,
+        );
+        return row
+          ? Math.abs(
+              row.getBoundingClientRect().top -
+                el.getBoundingClientRect().top -
+                expected.offset,
+            )
+          : Infinity;
+      }, anchor!),
+    )
+    .toBeLessThan(3);
+  await transcript.evaluate((el) => {
+    el.scrollTop = 0;
+  });
+  await expect(page.locator('[data-message-id="anchor-member"]')).toHaveCount(
+    0,
+  );
+  await expect(
+    page.locator('[data-message-id="anchor-after-0"]'),
+  ).toBeVisible();
+});
+test("a simultaneous confirmation and result keep the folded work at the reading point", async ({
+  page,
+}) => {
+  await page.request.post(origin + "/fixture/reset");
+  await page.goto(origin);
+  const session = page.getByRole("button", {
+    name: "Open Local reports Orc",
+    exact: true,
+  });
+  const id = await session.getAttribute("data-agent-id");
+  expect(id).toBeTruthy();
+  await page.request.post(origin + "/fixture/member-anchor", {
+    data: { id, confirmed: false, combined: true },
+  });
+  await session.click();
+  const transcript = page.locator(".conversation");
+  await transcript.evaluate((el) => {
+    el.scrollTop = 0;
+  });
+  const progress = transcript.locator('[data-message-id="combined-progress"]');
+  await expect(progress).toBeVisible();
+  await progress.evaluate((el) => {
+    const parent = el.closest(".conversation")!;
+    parent.scrollTop +=
+      el.getBoundingClientRect().top - parent.getBoundingClientRect().top + 40;
+  });
+  await expect(
+    transcript.locator('[data-message-id="combined-user"]'),
+  ).toBeInViewport();
+  const before = await progress.evaluate((el) => {
+    const parent = el.closest(".conversation")!;
+    return el.getBoundingClientRect().top - parent.getBoundingClientRect().top;
+  });
+  expect(before).toBeLessThan(0);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await page.request.post(origin + "/fixture/member-anchor", {
+    data: { id, confirmed: true, combined: true },
+  });
+  const group = transcript.locator('[data-message-id="group:combined-result"]');
+  await expect(group).toBeAttached();
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+          ),
+        ),
+      ),
+  );
+  await expect
+    .poll(() =>
+      group.evaluate((el) => {
+        const parent = el.closest(".conversation")!;
+        return Math.abs(
+          el.getBoundingClientRect().top - parent.getBoundingClientRect().top,
+        );
+      }),
+    )
+    .toBeLessThan(4);
+});
 test("earlier pages and cursor survive switches; failed page retains data and explicit retry", async ({
   page,
 }) => {

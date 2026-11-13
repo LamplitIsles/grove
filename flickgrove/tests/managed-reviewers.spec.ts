@@ -1,5 +1,6 @@
 import sharp from "sharp";
 import { expect, test } from "@playwright/test";
+import { openSidebar } from "./browser-actions";
 const origin = "http://127.0.0.1:14319";
 const shots = "../.scratch/flickgrove-managed-reviewers/screenshots";
 for (const width of [1440, 390])
@@ -12,6 +13,7 @@ for (const width of [1440, 390])
       data: { mode: "reviewers" },
     });
     await page.goto(origin);
+    if (width === 390) await openSidebar(page);
     await page
       .getByRole("button", { name: "Open Streaming voice input Orc" })
       .click();
@@ -187,23 +189,13 @@ for (const width of [1440, 390])
     expect(
       state.inputs.filter((i: { text: string }) => i.text.includes("$grove-")),
     ).toHaveLength(0);
-    // Distinct Reviewer report card, still collapsed.
+    // Confirmed member reports do not appear in the Orc transcript.
     await expect(
       page
         .locator(".worker-report")
         .filter({ hasText: "Reviewer report" })
         .first(),
-    ).toBeVisible();
-    await page
-      .locator(".worker-report")
-      .filter({ hasText: "Reviewer report" })
-      .first()
-      .locator("summary")
-      .click();
-    await expect(page.locator(".report-content").first()).toContainText(
-      "Read-only findings are bound to fixture-head.",
-    );
-    await page.screenshot({ path: `${shots}/${width}-reviewer-report.png` });
+    ).toHaveCount(0);
     await page.getByRole("button", { name: "Stop Orc", exact: true }).click();
     for (const label of [
       "Discuss",
@@ -221,7 +213,17 @@ for (const width of [1440, 390])
       await page
         .getByRole("button", { name: "‹ Sessions", exact: true })
         .click();
-    await page.locator(".worker-disclosure").first().click();
+    const members = page
+      .locator(".session-row")
+      .filter({
+        has: page.getByRole("button", {
+          name: "Open Streaming voice input Orc",
+          exact: true,
+        }),
+      })
+      .locator(".worker-disclosure");
+    if ((await members.getAttribute("aria-expanded")) === "false")
+      await members.click();
     await page
       .getByRole("button", { name: /Open Standards review.* Reviewer/ })
       .click();

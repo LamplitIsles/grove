@@ -49,6 +49,7 @@ import { roleTools, toolDefinitions } from "./tools";
 import { PiMetadata, PiOperation, PiWithdrawal } from "./pi-documents";
 import { openPiStorage, acquirePiWriter } from "./pi-storage";
 import { recoveredPiActivity } from "./pi-completion";
+import { piAnswerKinds, piToolProgress } from "./message-kind";
 import { inspectPiFollowUp } from "./pi-inspection";
 import { openPiMcp } from "./pi-mcp";
 import { createDeepSeekSearch } from "./pi-deepseek-search";
@@ -497,6 +498,11 @@ export async function openPiSession(
         dispatch({ type: "working", turnId: next });
       }
       const active = runId ?? persistedTurn ?? "history";
+      const answerKinds = value.entries.some(
+        (entry) => entry.id > lastEntry && entry.kind === "pi.assistant",
+      )
+        ? await piAnswerKinds(storage!, value.entries.slice(-100))
+        : new Set<number>();
       let newestEntry = lastEntry;
       for (const entry of value.entries) {
         if (entry.id <= lastEntry) continue;
@@ -555,6 +561,11 @@ export async function openPiSession(
               id: String(entry.id),
               type: "agentMessage",
               text,
+              ...(piToolProgress(entry)
+                ? { kind: "progress" as const }
+                : answerKinds.has(entry.id)
+                  ? { kind: "result" as const }
+                  : {}),
             },
           });
         } else if (entry.kind === "grove.question") {

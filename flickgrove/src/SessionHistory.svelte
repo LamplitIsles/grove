@@ -10,6 +10,8 @@
   import FilePreview from "./FilePreview.svelte";
   import WorkerReport from "./WorkerReport.svelte";
   import MessageBody from "./MessageBody.svelte";
+  import MessageGroup from "./MessageGroup.svelte";
+  import { projectConversation } from "./conversation-projection";
   import { reading as readHttp, api } from "./api";
   import { navigation, setSurface, back } from "./navigation.svelte";
   import Markdown from "./Markdown.svelte";
@@ -25,6 +27,10 @@
   let record = $state<{item?: string; operation?: string} | null>(null);
   let selected = $state<HistorySession | null>(null); let previewProject = $state(untrack(() => projectReference(project)));
   let messages = $state<Message[]>([]); let messageCursor = $state<string | null>(null);
+  const rows = $derived(projectConversation(messages));
+  const expandedGroups = new Set<string>();
+  const reportExpansion = new Map<string, boolean>();
+  let transcript = $state<HTMLDivElement>();
   let reading = $state(false); let resuming = $state(false); let previewSequence = 0;
   let retryOperation = $state<"search" | "read" | "owner" | "resume">("search");
   let input = $state<HTMLInputElement | null>(null);
@@ -71,7 +77,7 @@
   }
   async function select(session: HistorySession, alias = projectReference(project)) {
     if (!previewOpen) listScroll = results?.scrollTop ?? 0;
-    ++previewSequence; record = null; selected = session; previewProject = alias; messages = []; messageCursor = null;
+    ++previewSequence; record = null; selected = session; previewProject = alias; messages = []; messageCursor = null; expandedGroups.clear(); reportExpansion.clear();
     setSurface("history-preview", true); await read();
   }
   async function owningOrc() {
@@ -90,7 +96,15 @@
     finally { resuming = false; }
   }
   function label(s: HistorySession) { const role = s.role === "reviewer" ? "Reviewer" : s.role === "researcher" ? "Researcher" : s.role === "worker" ? m.worker() : s.agentId ? m.orc() : s.source; return `${s.backend === "pi" ? "Pi" : "Codex"} · ${role}`; }
-  onMount(() => { void tick().then(() => input?.focus()); return () => { ++sequence; ++previewSequence; readAbort?.abort(); }; });
+  onMount(() => {
+    const jumpKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || !event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.key !== "ArrowDown" || !previewOpen || record || navigation.surfaces.at(-1) !== "history-preview") return;
+      event.preventDefault(); transcript?.scrollTo({ top: transcript.scrollHeight });
+    };
+    window.addEventListener("keydown", jumpKey);
+    void tick().then(() => input?.focus());
+    return () => { window.removeEventListener("keydown", jumpKey); ++sequence; ++previewSequence; readAbort?.abort(); };
+  });
 </script>
 
 <div class="session-history">
@@ -115,10 +129,11 @@
   {:else if selected}
     <h2 class="history-title">{selected.title}</h2>
     <p class="history-scope">{label(selected)}{selected.closed ? " · " + m.history_closed() : ""}{selected.archived ? " · " + m.history_archived() : ""}</p>
-    <div class="history-transcript">
+    <div class="history-transcript" bind:this={transcript}>
       {#if reading}<p role="status">{m.loading_history()}</p>{/if}
       {#if messageCursor}<Button variant="ghost" size="sm" disabled={reading || !connected} onclick={() => read(true)}>{m.earlier_messages()}</Button>{/if}
-      {#each messages as message (message.id)}{@const author = message.author ? users?.find(person => person.id === message.author?.id) ?? message.author : undefined}{#if message.delivery && ["worker", "reviewer", "researcher"].includes(message.delivery.source)}<WorkerReport at={message.at} text={message.text} bodyRef={message.bodyRef} owningAgentId={hostId} agentId={message.delivery.reportingResearcherId ?? message.delivery.reportingReviewerId ?? message.delivery.reportingWorkerId} kind={message.delivery.source === "researcher" ? "Researcher report" : message.delivery.source === "reviewer" ? "Reviewer report" : undefined} readPath={`/body?${new URLSearchParams({project: previewProject, thread: selected.threadId, item: message.id})}`} />{:else}<div class:user-message={message.role === "user"} class:assistant-message={message.role === "assistant"}><div class="message-role">{#if showAuthors && author}<span class="message-author" style:--author-color={author.color}><span>{author.name.slice(0,1).toUpperCase()}</span>{author.name}</span>{:else if message.role === "assistant"}{m.history_assistant()}{/if}</div><MessageBody text={message.text} bodyRef={message.bodyRef} agentId={hostId} copyMessage at={message.at} readPath={`/body?${new URLSearchParams({project: previewProject, thread: selected.threadId, item: message.id})}`}>{#if message.questionItemId || message.delivery?.source === "question"}<Button class="question-record-entry" variant="secondary" size="sm" onclick={() => record = message.questionItemId ? {item:message.questionItemId} : {operation:message.clientId ?? message.id}}>View questions and answers</Button>{/if}</MessageBody></div>{/if}{/each}
+      {#snippet renderMessage(message: Message, grouped = false)}{@const author = message.author ? users?.find(person => person.id === message.author?.id) ?? message.author : undefined}{#if message.delivery && ["worker", "reviewer", "researcher"].includes(message.delivery.source)}<WorkerReport initiallyExpanded={reportExpansion.get(message.clientId ?? message.id) ?? grouped} onexpanded={value => reportExpansion.set(message.clientId ?? message.id, value)} at={message.at} text={message.text} bodyRef={message.bodyRef} owningAgentId={hostId} agentId={message.delivery.reportingResearcherId ?? message.delivery.reportingReviewerId ?? message.delivery.reportingWorkerId} kind={message.delivery.source === "researcher" ? "Researcher report" : message.delivery.source === "reviewer" ? "Reviewer report" : undefined} readPath={`/body?${new URLSearchParams({project: previewProject, thread: selected!.threadId, item: message.id})}`} />{:else}<div class:user-message={message.role === "user"} class:assistant-message={message.role === "assistant"}><div class="message-role">{#if showAuthors && author}<span class="message-author" style:--author-color={author.color}><span>{author.name.slice(0,1).toUpperCase()}</span>{author.name}</span>{:else if message.role === "assistant"}{m.history_assistant()}{/if}</div><MessageBody text={message.text} bodyRef={message.bodyRef} agentId={hostId} copyMessage at={message.at} readPath={`/body?${new URLSearchParams({project: previewProject, thread: selected!.threadId, item: message.id})}`}>{#if message.questionItemId || message.delivery?.source === "question"}<Button class="question-record-entry" variant="secondary" size="sm" onclick={() => record = message.questionItemId ? {item:message.questionItemId} : {operation:message.clientId ?? message.id}}>View questions and answers</Button>{/if}</MessageBody></div>{/if}{/snippet}
+      {#each rows as row (row.id)}{#if row.type === "message"}{@render renderMessage(row.message)}{:else}<MessageGroup messages={row.messages} {renderMessage} initiallyExpanded={expandedGroups.has(row.id)} onexpanded={value => { if (value) expandedGroups.add(row.id); else expandedGroups.delete(row.id); }} />{/if}{/each}
       {#if !reading && !messages.length && !error}<p class="history-empty">{m.no_messages()}</p>{/if}
     </div>
     {#if record}<section class="question-panel" aria-label="Questions and answers"><header class="question-panel-heading"><h2>Questions and answers · Read only</h2><Button variant="ghost" size="sm" onclick={() => record = null}>Close</Button></header><QuestionRecord peerOrAgent={hostId} previewAgentId={selected.agentId?.startsWith(hostId + ":") ? selected.agentId : null} historyPreview params={{project:previewProject,thread:selected.threadId,...record}} {connected} onpending={selected.agentId && !selected.closed && selected.role === "orc" ? () => void resume() : undefined} /></section>{/if}

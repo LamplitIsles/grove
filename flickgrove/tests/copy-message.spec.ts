@@ -131,25 +131,7 @@ for (const width of [1440, 390]) {
         ),
       )
       .toBe("User input");
-    const report = page.locator(".worker-report");
-    await report.hover();
-    await expect(report.locator(".report-time time")).toHaveCount(1);
-    await report.locator("summary").click();
-    await expect(report.locator(".message-actions > *")).toHaveCount(2);
-    expect(
-      await report
-        .locator(".message-actions > *")
-        .evaluateAll((els) => els.map((el) => el.tagName)),
-    ).toEqual(["TIME", "BUTTON"]);
-    await page.screenshot({ path: testInfo.outputPath(`report-${width}.png`) });
-    await report.getByRole("button", { name: "Copy message" }).click();
-    await expect
-      .poll(() =>
-        page.evaluate(
-          () => (window as Window & { copiedText?: string }).copiedText,
-        ),
-      )
-      .toBe("Worker “Math reporter” reports:\n\nReport\n\n" + markdown);
+    await expect(page.locator(".worker-report")).toHaveCount(0);
 
     await page.evaluate(() => {
       (window as Window & { failCopy?: boolean }).failCopy = true;

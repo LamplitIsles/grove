@@ -9,7 +9,9 @@
   import { choiceLayer } from "./choice-layer.svelte";
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
   import {environmentId} from "./project-identity";
-  import { ChevronDown, ChevronRight, Plus, Zap, MessageCircle, GitBranch } from "@lucide/svelte";
+  import { ChevronRight, Plus, Zap, MessageCircle, GitBranch } from "@lucide/svelte";
+  import { slide } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Settings, LogOut } from "@lucide/svelte";
   import { ContextMenu } from "bits-ui";
@@ -21,7 +23,7 @@
   const windows = { "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000, "1w": 604_800_000 };
   type Window = keyof typeof windows;
   const nicknameOrder = new Intl.Collator("zh", { sensitivity: "base", numeric: true });
-  let { user, version, showAuthors, onsettings, onlogout, agents, projects, projectsLoading, instanceId, activityWindow, onactivitywindow, now, rootOrder, onreorder, hosts, selectedId, loading, connected, onopen, onnew, onclosetree, closingId, closeError, children }: { user: Human; version: string | null; showAuthors: boolean; onsettings: () => void; onlogout: () => void; agents: Agent[]; projects: Project[]; projectsLoading: boolean; instanceId: string; activityWindow: Window; onactivitywindow: (value: Window) => void; now: number; rootOrder: string[]; onreorder: (ids: string[]) => void; hosts: Host[]; selectedId: string | null; loading: boolean; connected: boolean; onopen: (id: string) => void; onnew: () => void; onclosetree: (id: string) => Promise<void>; closingId: string | null; closeError: { id: string; reason: string } | null; children?: Snippet } = $props();
+  let { user, version, showAuthors, onsettings, onlogout, agents, projects, projectsLoading, instanceId, activityWindow, onactivitywindow, now, hosts, selectedId, loading, connected, onopen, onpreview, onnew, onclosetree, closingId, closeError, children }: { user: Human; version: string | null; showAuthors: boolean; onsettings: () => void; onlogout: () => void; agents: Agent[]; projects: Project[]; projectsLoading: boolean; instanceId: string; activityWindow: Window; onactivitywindow: (value: Window) => void; now: number; hosts: Host[]; selectedId: string | null; loading: boolean; connected: boolean; onopen: (id: string) => void; onpreview: (id: string | null) => void; onnew: () => void; onclosetree: (id: string) => Promise<void>; closingId: string | null; closeError: { id: string; reason: string } | null; children?: Snippet } = $props();
   const savedExpanded = readPreference<unknown>("expanded", []);
   let expanded = $state<string[]>(Array.isArray(savedExpanded) ? savedExpanded.filter((v): v is string => typeof v === "string") : []);
   const savedOrgs = readPreference<unknown>("selected-orgs", {});
@@ -31,7 +33,7 @@
   let orgMenuOpen = $state(false);
   const orgMenuId = $props.id();
   choiceLayer(orgMenuId, () => orgMenuOpen, () => orgMenuOpen = false);
-  function selectOrg(key: string) { selectedOrgs = { ...selectedOrgs, [instanceId]: key }; writePreference("selected-orgs", selectedOrgs); endDrag(); }
+  function selectOrg(key: string) { selectedOrgs = { ...selectedOrgs, [instanceId]: key }; writePreference("selected-orgs", selectedOrgs); }
   function groupKey(agent: Agent) {
     const catalogue = projects.filter(p=>!p.historyRef && environmentId(p)===environmentId(agent.project) && (environmentId(p)==="local" || p.environment?.target===agent.project.environment?.target));
     const project = catalogue.find(p => p.alias === agent.project.alias && p.path === agent.project.path)
@@ -41,48 +43,34 @@
   }
   export function selectAgentOrg(agent: Agent) { const key = groupKey(agent); if (key !== "@loading") selectOrg(key); }
   let desktop = $state(matchMedia("(min-width: 701px)").matches);
-  let draggingId = $state<string | null>(null);
-  let dropAt = $state<{ id: string; after: boolean } | null>(null);
-  function dragStart(event: DragEvent, agent: Agent) {
-    if (!desktop || agent.role !== "orc" || groupKey(agent) === "@loading" || !event.dataTransfer) { event.preventDefault(); return; }
-    draggingId = agent.id;
-    event.dataTransfer.effectAllowed = "move";
-    event.dataTransfer.setData("text/plain", agent.id);
-  }
-  function dragOver(event: DragEvent, agent: Agent) {
-    const id = agent.ownerId ?? agent.id;
-    const source = roots.find(a => a.id === draggingId);
-    if (!source || !desktop || !draggingId || agent.role !== "orc" || id === draggingId || groupKey(agent) !== groupKey(source)) { dropAt = null; return; }
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-    dropAt = { id, after: event.clientY >= rect.top + rect.height / 2 };
-  }
-  function drop(event: DragEvent) {
-    if (!draggingId || !dropAt || !desktop) return;
-    event.preventDefault(); event.stopPropagation();
-    const source = roots.find(a => a.id === draggingId);
-    const target = roots.find(a => a.id === dropAt!.id);
-    if (!source || !target || groupKey(source) !== groupKey(target)) { endDrag(); return; }
-    const ids = roots.filter(a => groupKey(a) === groupKey(source)).map(a => a.id);
-    if (!ids.includes(draggingId)) { endDrag(); return; }
-    const next = ids.filter(id => id !== draggingId);
-    const index = next.indexOf(dropAt.id);
-    if (index >= 0) {
-      next.splice(index + Number(dropAt.after), 0, draggingId);
-      if (next.some((id, i) => id !== ids[i])) {
-        let position = 0;
-        // Replace this group's slots only; preserve every other group's order.
-        onreorder(roots.map(a => ids.includes(a.id) ? next[position++] : a.id));
-      }
-    }
-    endDrag();
-  }
-  function endDrag() { if (draggingId) suppressClickUntil = Date.now() + 500; draggingId = null; dropAt = null; }
   let focusedId = $state<string | null>(null);
+  let motionTree = $state<string>(), motionOpened = $state(false), motionTimer: ReturnType<typeof setTimeout> | undefined;
+  function markMotion(tree?: string) {
+    motionTree = tree; motionOpened = tree === undefined;
+    clearTimeout(motionTimer);
+    motionTimer = setTimeout(() => { motionTree = undefined; motionOpened = false; }, 300);
+  }
+  function motionDuration(enabled: boolean) { return enabled && !matchMedia("(prefers-reduced-motion: reduce)").matches ? 160 : 0; }
   let revealedId = $state<string | null>(null);
   let gesture: { id: string; x: number; y: number; horizontal: boolean } | null = null;
   let suppressClickUntil = 0;
+  function previewRow(node: HTMLElement, id: string) {
+    let hovered = false;
+    const enter = (event: PointerEvent) => {
+      if (event.pointerType !== "mouse" || !desktop || !matchMedia("(hover: hover) and (pointer: fine)").matches) return;
+      hovered = true; onpreview(id);
+    };
+    const leave = (event: PointerEvent) => {
+      if (event.pointerType !== "mouse") return;
+      hovered = false; onpreview(null);
+    };
+    node.addEventListener("pointerenter", enter);
+    node.addEventListener("pointerleave", leave);
+    return { destroy() {
+      node.removeEventListener("pointerenter", enter); node.removeEventListener("pointerleave", leave);
+      if (hovered) onpreview(null);
+    } };
+  }
   function touchStart(event: TouchEvent, agent: Agent, entryKey: string) {
     suppressClickUntil = 0;
     const touch = event.touches[0];
@@ -113,11 +101,7 @@
   }
   export function closeTarget() { const entry = document.activeElement?.closest<HTMLElement>("[data-agent-id][data-location]"); return agents.find(a => a.id === (entry?.dataset.agentId ?? focusedId) && a.role === "orc")?.id ?? null; }
   let list = $state<HTMLElement>(null!);
-  const roots = $derived.by(() => {
-    const backend = agents.filter(a => a.role === "orc");
-    const saved = rootOrder.flatMap(id => backend.find(a => a.id === id) ?? []);
-    return [...saved, ...backend.filter(a => !rootOrder.includes(a.id))];
-  });
+  const roots = $derived(agents.filter(a => a.role === "orc"));
   const recentRoots = $derived.by(() => roots.filter(root => {
     const active = (a: Agent) => executionStatus(a) === "working" || a.state === "stopping" || !!a.workUnconfirmed || (a.followUpCount ?? 0) > 0;
     return active(root) || agents.some(a => a.ownerId === root.id && active(a)) ||
@@ -133,10 +117,10 @@
   const openedFolded = $derived(selectedOrg !== null && (foldedOrgs[instanceId] ?? []).includes(selectedOrg));
   function toggleOpened() {
     if (selectedOrg === null) return;
+    markMotion();
     const folded = foldedOrgs[instanceId] ?? [];
     foldedOrgs = { ...foldedOrgs, [instanceId]: openedFolded ? folded.filter(key => key !== selectedOrg) : [...folded, selectedOrg] };
     writePreference("opened-folded", foldedOrgs);
-    endDrag();
   }
   const orgItems = $derived(orgKeys.map(key => ({ value: `org:${key}`, label: key || "Ungrouped" })));
   const openedRoots = $derived(roots.filter(root => groupKey(root) === selectedOrg && !recentRoots.some(recent => recent.id === root.id)));
@@ -158,7 +142,7 @@
     });
   });
   $effect(() => { if (focusedId && !visible.some(a => a.id === focusedId) && !recentVisible.some(a => a.id === focusedId)) focusedId = null; });
-  function toggle(id: string) { if (expanded.includes(id) && agents.find(a => a.id === selectedId)?.ownerId === id) onopen(id); expanded = expanded.includes(id) ? expanded.filter(v => v !== id) : [...expanded, id]; }
+  function toggle(id: string) { markMotion(id); if (expanded.includes(id) && agents.find(a => a.id === selectedId)?.ownerId === id) onopen(id); expanded = expanded.includes(id) ? expanded.filter(v => v !== id) : [...expanded, id]; }
   export async function reveal(id: string, recent?: boolean) { await tick(); const isRecent = recent ?? recentVisible.some(a => a.id === id); list?.querySelector<HTMLButtonElement>(`[data-location="${isRecent ? "recent" : "tree"}"][data-agent-id="${id}"]`)?.scrollIntoView({ block: "nearest" }); }
   export function expandFocused() { const entry = document.activeElement?.closest<HTMLElement>('[data-location][data-agent-id]'); const agent = agents.find(a => a.id === (entry?.dataset.agentId ?? selectedId ?? focusedId)); if (agent?.role === "orc") toggle(agent.id); }
   export async function keydown(event: KeyboardEvent) {
@@ -196,10 +180,10 @@
   });
   onMount(() => {
     const media = matchMedia("(min-width: 701px)");
-    const resize = () => { desktop = media.matches; if (!desktop) endDrag(); };
+    const resize = () => { desktop = media.matches; };
     media.addEventListener("change", resize);
     void tick().then(() => { const saved = readPreference<unknown>("list-scroll", 0); list.scrollTop = typeof saved === "number" && Number.isFinite(saved) ? saved : 0; });
-    return () => media.removeEventListener("change", resize);
+    return () => { media.removeEventListener("change", resize); clearTimeout(motionTimer); };
   });
 </script>
 {#snippet sessionRow(agent: Agent, shortcut: boolean)}
@@ -212,23 +196,28 @@
     {@const status = agent.closeRequest ? m.closing_worker() : displayWorking ? m.working() : visibleState === "stopping" ? m.stopping() : visibleState === "error" ? m.failed() : queued ? agent.followUpPaused ? "Queue paused" : "Queued" : m.idle()}
     {@const entryKey = shortcut ? `recent:${agent.id}` : agent.id}
     <ContextMenu.Root><ContextMenu.Trigger disabled={!desktop}>
-    <div role="group" class="session-row" data-swipe-id={entryKey} class:drop-before={!shortcut && dropAt?.id === agent.id && !dropAt.after} class:drop-after={!shortcut && dropAt?.id === agent.id && dropAt.after} ondragover={e => { if (!shortcut) dragOver(e, agent); else dropAt = null; }} ondragleave={e => { if (!(e.relatedTarget instanceof Node) || !(e.currentTarget as HTMLElement).contains(e.relatedTarget)) dropAt = null; }} ondrop={e => { if (!shortcut) drop(e); }} class:revealed={revealedId === entryKey} ontouchstart={e => touchStart(e, agent, entryKey)} ontouchmove={touchMove} ontouchend={() => gesture = null} ontouchcancel={() => { gesture = null; revealedId = null; }}>
+    <div role="group" class="session-row" data-swipe-id={entryKey} class:revealed={revealedId === entryKey} use:previewRow={agent.id} ontouchstart={e => touchStart(e, agent, entryKey)} ontouchmove={touchMove} ontouchend={() => gesture = null} ontouchcancel={() => { gesture = null; revealedId = null; }}>
     {#if agent.role === "orc" && revealedId === entryKey}<Button class="tree-close-action" variant="destructive" size="sm" disabled={!connected || host?.connected === false || closingId === agent.id} onclick={() => onclosetree(agent.id)}>{m.close_tree()}</Button>{/if}
     <div class="session-item" class:orc-item={agent.role === "orc"} class:worker-item={agent.role !== "orc"} class:active={selectedId === agent.id} class:navigation-focus={!shortcut && !selectedId && focusedId === agent.id}>
-      <button class="session-open" draggable={!shortcut && desktop && agent.role === "orc" && groupKey(agent) !== "@loading"} ondragstart={e => dragStart(e, agent)} ondragend={endDrag} tabindex="-1" onfocus={() => { if (shortcut) focusedId = null; }} data-location={shortcut ? "recent" : "tree"} data-agent-id={agent.id} aria-current={selectedId === agent.id ? "true" : undefined} aria-label={m.open_agent({ title: agent.title, role: agent.role === "orc" ? m.orc() : agent.role === "reviewer" ? "Reviewer" : agent.role === "researcher" ? "Researcher" : m.worker() })} onclick={e => { if(Date.now() < suppressClickUntil) { e.preventDefault(); return; } if(revealedId) { revealedId = null; return; } onopen(agent.id); }}>
+      <button class="session-open" tabindex="-1" onfocus={() => { if (shortcut) focusedId = null; }} data-location={shortcut ? "recent" : "tree"} data-agent-id={agent.id} aria-current={selectedId === agent.id ? "true" : undefined} aria-label={m.open_agent({ title: agent.title, role: agent.role === "orc" ? m.orc() : agent.role === "reviewer" ? "Reviewer" : agent.role === "researcher" ? "Researcher" : m.worker() })} onclick={e => { if(Date.now() < suppressClickUntil) { e.preventDefault(); return; } if(revealedId) { revealedId = null; return; } onopen(agent.id); }}>
         <span class="session-title-row"><strong>{agent.title}</strong><span class="session-indicators">{#if agent.role === "orc" && agent.treeFast}<Zap size={12} role="img" aria-label={m.tree_fast()}><title>{m.tree_fast()} — {m.session_next_turn()}</title></Zap>{/if}{#if showAuthors && shortcut && agent.role === "orc" && recentParticipants.length}<span class="participants">{#each recentParticipants.slice(0, 4) as participant (participant.user.id)}<span class="participant-avatar" style:background={participant.user.color} title={participant.user.name} aria-label={participant.user.name}>{participant.user.name.slice(0, 1).toUpperCase()}</span>{/each}{#if recentParticipants.length > 4}<span class="participant-more">+{recentParticipants.length - 4}</span>{/if}</span>{/if}<span class="session-state-dot" class:working={displayWorking && !agent.closeRequest} class:attention={!displayWorking && (visibleState === "error" || visibleState === "stopping" || queued) || !!agent.closeRequest} title={status} role="img" aria-label={status}></span>{#if agent.questions.some(q => q.state !== "answered")}<MessageCircle class="needs-input-icon" aria-label={m.needs_input()} role="img" />{/if}</span></span>
         <span class="session-meta">{#if agent.role === "orc"}{:else}<span>{agent.role === "reviewer" ? "Reviewer" : agent.role === "researcher" ? "Researcher" : m.worker()}</span>{/if}<span>{agent.backend === "pi" ? "Pi" : "Codex"} · {agent.project.alias}{#if environmentId(agent.project)!=="local"} · {agent.project.environment?.name}{/if}</span>{#if agent.directoryBranch}<span class="session-branch" title={agent.directoryBranch}><GitBranch aria-hidden="true" /><span>{agent.directoryBranch}</span></span>{/if}</span>
       </button>
-      {#if agent.role === "orc" && children.length}<button class="session-members worker-disclosure" tabindex="-1" aria-label={children.some(w => w.role !== "worker") ? (expanded.includes(agent.id) ? "Collapse Workers, Reviewers and Researchers" : "Expand Workers, Reviewers and Researchers") : expanded.includes(agent.id) ? m.collapse_workers() : m.expand_workers()} title={(children.some(w => w.role !== "worker") ? `${children.filter(w => w.role === "worker").length} Workers · ${children.filter(w => w.role === "reviewer").length} Reviewers · ${children.filter(w => w.role === "researcher").length} Researchers` : m.current_workers({ count: children.length })) + " · " + m.working_count({ count: working })} aria-expanded={expanded.includes(agent.id)} onclick={() => { if(Date.now() >= suppressClickUntil) toggle(agent.id); }}><span>{#if expanded.includes(agent.id)}<ChevronDown />{:else}<ChevronRight />{/if}{children.length}</span>{#if working > 0}<span class="working worker-working-count">{working}<i></i></span>{/if}</button>{/if}
+      {#if agent.role === "orc" && children.length}<button class="session-members worker-disclosure" tabindex="-1" aria-label={children.some(w => w.role !== "worker") ? (expanded.includes(agent.id) ? "Collapse Workers, Reviewers and Researchers" : "Expand Workers, Reviewers and Researchers") : expanded.includes(agent.id) ? m.collapse_workers() : m.expand_workers()} title={(children.some(w => w.role !== "worker") ? `${children.filter(w => w.role === "worker").length} Workers · ${children.filter(w => w.role === "reviewer").length} Reviewers · ${children.filter(w => w.role === "researcher").length} Researchers` : m.current_workers({ count: children.length })) + " · " + m.working_count({ count: working })} aria-expanded={expanded.includes(agent.id)} onclick={() => { if(Date.now() >= suppressClickUntil) toggle(agent.id); }}><span><ChevronRight class="disclosure-chevron" />{children.length}</span>{#if working > 0}<span class="working worker-working-count">{working}<i></i></span>{/if}</button>{/if}
     </div>
     {#if closeError?.id === agent.id}<p class="tree-close-error" role="alert">{closeError.reason}</p>{/if}
     </div>
     </ContextMenu.Trigger><ContextMenu.Portal><ContextMenu.Content class="session-context-menu"><ContextMenu.Item class="session-context-item" disabled={!root || !connected || host?.connected === false || !!closingId} onSelect={() => { if (root) void onclosetree(root.id); }}>{m.close_tree()}</ContextMenu.Item></ContextMenu.Content></ContextMenu.Portal></ContextMenu.Root>
 {/snippet}
 {#snippet sessionTree(root: Agent, shortcut: boolean)}
-  {#each treeEntries(root) as agent (agent.id)}
-    {@render sessionRow(agent, shortcut)}
-  {/each}
+  {@render sessionRow(root, shortcut)}
+  {#if expanded.includes(root.id)}
+    <div class="session-tree-children" inert={!expanded.includes(root.id)} aria-hidden={!expanded.includes(root.id)} transition:slide={{ duration: motionDuration(motionTree === root.id), easing: cubicOut }}>
+      {#each agents.filter(agent => agent.ownerId === root.id) as agent (agent.id)}
+        {@render sessionRow(agent, shortcut)}
+      {/each}
+    </div>
+  {/if}
 {/snippet}
 <svelte:window onpointerdown={e => { if (revealedId && e.target instanceof Element && !e.target.closest(`[data-swipe-id="${revealedId}"]`)) revealedId = null; }} />
 <Sidebar.Header class="session-list-heading">
@@ -252,11 +241,13 @@
     {#each recentRoots as agent (agent.id)}{@render sessionTree(agent, true)}{/each}
   </section>
   <section class="opened-sessions" aria-label="Opened">
-    <div class="recent-heading"><h2><button class="opened-toggle" aria-expanded={!openedFolded} onclick={toggleOpened} onkeydown={e => { if (e.key === "Enter" || e.key === " ") e.stopPropagation(); }}>{#if openedFolded}<ChevronRight size={14} />{:else}<ChevronDown size={14} />{/if}Opened</button></h2></div>
+    <div class="recent-heading"><h2><button class="opened-toggle" aria-expanded={!openedFolded} onclick={toggleOpened} onkeydown={e => { if (e.key === "Enter" || e.key === " ") e.stopPropagation(); }}><ChevronRight size={14} class="disclosure-chevron" />Opened</button></h2></div>
     {#if !openedFolded}
+      <div inert={openedFolded} aria-hidden={openedFolded} transition:slide={{ duration: motionDuration(motionOpened), easing: cubicOut }}>
       {#each openedRoots as agent (agent.id)}{@render sessionTree(agent, false)}{:else}
         {#if !loading && !projectsLoading}<p class="opened-empty">No other open sessions</p>{/if}
       {/each}
+      </div>
     {/if}
   </section>
 </Sidebar.Content>

@@ -63,20 +63,14 @@ for (const width of [1440, 390]) {
           (window as Window & { diagramInjected?: boolean }).diagramInjected,
       ),
     ).toBeUndefined();
-    const report = page.locator(".worker-report");
-    await report.locator("summary").click();
-    await expect(report.locator(".mermaid-svg svg")).toBeVisible();
-    await report.getByRole("link", { name: "Worker chart" }).click();
-    await expect(page.locator(".file-preview img")).toBeVisible();
-    await page.getByRole("button", { name: "Close preview" }).click();
-    await report.locator("summary").click();
+    await expect(page.locator(".worker-report")).toHaveCount(0);
     const invalid = "```mermaid\nflowchart LR\nA --> [\n```";
     await page.request.post(origin + "/fixture/history-live", {
       data: { id, stream: true, text: invalid },
     });
     await expect(live).toContainText("Unable to render diagram.");
     await expect(live.locator("pre code")).toHaveText("flowchart LR\nA --> [");
-    await expect(live.locator("svg")).toHaveCount(0);
+    await expect(live.locator(".mermaid-svg svg")).toHaveCount(0);
     await live.scrollIntoViewIfNeeded();
     await page.screenshot({
       path: `../.scratch/flickgrove-rich/${width}-mermaid-invalid.png`,
@@ -238,22 +232,7 @@ for (const width of [1440, 390]) {
     await expect(
       page.locator('[data-message-id="live-item"] .th-property'),
     ).toHaveText('"ready"');
-    const report = page.locator(".worker-report");
-    await report.locator("summary").click();
-    await expect(report.locator(".mermaid-svg svg")).toBeVisible();
-    await expect(report.locator(".katex")).toHaveCount(1);
-    await expect(
-      report.locator("pre.th-code").first().locator("code"),
-    ).toHaveText(source);
-    await expect(report.locator(".th-keyword").first()).toHaveText("const");
-    await report.scrollIntoViewIfNeeded();
-    await page.screenshot({
-      path: `../.scratch/flickgrove-rich/${width}-highlight-report.png`,
-    });
-    await report.getByRole("link", { name: "Worker chart" }).click();
-    await expect(page.locator(".file-preview img")).toBeVisible();
-    await page.getByRole("button", { name: "Close preview" }).click();
-    await expect(report.locator(".th-keyword").first()).toHaveText("const");
+    await expect(page.locator(".worker-report")).toHaveCount(0);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,

@@ -253,6 +253,11 @@ test("history uses indexed metadata for both archive states, reads paginated ite
     expect(
       (await runtime.historyMessages("cli-history")).messages.map((m) => m.at),
     ).toEqual([1791251940000, 1791252120000, 1791252150000, 1791252180000]);
+    expect(
+      (await runtime.historyMessages("cli-history")).messages.map(
+        (m) => m.kind,
+      ),
+    ).toEqual([undefined, "result", "progress", undefined]);
     const original = structuredClone(controls.historyItems);
     controls.historyItems.forEach((entry) => {
       delete (entry as { startedAtMs?: number }).startedAtMs;

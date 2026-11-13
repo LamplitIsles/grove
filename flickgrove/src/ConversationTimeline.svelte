@@ -3,14 +3,16 @@
   import { onMount, tick, untrack, type Snippet } from "svelte";
   import { LoaderCircle } from "@lucide/svelte";
   import { Button } from "$lib/components/ui/button/index.js";
+  import MessageGroup from "./MessageGroup.svelte";
+  import { projectConversation } from "./conversation-projection";
   import type { Delivery, HistoryMessages, Message, MessageWindow } from "./contracts";
   import { reading, readingCache } from "./api";
   import { historyCache, type LoadedHistory } from "./history-cache";
   import { transcriptPositions, saveTranscriptPosition } from "./transcript-state";
   import * as m from "./paraglide/messages";
-  let { syncRevision = 0, agentId, boundary, live, deliveries, ready, connected, detailError = "", renderMessage, header, footer, onfollow, onanchor = () => {}, reports, pinned }: {
+  let { syncRevision = 0, agentId, boundary, live, deliveries, ready, connected, detailError = "", renderMessage, header, footer, onfollow, onanchor = () => {}, reports, closedReports, pinned }: {
     agentId: string; boundary?: string; syncRevision?: number; live: Message[]; deliveries: Delivery[]; ready: boolean; connected: boolean; detailError?: string;
-    renderMessage: Snippet<[Message]>; header: Snippet; footer: Snippet<[boolean]>; onfollow: (follow: boolean) => void; onanchor?: (operation:string) => void; reports: Set<string>; pinned?: string;
+    renderMessage: Snippet<[Message, boolean?]>; header: Snippet; footer: Snippet<[boolean]>; onfollow: (follow: boolean) => void; onanchor?: (operation:string) => void; reports: Set<string>; closedReports: Set<string>; pinned?: string;
   } = $props();
   const id = untrack(() => agentId);
   const initiallyReady = untrack(() => ready);
@@ -49,7 +51,7 @@
     // Limit correction to a few frames; any deliberate reading cancels it.
     for(let attempt=0;attempt<6;attempt++) {
       if(!active || generation!==locationGeneration || !transcript?.isConnected) return false;
-      const index=messages.findIndex(m=>m.id===target)+1;
+      const index=rows.findIndex(row=>row.type === "message" && row.id===target)+1;
       if(index<1) return false;
       const item=$virtualizer.getVirtualItems().find(item=>item.index===index);
       const tall=!!item && item.size>transcript.clientHeight;
@@ -122,22 +124,25 @@
       return !(m.provisional && delivery?.source === "user" && delivery.status === "failed" && hasConfirmedSuccessor(delivery));
     });
   });
+  const rows = $derived(projectConversation(messages, deliveries));
+  const expandedGroups = untrack(() => saved?.groups ?? new Set<string>());
   let transcript = $state<HTMLDivElement>();
   let tail: HTMLDivElement;
   const headerKey = "timeline-header";
   let footerHeight = $state(0);
   let lastWidth = saved?.width ?? 800, lastHeight = saved?.height ?? 600;
   const estimate = 320;
-  const initialMessages = untrack(() => messages);
+  const initialMessages = untrack(() => rows);
   // Map a retained message anchor into newly prepended data while away. The
   // virtualizer's measured sizes seed the coordinates; ongoing compensation is
-  // exclusively TanStack's end anchoring / dynamic measurement.
+  // handled by dynamic measurement and explicit prepend anchoring.
   function initialOffset() {
-    if (!saved || saved.follow) return initialMessages.length * estimate;
-    const index = initialMessages.findIndex(message => message.id === saved.anchor?.id);
+    if (!saved) return initialMessages.length * estimate;
+    const index = initialMessages.findIndex(row => row.id === saved.anchor?.id || (row.type === "group" && row.messages.some(message => message.id === saved.anchor?.id)));
     if (index < 0) return saved.scroll;
     const sizes = new Map(saved.measurements.map(item => [item.key, item.size]));
-    return (sizes.get(headerKey) ?? saved.headerHeight) + 24 + initialMessages.slice(0, index).reduce((sum, message) => sum + (sizes.get(message.id) ?? estimate), 0) + saved.anchor!.offset;
+    const offset = initialMessages[index].id === saved.anchor?.id ? saved.anchor.offset : 0;
+    return (sizes.get(headerKey) ?? saved.headerHeight) + 24 + initialMessages.slice(0, index).reduce((sum, message) => sum + (sizes.get(message.id) ?? estimate), 0) + offset;
   }
   // Published core 3.17.11 takeSnapshot contains only actually measured items.
   const measuredKeys = new Set(saved?.measurements.map(item => item.key));
@@ -152,22 +157,20 @@
       measuredKeys.add(key); // The independent flag is consumed by resizeItem's predicate.
       return measureSize(node, entry, instance);
     },
-    overscan: 4, anchorTo: "end", followOnAppend: true, scrollEndThreshold: 80,
+    overscan: 4, anchorTo: "start", followOnAppend: false, scrollEndThreshold: 80,
     initialOffset, initialRect: { width: saved?.width ?? 800, height: saved?.height ?? 600 },
     initialMeasurementsCache: saved?.measurements ?? [],
     // Rect callbacks may not publish when the virtual range is unchanged.
     // Wrap the documented observer, retaining its one subscription/cleanup.
     observeElementRect: (instance, changed) => observeElementRect(instance, rect => {
-      const resizePinned = rect.width > 0 && rect.height > 0 && (rect.width !== lastWidth || rect.height !== lastHeight) && lastFollow;
       if (rect.width && rect.height) { lastWidth = rect.width; lastHeight = rect.height; }
       changed(rect);
-      if (resizePinned) void tick().then(() => { if (active && ready && transcript?.isConnected) $virtualizer.scrollToEnd(); });
     }),
     paddingStart: 24, paddingEnd: 24,
   });
   // Preserve the reading point when an item entirely above it changes size,
   // including while scrolling backward. Growth spanning the fold stays below
-  // the reading point; TanStack separately handles following at the end.
+  // the reading point; measurements never pin the viewport to the end.
   const instance = $virtualizer;
   instance.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
     const first = firstMeasurement === item.key;
@@ -176,25 +179,93 @@
   };
   let prependCommit = false;
   let leadingMessageAnchor: { key: string | number | bigint; offset: number } | undefined;
+  let previousRows = untrack(() => rows);
+  let foldingGroups = $state.raw(new Map<string, Message[]>());
   $effect.pre(() => {
-    const current = messages, element = transcript, pin = pinned, end = footerHeight + 24;
+    const current = rows, element = transcript, pin = pinned, end = footerHeight + 24;
     untrack(() => {
       const previous = $virtualizer.options;
+      const scroll = $virtualizer.scrollOffset ?? 0;
+      // Only animate live work that was actually in view before a new result.
+      // History loading and virtual row remounts must not replay the transition.
+      if (element && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        const oldIds = new Set(previousRows.map(row => row.id));
+        const virtualItems = $virtualizer.getVirtualItems();
+        const reading = virtualItems.find(item => item.index > 0 && item.end > scroll);
+        const visible = new Set(virtualItems.filter(item => item.index > 0 && item.start >= scroll && item.start < scroll + element.clientHeight).map(item => item.key));
+        const next = new Map(foldingGroups);
+        for (const row of current) {
+          if (row.type !== "group" || oldIds.has(row.id) || expandedGroups.has(row.id)) continue;
+          // A partially read message needs immediate anchoring, not a shrinking row.
+          if (reading && reading.start < scroll && row.messages.some(message => message.id === reading.key)) continue;
+          const resultId = row.id.slice("group:".length);
+          if (oldIds.has(resultId) || !live.some(message => message.id === resultId && message.kind === "result")) continue;
+          const shown = row.messages.filter(message => oldIds.has(message.id) && visible.has(message.id));
+          if (shown.length) {
+            next.set(row.id, shown);
+            // A group outside the new virtual range must not animate later on scroll.
+            setTimeout(() => {
+              if (!active || foldingGroups.get(row.id) !== shown) return;
+              const pending = new Map(foldingGroups); pending.delete(row.id); foldingGroups = pending;
+            }, 500);
+          }
+        }
+        if (next.size !== foldingGroups.size) foldingGroups = next;
+      }
+      const visible = $virtualizer.getVirtualItems().find(item => item.index > 0 && item.end > scroll);
+      const replacement = visible && !current.some(row => row.id === visible.key)
+        ? current.find(row => row.type === "group" && row.messages.some(message => message.id === visible.key))
+        : undefined;
+      // A result may replace the message currently being read with its group.
+      // Keep the disclosure at the reading point, unless the user navigates.
+      if (replacement) {
+        const generation = locationGeneration, key = replacement.id;
+        void tick().then(() => {
+          if (!active || generation !== locationGeneration) return;
+          const index = rows.findIndex(row => row.id === key);
+          if (index >= 0) $virtualizer.scrollToIndex(index + 1, { align: "start" });
+        });
+      }
       const prepending = previous.count > 1 && current.length + 1 > previous.count && current[0]?.id !== previous.getItemKey(1);
+      const currentIds = new Set(current.map(row => row.id));
+      const groupedIds = new Set(current.flatMap(row => row.type === "group" ? row.messages.map(message => message.id) : []));
+      const anchor = $virtualizer.getVirtualItems().find(item => item.index > 0 && item.end > scroll && currentIds.has(String(item.key)));
+      const oldIndex = anchor ? previousRows.findIndex(row => row.id === anchor.key) : -1;
+      const removedAbove = oldIndex > 0 && previousRows.slice(0, oldIndex).some(row => row.type === "message" && !currentIds.has(row.id) && !groupedIds.has(row.id));
+      // The message being folded takes precedence over another surviving row.
+      if (element && anchor && removedAbove && !prepending && !replacement) {
+        const generation = locationGeneration, key = String(anchor.key), offset = anchor.start - scroll;
+        // A previously visible delivery can disappear after native confirmation.
+        // Keep a different message below it at the reader's current position.
+        void tick().then(async () => {
+          for (let attempt = 0; attempt < 3; attempt++) {
+            await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+            if (!active || generation !== locationGeneration || !transcript?.isConnected) return;
+            const index = rows.findIndex(row => row.id === key);
+            if (index < 0) return;
+            const node = [...transcript.querySelectorAll<HTMLElement>("[data-message-id]")].find(item => item.dataset.messageId === key);
+            if (!node) { $virtualizer.scrollToIndex(index + 1, { align: "start" }); continue; }
+            const delta = node.getBoundingClientRect().top - transcript.getBoundingClientRect().top - offset;
+            if (Math.abs(delta) > 0.5) transcript.scrollTop += delta;
+          }
+        });
+      }
+      previousRows = current;
       if (prepending) {
         // At the top the library would retain the persistent header. Retain
         // the first message identity/relative offset, as on route restoration.
         // Capture at data commit, after any reading during the fetch.
-        const snapshot = $virtualizer.takeSnapshot(), first = snapshot.find(item => item.index === 1), header = snapshot.find(item => item.key === headerKey);
+        const snapshot = $virtualizer.takeSnapshot();
         const scroll = $virtualizer.scrollOffset ?? 0;
-        if (first && header && scroll < header.end) leadingMessageAnchor = { key: first.key, offset: scroll - first.start };
+        const first = snapshot.find(item => item.key !== headerKey && item.end > scroll);
+        if (first) leadingMessageAnchor = { key: first.key, offset: scroll - first.start };
       }
       prependCommit ||= prepending;
       $virtualizer.setOptions({
         count: current.length + 1, getItemKey: index => index === 0 ? headerKey : current[index - 1].id,
         getScrollElement: () => element ?? null, paddingEnd: end,
         rangeExtractor: range => {
-          const indexes = defaultRangeExtractor(range), messageIndex = current.findIndex(message => message.id === pin);
+          const indexes = defaultRangeExtractor(range), messageIndex = current.findIndex(row => row.id === pin || (row.type === "group" && row.messages.some(message => message.id === pin)));
           const index = messageIndex < 0 ? -1 : messageIndex + 1;
           return index < 0 || indexes.includes(index) ? indexes : [...indexes, index].sort((a, b) => a - b);
         },
@@ -266,7 +337,7 @@
       const copy = readingCache.readDetail(id);
       if (copy) readingCache.saveDetail({ ...copy, messages: entry.messages.slice(-100) });
     }
-    if (generation===locationGeneration && initial && (!saved || saved.follow)) { await tick(); if (active && generation===locationGeneration && (entry.generation ?? 0)===cacheGeneration) $virtualizer.scrollToEnd(); }
+    if (generation===locationGeneration && initial && !saved) { await tick(); if (active && generation===locationGeneration && (entry.generation ?? 0)===cacheGeneration) $virtualizer.scrollToEnd(); }
   }
   $effect(() => {
     const entry = history;
@@ -274,7 +345,7 @@
       attempted = entry; untrack(() => { void load(); });
     }
   });
-  let lastScroll = initialOffset(), lastFollow = saved?.follow ?? true;
+  let lastScroll = initialOffset(), lastFollow = false;
   function saveReading() {
     if (!transcript?.isConnected || !transcript.clientHeight || !ready) return;
     lastScroll = transcript.scrollTop;
@@ -284,8 +355,9 @@
     const measurements=$virtualizer.getVirtualItems();
     const midpoint=lastScroll+transcript.clientHeight/2;
     const current=measurements.find(item=>item.index>0 && item.end>=midpoint);
-    const index=current ? current.index-1 : messages.length-1;
-    const user=messages.slice(0,index+1).reverse().find(m=>m.role==="user" && m.delivery?.source==="user");
+    const index=current ? current.index-1 : rows.length-1;
+    const visibleRows=rows.slice(0,index+1).flatMap(row=>row.type === "message" ? [row.message] : row.messages);
+    const user=visibleRows.reverse().find(m=>m.role==="user" && m.delivery?.source==="user");
     if(user?.clientId) onanchor(user.clientId);
   }
   function measure(node: HTMLDivElement) {
@@ -313,7 +385,7 @@
       footerHeight = tail.getBoundingClientRect().height;
     });
     observer.observe(tail);
-    if (!saved || saved.follow) void tick().then(() => { if (active) $virtualizer.scrollToEnd(); });
+    if (!saved) void tick().then(() => { if (active) $virtualizer.scrollToEnd(); });
     return () => {
       active = false; cancelLocation(); request.abort(); observer.disconnect(); window.removeEventListener("keydown",readingKey,true);
       if (!transcript || !initiallyReady) return;
@@ -325,7 +397,7 @@
         anchor: item ? { id: String(item.key), offset: scroll - item.start } : undefined,
         measurements, headerHeight: measurements.find(item => item.key === headerKey)?.size ?? 0,
         width: lastWidth, height: lastHeight,
-        reports,
+        reports, closedReports, groups: expandedGroups,
       });
     };
   });
@@ -344,8 +416,9 @@
       </div>{/if}
     </div>
     {#each $virtualizer.getVirtualItems() as row (row.key)}
-      {#if row.index > 0}<div class="timeline-message" data-index={row.index} data-message-id={row.key} style:transform={`translateY(${row.start}px)`} use:measure>
-        {@render renderMessage(messages[row.index - 1])}
+      {#if row.index > 0}{@const entry = rows[row.index - 1]}<div class="timeline-message" data-index={row.index} data-message-id={row.key} style:transform={`translateY(${row.start}px)`} use:measure>
+        {#if entry.type === "message"}{@render renderMessage(entry.message)}
+        {:else}<MessageGroup messages={entry.messages} {renderMessage} initiallyExpanded={expandedGroups.has(entry.id)} folding={foldingGroups.get(entry.id)} onfolding={() => { const next = new Map(foldingGroups); next.delete(entry.id); foldingGroups = next; }} onexpanded={value => { if (value) expandedGroups.add(entry.id); else expandedGroups.delete(entry.id); }} />{/if}
       </div>{/if}
     {/each}
     <div class="timeline-footer" bind:this={tail} style:top={`${$virtualizer.getTotalSize() - footerHeight - 24}px`}>{#if windowState}<div class="history-controls">{#if windowState.newerCursor}<Button variant="ghost" size="sm" disabled={loading || !connected} onclick={()=>loadWindow("newer")}>{m.later_messages()}</Button>{/if}{#if error}<span class="inline-error" role="alert">{error}</span><Button variant="ghost" size="sm" disabled={loading || !connected} onclick={()=>loadWindow(errorDirection)}>{m.retry()}</Button>{/if}</div>{/if}{@render footer(readingSettled)}</div>

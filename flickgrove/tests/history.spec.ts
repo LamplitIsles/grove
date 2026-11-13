@@ -118,7 +118,7 @@ test("dense session list fits at least ten Orcs, with compact state and input in
   ).toBeLessThanOrEqual(390);
 });
 
-test("restored Grove history includes external turns once and retains folded Worker reports", async ({
+test("restored Grove history includes external turns once and hides confirmed Worker reports", async ({
   page,
 }) => {
   await page.goto("/");
@@ -134,7 +134,7 @@ test("restored Grove history includes external turns once and retains folded Wor
     await input.fill(command);
     await input.press("Enter");
     if (command === "Request Worker report")
-      await expect(page.locator(".worker-report")).toHaveCount(1);
+      await expect(page.locator(".worker-report")).toHaveCount(0);
     else await expect(page.getByText(result, { exact: true })).toBeVisible();
     await expect(
       page.locator('.session-open[aria-current="true"] [aria-label="Idle"]'),
@@ -173,30 +173,22 @@ test("restored Grove history includes external turns once and retains folded Wor
   await page.mouse.wheel(0, -10000);
   await expect.poll(() => transcript.evaluate((el) => el.scrollTop)).toBe(0);
   const report = page.locator(".historical-messages .worker-report");
-  await expect(report).toHaveCount(1);
-  await expect(report).not.toHaveAttribute("open");
+  await expect(report).toHaveCount(0);
   await expect(
     page
       .locator(".conversation .user-message")
       .filter({ hasText: "Build a reader" }),
   ).toHaveCount(1);
-  await report.locator("summary").click();
-  await expect(
-    report.getByText("Full diagnostic details.", { exact: true }),
-  ).toBeVisible();
   await page.getByRole("button", { name: "Jump to bottom" }).click();
   await expect(report).toHaveCount(0);
   await transcript.evaluate((el) => (el.scrollTop = 0));
-  await expect(report).toHaveAttribute("open", "");
-  await expect(
-    report.getByText("Full diagnostic details.", { exact: true }),
-  ).toBeVisible();
+  await expect(report).toHaveCount(0);
   const receipts = page
     .locator(".conversation")
     .getByText("Received.", { exact: true });
   await input.fill("Continue after restoration");
   await input.press("Enter");
-  await expect(report).toHaveAttribute("open", "");
+  await expect(report).toHaveCount(0);
   await page.getByRole("button", { name: "Jump to bottom" }).click();
   await expect(
     page

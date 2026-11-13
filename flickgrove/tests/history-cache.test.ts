@@ -137,6 +137,28 @@ test("reconnect latest pages fill the middle gap in native order and then resume
   expect(entry.cursor).toBe("older-history");
 });
 
+test("history cache retains native classification across refresh and page overlap", async () => {
+  const cache = new HistoryCache();
+  const entry = cache.get("peer:agent", "thread");
+  const progress = { ...message("progress"), kind: "progress" as const };
+  const result = { ...message("result"), kind: "result" as const };
+  await cache.load("peer:agent", entry, async () => ({
+    messages: [result],
+    nextCursor: "older",
+  }));
+  await cache.load("peer:agent", entry, async () => ({
+    messages: [progress, result],
+    nextCursor: null,
+  }));
+  expect(entry.messages.map((m) => m.kind)).toEqual(["progress", "result"]);
+  entry.synchronized = 1;
+  await cache.refresh("peer:agent", entry, 2, async () => ({
+    messages: [result],
+    nextCursor: null,
+  }));
+  expect(entry.messages.map((m) => m.kind)).toEqual(["progress", "result"]);
+});
+
 test("removed provisional input is not retained as historical reading while native rows remain readable", async () => {
   const cache = new HistoryCache();
   const entry = cache.get("peer:a", "thread");

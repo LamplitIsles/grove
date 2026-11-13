@@ -62,6 +62,31 @@ async function until(check: () => boolean) {
   }
   throw new Error("Condition timed out");
 }
+test("HTTP history retains classifications and report identity through native association", async () => {
+  const f = fixture(),
+    a = await f.app.createOrc("alpha");
+  await f.app.send(a.id, "start", "start");
+  f.runtime.historyItems.set(a.threadId!, [
+    { id: "p", role: "assistant", text: "progress", at: 1, kind: "progress" },
+    { id: "u", role: "user", text: "input", at: 2, clientId: "start" },
+    { id: "r", role: "assistant", text: "result", at: 3, kind: "result" },
+    { id: "unknown", role: "assistant", text: "unknown", at: 4 },
+  ]);
+  const id = qualify(f.service.identity.id, a.id);
+  for (const path of [
+    `/messages?agent=${encodeURIComponent(id)}`,
+    `/messages?project=alpha&thread=${a.threadId}`,
+  ]) {
+    const page = await (await f.request(path)).json();
+    expect(page.messages.map((m: Message) => m.kind)).toEqual([
+      "progress",
+      undefined,
+      "result",
+      undefined,
+    ]);
+    expect(page.messages[1].delivery?.id).toBe("start");
+  }
+});
 test("native client identity associates equal reports in one turn across arrival/admission order, legacy and restart", async () => {
   const f = fixture(),
     a = await f.app.createOrc("alpha");

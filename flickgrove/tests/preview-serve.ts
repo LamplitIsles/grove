@@ -15,6 +15,7 @@ import {
 } from "../server/testing";
 import { GroveAuth } from "../server/auth";
 import { InstanceControls } from "../server/instance-controls";
+import { fixtureAuth } from "./fixture-auth";
 const directory = await mkdtemp(join(tmpdir(), "grove-file-browser-"));
 const assets = resolve(
   process.env.PREVIEW_ASSETS ?? "../.scratch/flickgrove-browser/assets",
@@ -205,12 +206,106 @@ async function unit(name: string, color: string, origin: () => string) {
   // Test-only Chord provider patches exercise growing text on the same message
   // ID. Native final answers remain buffered until completion in Workspace.
   const patches = new Map<string, string>();
+  let largeHover: { id: string; deliveryId: string } | undefined;
+  let memberAnchor:
+    | { id: string; confirmed: boolean; combined?: boolean }
+    | undefined;
   const readers = new Set<() => void>();
   const detail = service.detail.bind(service),
     subscribe = service.subscribe.bind(service);
   service.detail = async (id) => {
     const value = await detail(id),
       text = patches.get(id);
+    if (memberAnchor?.id === id) {
+      const delivery = {
+        id: "anchor-member",
+        source: "worker" as const,
+        status: "sent" as const,
+        text: "Member delivery",
+        at: 1000,
+        questionIds: [],
+      };
+      return {
+        ...value,
+        deliveries: [...value.deliveries, delivery],
+        messages: [
+          ...value.messages,
+          {
+            id: delivery.id,
+            clientId: delivery.id,
+            provisional: !memberAnchor.confirmed,
+            role: "user" as const,
+            text: "Member delivery",
+            at: delivery.at,
+            delivery,
+          },
+          ...(memberAnchor.combined
+            ? [
+                {
+                  id: "combined-progress",
+                  role: "assistant" as const,
+                  kind: "progress" as const,
+                  text: "Work currently being read. ".repeat(30),
+                  at: 1001,
+                },
+                {
+                  id: "combined-user",
+                  role: "user" as const,
+                  text: "User input after progress",
+                  at: 1002,
+                },
+                ...(memberAnchor.confirmed
+                  ? [
+                      {
+                        id: "combined-result",
+                        role: "assistant" as const,
+                        kind: "result" as const,
+                        text: "Combined update result",
+                        at: 1003,
+                      },
+                    ]
+                  : []),
+              ]
+            : []),
+          ...Array.from({ length: 12 }, (_, index) => ({
+            id: `anchor-after-${index}`,
+            role: "assistant" as const,
+            text:
+              `Reading anchor ${index} ${memberAnchor!.confirmed ? "confirmed" : "uncertain"}\n\n` +
+              "Paragraph text for a stable reading position. ".repeat(18),
+            at: 2000 + index,
+          })),
+          ...(memberAnchor.combined && memberAnchor.confirmed
+            ? Array.from({ length: 12 }, (_, index) => ({
+                id: `combined-tail-${index}`,
+                role: "assistant" as const,
+                text: "Extra room after the result. ".repeat(35),
+                at: 3000 + index,
+              }))
+            : []),
+        ],
+      };
+    }
+    if (largeHover?.id === id) {
+      const delivery = value.deliveries.find(
+        (item) => item.id === largeHover?.deliveryId,
+      );
+      if (!delivery) throw new Error("Fixture delivery missing");
+      return {
+        ...value,
+        messages: [
+          {
+            id: delivery.id,
+            clientId: delivery.id,
+            role: "user" as const,
+            text: "Oversized member report",
+            at: delivery.at,
+            bodyRef: "large-member-body",
+            delivery,
+          },
+        ],
+      };
+    }
     return text === undefined
       ? value
       : {
@@ -262,6 +357,17 @@ async function unit(name: string, color: string, origin: () => string) {
     turn,
     history,
     patch,
+    setLargeHover: (value: { id: string; deliveryId: string }) => {
+      largeHover = value;
+    },
+    setMemberAnchor: (value: {
+      id: string;
+      confirmed: boolean;
+      combined?: boolean;
+    }) => {
+      memberAnchor = value;
+      for (const reader of readers) reader();
+    },
   };
 }
 const origin = process.env.PREVIEW_AUTH
@@ -287,6 +393,8 @@ const server = Bun.serve({
   async fetch(request, server) {
     if (offline && new URL(request.url).pathname.startsWith("/api/"))
       return new Response("Synthetic outage", { status: 503 });
+    const auth = fixtureAuth(request);
+    if (auth) return auth;
     const upgraded = createUpgrade(local.app, {
       service: local.service,
       origin: () => origin,
@@ -298,6 +406,21 @@ const server = Bun.serve({
     );
     if (upgraded) return upgraded === true ? undefined : upgraded;
     const url = new URL(request.url);
+    if (
+      url.pathname === "/fixture/member-anchor" &&
+      request.method === "POST"
+    ) {
+      local.history.skipDetailSync = true;
+      local.setMemberAnchor(await request.json());
+      return Response.json({ ok: true });
+    }
+    if (
+      url.pathname === "/fixture/hover-large-report" &&
+      request.method === "POST"
+    ) {
+      local.setLargeHover(await request.json());
+      return Response.json({ ok: true });
+    }
     if (
       url.pathname === "/fixture/bootstrap" &&
       request.method === "POST" &&
@@ -334,7 +457,7 @@ const server = Bun.serve({
             );
           else
             await local.app.tool(reporter.token, "worker_report", {
-              message: `Report ${i}`,
+              message: body.reportText ?? `Report ${i}`,
             });
         }
       } finally {
@@ -414,9 +537,14 @@ const server = Bun.serve({
       return Response.json({ ok: true });
     }
     if (url.pathname === "/fixture/outline" && request.method === "POST") {
+      const options = request.headers
+        .get("content-type")
+        ?.includes("application/json")
+        ? ((await request.json()) as { count?: number })
+        : {};
       const a = await local.app.createOrc("fixture", defaults);
       await local.app.rename(a.id, "Outline fixture");
-      for (let i = 0; i < 90; i++) {
+      for (let i = 0; i < (options.count ?? 90); i++) {
         const text =
           i === 45
             ? ""
@@ -549,6 +677,7 @@ const server = Bun.serve({
         stream = false,
         input = "Live input",
         report,
+        progress,
       } = await request.json();
       const target = local;
       const agentId = id.split(":")[1];
@@ -557,6 +686,17 @@ const server = Bun.serve({
         return Response.json({ ok: true });
       }
       await target.app.send(agentId, input, crypto.randomUUID());
+      if (progress)
+        target.runtime.emit(agentId, {
+          type: "item",
+          turnId: target.app.detail(agentId).turnId!,
+          item: {
+            id: `progress-${crypto.randomUUID()}`,
+            type: "agentMessage",
+            phase: "commentary",
+            text: progress,
+          },
+        });
       target.runtime.emit(agentId, {
         type: "item",
         turnId: target.app.detail(agentId).turnId!,

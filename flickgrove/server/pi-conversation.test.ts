@@ -15,6 +15,7 @@ import {
   type SubmissionId,
 } from "@earendil-works/pi-durable";
 import type { RuntimeAgent, RuntimeEvent } from "./runtime";
+import { projectConversation } from "../src/conversation-projection";
 
 test("native Pi tool turns do not create timestamp-only assistant rows in live or history", async () => {
   if (!process.env.GROVE_CONVERSATION_CHILD) {
@@ -27,6 +28,7 @@ test("native Pi tool turns do not create timestamp-only assistant rows in live o
         PI_CODING_AGENT_DIR: join(home, "agent"),
         GROVE_CONVERSATION_CHILD: "1",
         GROVE_NO_TOOL: process.env.GROVE_NO_TOOL,
+        GROVE_FINISH_LENGTH: process.env.GROVE_FINISH_LENGTH,
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -83,8 +85,18 @@ test("native Pi tool turns do not create timestamp-only assistant rows in live o
       const chunk = (delta: object, finish_reason: string | null) =>
         `data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
       return new Response(
-        chunk(delta, null) +
-          chunk({}, first ? "tool_calls" : "stop") +
+        (first
+          ? chunk({ role: "assistant", content: "Using a tool" }, null)
+          : "") +
+          chunk(delta, null) +
+          chunk(
+            {},
+            first
+              ? "tool_calls"
+              : process.env.GROVE_FINISH_LENGTH
+                ? "length"
+                : "stop",
+          ) +
           "data: [DONE]\n\n",
         { headers: { "content-type": "text/event-stream" } },
       );
@@ -220,8 +232,76 @@ test("native Pi tool turns do not create timestamp-only assistant rows in live o
     console.log(
       `conversation rows live=${JSON.stringify(live)} history=${JSON.stringify(history)} requests=${requests}`,
     );
-    expect(live).toEqual(["Meaningful assistant text"]);
-    expect(history).toEqual(["Meaningful assistant text"]);
+    const expected = process.env.GROVE_NO_TOOL
+      ? ["Meaningful assistant text"]
+      : ["Using a tool", "Meaningful assistant text"];
+    expect(live).toEqual(expected);
+    expect(history).toEqual(expected);
+    if (!process.env.GROVE_NO_TOOL) {
+      const toolMessage = events.find(
+        (e) => e.type === "item" && e.item.text === "Using a tool",
+      );
+      expect(toolMessage?.type === "item" && toolMessage.item.kind).toBe(
+        "progress",
+      );
+      const toolEntry = entries.items.find(
+        (entry) =>
+          entry.kind === "pi.assistant" &&
+          entry.model?.some(
+            (m) =>
+              m.role === "assistant" &&
+              m.content.some((part) => part.type === "toolCall"),
+          ),
+      );
+      expect(toolEntry?.model?.[0]).toMatchObject({
+        role: "assistant",
+        content: [{ type: "text", text: "Using a tool" }, { type: "toolCall" }],
+      });
+      expect(
+        entries.items.some((entry) => entry.kind === "pi.tool-result"),
+      ).toBe(true);
+    }
+    expect(
+      events.find(
+        (e) => e.type === "item" && e.item.text === "Meaningful assistant text",
+      ),
+    ).toMatchObject({ item: { kind: "result" } });
+    expect(
+      (
+        await new PiRuntime({
+          agentDir,
+          tool: async () => ({}),
+        }).historyMessages(handle.threadId)
+      ).messages.find((m) => m.text === "Meaningful assistant text")?.kind,
+    ).toBe("result");
+    const window = await new PiRuntime({
+      agentDir,
+      tool: async () => ({}),
+    }).messageWindow(handle.threadId, {
+      cursor: String(submission.entry),
+      direction: "newer",
+    });
+    expect(
+      window.messages.find((m) => m.text === "Meaningful assistant text")?.kind,
+    ).toBe("result");
+    if (!process.env.GROVE_NO_TOOL) {
+      const rows = window.messages.filter((m) => m.role === "assistant");
+      expect(rows.map((m) => m.kind)).toEqual(["progress", "result"]);
+      expect(
+        projectConversation(rows.slice(0, 1)).map((row) => row.type),
+      ).toEqual(["message"]);
+      expect(projectConversation(rows)).toMatchObject([
+        { type: "group", messages: [{ text: "Using a tool" }] },
+        { type: "message", message: { text: "Meaningful assistant text" } },
+      ]);
+      const cold = await new PiRuntime({
+        agentDir,
+        tool: async () => ({}),
+      }).historyMessages(handle.threadId);
+      expect(cold.messages.find((m) => m.text === "Using a tool")?.kind).toBe(
+        "progress",
+      );
+    }
     expect(
       events.find((e) => e.type === "item" && e.item.type === "agentMessage")
         ?.replayed,
@@ -255,6 +335,18 @@ test("native Pi tool turns do not create timestamp-only assistant rows in live o
       },
     );
     try {
+      if (!process.env.GROVE_NO_TOOL)
+        expect(
+          replay.find(
+            (e) => e.type === "item" && e.item.text === "Using a tool",
+          ),
+        ).toMatchObject({ item: { kind: "progress" }, replayed: true });
+      expect(
+        replay.find(
+          (e) =>
+            e.type === "item" && e.item.text === "Meaningful assistant text",
+        ),
+      ).toMatchObject({ item: { kind: "result" }, replayed: true });
       expect(replay.find((e) => e.type === "completed")).toMatchObject({
         type: "completed",
         turnId: completed.turnId,

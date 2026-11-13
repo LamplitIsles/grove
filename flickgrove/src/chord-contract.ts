@@ -404,6 +404,7 @@ export const detailSchema = agent.extend({
   messages: z.array(
     z.object({
       id,
+      kind: z.enum(["progress", "result"]).optional(),
       questionItemId: id.optional(),
       author: human.optional(),
       provisional: z.boolean().optional(),

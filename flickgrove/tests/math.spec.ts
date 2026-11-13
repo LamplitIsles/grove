@@ -100,11 +100,12 @@ for (const width of [1440, 390]) {
     await page.screenshot({
       path: `../.scratch/flickgrove-math/${width}-literals.png`,
     });
-    // Same-message resize still follows the measured end; no timeline changes required.
+    // A shorter message may clamp the reading position at the physical end.
     await page.request.post(origin + "/fixture/history-live", {
       data: { id, stream: true, text: formula },
     });
     await expect(assistant.locator(".katex")).toHaveCount(5);
+    await page.keyboard.press("Meta+ArrowDown");
     await expect
       .poll(() =>
         transcript.evaluate(
@@ -119,24 +120,7 @@ for (const width of [1440, 390]) {
         report: "Math report\n\n" + formula + "\n\n[Worker chart](plot.png)",
       },
     });
-    const report = page.locator(".worker-report");
-    await expect(report).not.toHaveAttribute("open");
-    await report.locator("summary").click();
-    await expect(report.locator(".katex")).toHaveCount(5);
-    await expect
-      .poll(() =>
-        transcript.evaluate(
-          (el) => el.scrollHeight - el.scrollTop - el.clientHeight,
-        ),
-      )
-      .toBeLessThanOrEqual(1);
-    await page.screenshot({
-      path: `../.scratch/flickgrove-math/${width}-report.png`,
-    });
-    await report.getByRole("link", { name: "Worker chart" }).click();
-    await expect(page.locator(".file-preview img")).toBeVisible();
-    await page.getByRole("button", { name: "Close preview" }).click();
-    await expect(report.locator(".katex")).toHaveCount(5);
+    await expect(page.locator(".worker-report")).toHaveCount(0);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,

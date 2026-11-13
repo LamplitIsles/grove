@@ -2,7 +2,7 @@ import { chooseOption } from "./choice-interactions";
 import { expect, test } from "@playwright/test";
 import { newSession, openSettings, createSession } from "./browser-actions";
 
-test("Worker reports stay in the timeline as one folded incoming card, including after Worker closure", async ({
+test("confirmed Worker reports stay out of the Orc transcript", async ({
   page,
 }) => {
   await page.goto("/");
@@ -17,28 +17,10 @@ test("Worker reports stay in the timeline as one folded incoming card, including
   ).toBeVisible();
   await input.fill("Request Worker report");
   await input.press("Enter");
-  const report = page.locator(".worker-report");
-  await expect(report).toHaveCount(1);
-  await expect(report.locator("summary")).toHaveAccessibleName(
-    "Worker report · Reader",
-  );
-  await expect(report).not.toHaveAttribute("open");
   await expect(
-    report.getByText("Full diagnostic details.", { exact: true }),
-  ).toHaveCount(0);
-  await expect(
-    page
-      .locator(".user-message")
-      .filter({ hasText: "Full diagnostic details." }),
-  ).toHaveCount(0);
-  await report.locator("summary").click();
-  await expect(
-    report.getByText("Full diagnostic details.", { exact: true }),
+    page.locator('.session-open[aria-current="true"] [aria-label="Idle"]'),
   ).toBeVisible();
-  await report.locator("summary").click();
-  await expect(
-    report.getByText("Full diagnostic details.", { exact: true }),
-  ).toHaveCount(0);
+  await expect(page.locator(".worker-report")).toHaveCount(0);
   await input.fill("Worker “Reader” reports:\n\nThis was typed by the user.");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await expect(
@@ -46,23 +28,12 @@ test("Worker reports stay in the timeline as one folded incoming card, including
       .locator(".user-message")
       .filter({ hasText: "This was typed by the user." }),
   ).toHaveCount(1);
-  await expect(report).toHaveCount(1);
   await input.fill("Close the workers");
   await input.press("Enter");
   await expect(
     page.getByText("Workers are closed.", { exact: true }),
   ).toBeVisible();
-  await expect(report.locator("summary")).toContainText("Reader");
-  await report.locator("summary").click();
-  await expect(
-    report.getByText("The report preserves its complete content.", {
-      exact: true,
-    }),
-  ).toBeVisible();
-  await page.screenshot({
-    path: "../.scratch/flickgrove-shadcn/worker-report.png",
-    animations: "disabled",
-  });
+  await expect(page.locator(".worker-report")).toHaveCount(0);
   await page.keyboard.press("Alt+x");
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
 });
@@ -379,11 +350,7 @@ test("Orc closure of a running Worker shows Closing and automatically removes it
   const report = page
     .locator(".worker-report")
     .filter({ hasText: "Long Worker final report" });
-  await expect(report).toHaveCount(1);
-  await report.locator("summary").click();
-  await expect(report.locator(".report-content")).toContainText(
-    "Long Worker final report",
-  );
+  await expect(report).toHaveCount(0);
   await page.keyboard.press("Alt+x");
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
 });

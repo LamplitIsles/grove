@@ -1,11 +1,13 @@
 import { test, expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 const artifacts = resolve("../.scratch/user-message-outline");
-async function setup(page: Page, width: number) {
+async function setup(page: Page, width: number, count = 90) {
   page.on("pageerror", (error) => console.log("PAGE_ERROR", String(error)));
   await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
   await page.request.post("/fixture/reset");
-  const fixture = await (await page.request.post("/fixture/outline")).json();
+  const fixture = await (
+    await page.request.post("/fixture/outline", { data: { count } })
+  ).json();
   await page.goto("/");
   if (width === 390)
     await page
@@ -17,7 +19,9 @@ async function setup(page: Page, width: number) {
   await expect(
     page.getByRole("textbox", { name: "Message Orc", exact: true }),
   ).toBeVisible();
-  await expect(page.locator(".conversation")).toContainText("Instruction 089");
+  await expect(page.locator(".conversation")).toContainText(
+    `Instruction ${String(count - 1).padStart(3, "0")}`,
+  );
   return fixture;
 }
 async function centered(page: Page, operation: string) {
@@ -338,6 +342,60 @@ test("outline duplicate identities, long/image inputs, local failure retry, late
     (await (await page.request.get("/fixture/input-count")).json()).inputs,
   ).toBe(fixture.inputs);
 });
+test("grouped work does not pull a detached reader on reconnect; Cmd+Down reaches the live tail", async ({
+  page,
+}) => {
+  const fixture = await setup(page, 1440);
+  await page
+    .getByRole("textbox", { name: "Message Orc", exact: true })
+    .fill("Reconnect draft");
+  await page.request.post("/fixture/history-live", {
+    data: {
+      id: fixture.id,
+      text: "Before member report",
+      report: "Member work\n\nReported detail",
+      progress: "Orc work before result",
+    },
+  });
+  await page.request.post("/fixture/history-live", {
+    data: { id: fixture.id, text: "After member report" },
+  });
+  await page.keyboard.press("Meta+ArrowDown");
+  await expect(
+    page.getByRole("button", { name: "Work details 1" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Message outline", exact: true })
+    .click();
+  const nav = page.getByRole("navigation", {
+    name: "Message outline",
+    exact: true,
+  });
+  await nav
+    .getByRole("button", { name: "Instruction 015", exact: true })
+    .click();
+  await centered(page, "outline-15");
+  await page.request.post("/fixture/offline");
+  await expect(
+    page.getByRole("button", { name: "Send message", exact: true }),
+  ).toBeDisabled();
+  await page.request.post("/fixture/history-live", {
+    data: { id: fixture.id, text: "Result received while offline" },
+  });
+  await page.request.post("/fixture/online");
+  await expect(
+    page.getByRole("button", { name: "Send message", exact: true }),
+  ).toBeEnabled();
+  await centered(page, "outline-15");
+  await page
+    .getByRole("button", { name: "Message outline", exact: true })
+    .click();
+  await page.keyboard.press("Meta+ArrowDown");
+  await expect(page.locator(".conversation")).toContainText(
+    "Result received while offline",
+  );
+});
+
 test("live directory refresh, disconnect and session changes never pull a historical reader or replay", async ({
   page,
 }) => {
@@ -425,10 +483,10 @@ test("live directory refresh, disconnect and session changes never pull a histor
     (await (await page.request.get("/fixture/input-count")).json()).inputs,
   ).toBe(fixture.inputs + 1);
 });
-test("forward pages close the live gap, retain a bounded virtual DOM and resume following at the real tail", async ({
+test("forward pages close the live gap, retain a bounded virtual DOM and preserve the reading position at the real tail", async ({
   page,
 }) => {
-  const fixture = await setup(page, 1440);
+  const fixture = await setup(page, 1440, 140);
   await page
     .getByRole("button", { name: "Message outline", exact: true })
     .click();
@@ -460,7 +518,7 @@ test("forward pages close the live gap, retain a bounded virtual DOM and resume 
   await page
     .locator(".conversation")
     .evaluate((el) => (el.scrollTop = el.scrollHeight));
-  await expect(page.locator(".conversation")).toContainText("Instruction 089");
+  await expect(page.locator(".conversation")).toContainText("Instruction 139");
   const ids = await page
     .locator("[data-message-id]")
     .evaluateAll((nodes) =>
@@ -472,19 +530,20 @@ test("forward pages close the live gap, retain a bounded virtual DOM and resume 
     data: {
       id: fixture.id,
       input: "After gap closes",
-      text: "Newest tail context",
+      text: "Newest tail context ".repeat(100),
     },
   });
-  await expect(page.locator(".conversation")).toContainText(
-    "Newest tail context",
-  );
   await expect
     .poll(() =>
       page
         .locator(".conversation")
         .evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop),
     )
-    .toBeLessThan(85);
+    .toBeGreaterThan(85);
+  await page.getByRole("button", { name: "Jump to bottom" }).click();
+  await expect(page.locator(".conversation")).toContainText(
+    "Newest tail context",
+  );
 });
 test("mobile outline failure restores its Sheet and keeps image draft/caret with foreground priority", async ({
   page,

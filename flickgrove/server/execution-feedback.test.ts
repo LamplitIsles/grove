@@ -215,6 +215,9 @@ test("isolated native notifications through Workspace and real Chord preserve re
       expect(
         detail()?.messages.some((m) => m.id === `recovered-${phase}`),
       ).toBe(true);
+      expect(
+        detail()?.messages.find((m) => m.id === `recovered-${phase}`)?.kind,
+      ).toBe(phase === "final_answer" ? "result" : "progress");
     }
     const completedItem = (itemId: string, text = itemId) => ({
       type: "agentMessage",
@@ -257,7 +260,15 @@ test("isolated native notifications through Workspace and real Chord preserve re
       completedAtMs: Date.now(),
       item:
         m.role === "assistant"
-          ? completedItem(m.id, m.text)
+          ? {
+              ...completedItem(m.id, m.text),
+              phase:
+                m.kind === "result"
+                  ? "final_answer"
+                  : m.kind === "progress"
+                    ? "commentary"
+                    : null,
+            }
           : {
               type: "userMessage",
               id: m.id,
@@ -274,6 +285,12 @@ test("isolated native notifications through Workspace and real Chord preserve re
       () => detail()?.readingRevision === app.detail(a.id).readingRevision,
     );
     expect(detail()?.messages.map((m) => m.id)).toEqual(visibleIds);
+    expect(
+      detail()?.messages.find((m) => m.id === "recovered-final_answer")?.kind,
+    ).toBe("result");
+    expect(
+      detail()?.messages.find((m) => m.id === "recovered-commentary")?.kind,
+    ).toBe("progress");
     expect(
       detail()?.messages.filter((m) => m.id.startsWith("recovered-")),
     ).toHaveLength(2);

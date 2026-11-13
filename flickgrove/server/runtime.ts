@@ -16,6 +16,7 @@ export interface RuntimeItem {
   clientId?: string;
   images?: import("../src/contracts").MessageImage[];
   phase?: string | null;
+  kind?: "progress" | "result";
   delivery?: string | null;
   questions?:
     | {

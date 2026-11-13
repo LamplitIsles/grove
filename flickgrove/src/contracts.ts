@@ -83,6 +83,7 @@ export interface Human {
   color: string;
 }
 export interface Message {
+  kind?: "progress" | "result";
   author?: Human;
   questionItemId?: string;
   provisional?: boolean;

@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { newSession, createSession } from "./browser-actions";
+import { newSession, createSession, openSidebar } from "./browser-actions";
 for (const viewport of [
   { width: 1440, height: 900 },
   { width: 390, height: 844 },
@@ -30,6 +30,7 @@ for (const viewport of [
       if (request.url().includes("/api/")) requests.push(request.url());
     });
     await page.goto("/");
+    if (viewport.width === 390) await openSidebar(page);
     await expect(
       page.getByRole("button", { name: "Settings", exact: true }),
     ).toBeVisible();
@@ -40,7 +41,9 @@ for (const viewport of [
       0,
     );
     await newSession(page);
-    await expect(page.getByRole("dialog")).toBeVisible();
+    await expect(
+      page.getByRole("dialog", { name: "New session", exact: true }),
+    ).toBeVisible();
     await expect(
       page.getByRole("textbox", { name: "Access token", exact: true }),
     ).toHaveCount(0);
@@ -58,12 +61,12 @@ for (const viewport of [
     ).toBeVisible();
     await input.fill("Request Worker report");
     await input.press("Enter");
-    await expect(page.locator(".worker-report")).toHaveCount(1);
+    await expect(page.locator(".worker-report")).toHaveCount(0);
     const target = await page.evaluate(() =>
       history.state.grove.details.at(-1),
     );
     await page.reload();
-    await expect(page.locator(".worker-report")).toHaveCount(1);
+    await expect(page.locator(".worker-report")).toHaveCount(0);
     expect(await page.evaluate(() => history.state.grove.details.at(-1))).toBe(
       target,
     );

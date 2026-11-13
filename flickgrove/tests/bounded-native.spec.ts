@@ -117,12 +117,7 @@ for (const width of [1440, 390]) {
     await conversation.evaluate((el) => {
       el.scrollTop = el.scrollHeight;
     });
-    await expect(page.locator(".worker-report")).toHaveCount(1);
-    await expect(page.locator(".worker-report")).not.toHaveAttribute("open");
-    await page.locator(".worker-report summary").click();
-    await expect(page.locator(".report-content")).toContainText(
-      "Identical report details.",
-    );
+    await expect(page.locator(".worker-report")).toHaveCount(0);
     await page.screenshot({
       path: `../.scratch/bounded-native-conversation/${width}-native-card.png`,
     });

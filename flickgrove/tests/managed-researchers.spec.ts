@@ -1,5 +1,6 @@
 import sharp from "sharp";
 import { expect, test } from "@playwright/test";
+import { openSidebar } from "./browser-actions";
 const origin = "http://127.0.0.1:14319";
 const shots = "../.scratch/flickgrove-managed-researchers/screenshots";
 for (const width of [1440, 390])
@@ -12,6 +13,7 @@ for (const width of [1440, 390])
       data: { mode: "researchers" },
     });
     await page.goto(origin);
+    if (width === 390) await openSidebar(page);
     await page
       .getByRole("button", { name: "Open Streaming voice input Orc" })
       .click();
@@ -83,12 +85,7 @@ for (const width of [1440, 390])
       .locator(".worker-report")
       .filter({ hasText: "Researcher report" })
       .first();
-    await expect(report).toBeVisible();
-    await report.locator("summary").click();
-    await expect(report.locator(".report-content")).toContainText(
-      "remaining unknown is paid-turn inventory",
-    );
-    await page.screenshot({ path: `${shots}/${width}-report.png` });
+    await expect(report).toHaveCount(0);
     await page.getByRole("button", { name: "Stop Orc", exact: true }).click();
     await expect(research).toBeDisabled();
     await expect(page.locator(".image-draft")).toHaveCount(1);
@@ -96,7 +93,17 @@ for (const width of [1440, 390])
       await page
         .getByRole("button", { name: "‹ Sessions", exact: true })
         .click();
-    await page.locator(".worker-disclosure").first().click();
+    const members = page
+      .locator(".session-row")
+      .filter({
+        has: page.getByRole("button", {
+          name: "Open Streaming voice input Orc",
+          exact: true,
+        }),
+      })
+      .locator(".worker-disclosure");
+    if ((await members.getAttribute("aria-expanded")) === "false")
+      await members.click();
     await page
       .getByRole("button", {
         name: /Open Native collaboration evidence.* Researcher/,
@@ -134,7 +141,7 @@ for (const width of [1440, 390])
       await page.keyboard.press("n");
     }
     await page
-      .getByRole("button", { name: "Experiments", exact: true })
+      .getByRole("option", { name: "Experiments", exact: true })
       .click();
     await page
       .getByRole("button", { name: "Find history", exact: true })

@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { codexMessageKind } from "./message-kind";
 import type {
   Model,
   WeeklyUsage,
@@ -266,6 +267,9 @@ export class FakeRuntime implements Runtime {
         turnId: event.turnId,
         role: "assistant",
         text: event.item.text ?? "",
+        ...(event.item.delivery === "async" && event.item.questions?.length
+          ? {}
+          : { kind: event.item.kind ?? codexMessageKind(event.item.phase) }),
         at: Date.now(),
       };
       const items = this.historyItems.get(thread) ?? [];

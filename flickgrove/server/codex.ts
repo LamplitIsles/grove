@@ -14,6 +14,7 @@ import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { nativeCollaborationConfig } from "./native-collaboration";
+import { codexMessageKind } from "./message-kind";
 import { roleTools } from "./tools";
 import { roleInstructions } from "./role-instructions";
 import { environmentId } from "../src/project-identity";
@@ -462,6 +463,9 @@ export class CodexRuntime implements Runtime {
           id: item.id,
           turnId,
           role: "assistant",
+          ...(item.delivery === "async" && item.questions?.length
+            ? {}
+            : { kind: codexMessageKind(item.phase) }),
           text: item.text ?? "",
           at,
         });

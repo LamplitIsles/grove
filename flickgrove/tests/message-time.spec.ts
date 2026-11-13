@@ -4,7 +4,7 @@ const origin = "http://127.0.0.1:14320";
 const design = "http://127.0.0.1:14319";
 test.use({ timezoneId: "Asia/Shanghai", serviceWorkers: "block" });
 for (const width of [1440, 390]) {
-  test(`${width} times survive history reload, report expansion and pending confirmation`, async ({
+  test(`${width} times survive history reload, hidden member reports and pending confirmation`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
@@ -91,35 +91,11 @@ for (const width of [1440, 390]) {
           "\n\n[Worker chart](plot.png)",
       },
     });
-    const report = page.locator(".worker-report");
-    await expect(report.locator("time")).toBeVisible();
-    const reportTime = await report.locator("time").getAttribute("datetime");
-    await expect
-      .poll(() =>
-        page
-          .locator(".conversation")
-          .evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight),
-      )
-      .toBeLessThanOrEqual(1);
-    await page.screenshot({
-      path: testInfo.outputPath(`${width}-report-folded.png`),
-    });
-    await report.locator("summary").click();
-    await expect(report.locator(".report-content")).toBeVisible();
-    await expect(report.locator("time")).toHaveAttribute(
-      "datetime",
-      reportTime!,
+    await page.keyboard.press("Meta+ArrowDown");
+    await expect(page.locator(".conversation")).toContainText(
+      "Assistant response",
     );
-    await expect
-      .poll(() =>
-        page
-          .locator(".conversation")
-          .evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight),
-      )
-      .toBeLessThanOrEqual(1);
-    await page.screenshot({
-      path: testInfo.outputPath(`${width}-report-expanded.png`),
-    });
+    await expect(page.locator(".worker-report")).toHaveCount(0);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,

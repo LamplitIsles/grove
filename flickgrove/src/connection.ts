@@ -59,21 +59,6 @@ export const preferences = {
       /* Layout remains usable in memory. */
     }
   },
-  get treeOrder(): Record<string, string[]> {
-    const result = z
-      .record(z.string(), z.array(z.string()))
-      .safeParse(readPreference<unknown>("tree-order", {}));
-    if (!result.success) return {};
-    return Object.fromEntries(
-      Object.entries(result.data).map(([host, ids]) => [
-        host,
-        [...new Set(ids.filter((id) => id.startsWith(host + ":")))],
-      ]),
-    );
-  },
-  set treeOrder(value: Record<string, string[]>) {
-    writePreference("tree-order", value);
-  },
   get selection() {
     const result = selectionSchema.safeParse(
       readPreference<unknown>("selection", null),

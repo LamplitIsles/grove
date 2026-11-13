@@ -1,4 +1,5 @@
 import { MessageNavigation } from "./message-navigation";
+import { codexMessageKind } from "./message-kind";
 import {
   associate,
   questionEntry,
@@ -726,6 +727,29 @@ export class Workspace {
       return;
     const removedCurrent = this.invalidateCurrentExecution(a);
     if (removedCurrent) this.save();
+    // A native Pi replay can add classification to an already visible entry,
+    // including after its generation ended. Keep its identity and position.
+    if (
+      a.backend === "pi" &&
+      event.type === "item" &&
+      event.item.type === "agentMessage" &&
+      event.item.kind === "progress" &&
+      !(event.item.delivery === "async" && event.item.questions?.length)
+    ) {
+      const existing = a.messages.find(
+        (m) =>
+          m.id === event.item.id &&
+          m.role === "assistant" &&
+          (m.text === event.item.text || m.bodyRef === m.id) &&
+          !m.questionItemId &&
+          !a.questions.some((q) => q.itemId === m.id),
+      );
+      if (existing && existing.kind !== "progress") {
+        existing.kind = "progress";
+        this.save();
+        return;
+      }
+    }
     if (event.type === "thread-status") {
       this.refreshCurrentExecution(a);
       return;
@@ -942,6 +966,7 @@ export class Workspace {
           id: item.id,
           text: item.text,
           role: "assistant",
+          kind: item.kind ?? codexMessageKind(item.phase),
           turnId: event.turnId,
           at: Date.now(),
         };
@@ -1356,6 +1381,7 @@ export class Workspace {
         if (!arriving.some((v) => v.id === m.id)) arriving.push(m);
     });
     const initial = new Set(a.messages.map((m) => m.id));
+    const initialKinds = new Map(a.messages.map((m) => [m.id, m.kind]));
     try {
       const page = await readingPage(
         this.options.runtime,
@@ -1390,6 +1416,22 @@ export class Workspace {
           !page.messages.some((v) => v.id === m.id) &&
           !nativeClients.has(m.id),
       );
+      // Do not overwrite a classification observed while the native page was
+      // in flight with an older copy of the same entry.
+      if (a.backend === "pi") {
+        for (const message of page.messages) {
+          const current = a.messages.find((m) => m.id === message.id);
+          if (
+            message.role === "assistant" &&
+            current?.role === "assistant" &&
+            (current.text === message.text || message.bodyRef === message.id) &&
+            current.kind === "progress" &&
+            initialKinds.get(message.id) !== "progress" &&
+            !message.questionItemId
+          )
+            message.kind = "progress";
+        }
+      }
       this.rememberCompletedItems(a, page.messages);
       a.messages = recentWindow(
         [...page.messages, ...retained, ...additions],

@@ -261,7 +261,7 @@ test("mobile swipe only reveals, one row at a time; right/outside collapse and e
 
 for (const width of [1440, 390])
   for (const role of ["Orc", "Worker"]) {
-    test(`jump to bottom resumes follow for ${role} at ${width}px`, async ({
+    test(`jump to bottom stays at the reading position for ${role} at ${width}px`, async ({
       page,
       request,
     }) => {
@@ -274,16 +274,18 @@ for (const width of [1440, 390])
         if (width === 390) {
           await page.locator(".mobile-back > button").click();
           await page
+            .getByRole("button", { name: orcName })
+            .locator("..")
             .getByRole("button", { name: "Expand Workers" })
-            .first()
             .click();
           await page
             .getByRole("button", { name: "Open Voice input Worker" })
             .click();
         } else {
           await page
+            .getByRole("button", { name: orcName })
+            .locator("..")
             .getByRole("button", { name: "Expand Workers" })
-            .first()
             .click();
           await page
             .getByRole("button", { name: "Open Voice input Worker" })
@@ -328,18 +330,19 @@ for (const width of [1440, 390])
         data: {
           append: {
             agentId: role === "Orc" ? "orc" : "voice",
-            text: "Follow after jump",
+            text: "Follow after jump ".repeat(100),
           },
         },
       });
-      await expect(transcript).toContainText("Follow after jump");
       await expect
         .poll(() =>
           transcript.evaluate(
             (el) => el.scrollHeight - el.scrollTop - el.clientHeight,
           ),
         )
-        .toBeLessThan(80);
+        .toBeGreaterThan(80);
+      await jump.click();
+      await expect(transcript).toContainText("Follow after jump");
       await request.post(`${origin}/fixture/reset`, {
         data: {},
       });

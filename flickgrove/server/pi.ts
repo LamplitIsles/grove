@@ -35,6 +35,7 @@ import {
   entryMessages,
 } from "./pi-session";
 import { PiMetadata } from "./pi-documents";
+import { piAnswerKinds, piToolProgress } from "./message-kind";
 import { inspectPiFollowUp } from "./pi-inspection";
 import { readPiStorage } from "./pi-storage";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -331,6 +332,7 @@ export class PiRuntime implements Runtime {
         BACKGROUND_CONTEXT,
       );
       const messages: Message[] = [];
+      const answerKinds = await piAnswerKinds(storage, page.items);
       for (const entry of direction === "older"
         ? [...page.items].reverse()
         : page.items) {
@@ -396,6 +398,11 @@ export class PiRuntime implements Runtime {
             entry.kind === "grove.input" || entry.kind === "grove.withdrawn"
               ? "user"
               : "assistant",
+          ...(piToolProgress(entry)
+            ? { kind: "progress" as const }
+            : answerKinds.has(entry.id)
+              ? { kind: "result" as const }
+              : {}),
           text:
             entry.kind === "grove.question"
               ? (data?.questions?.map((q) => q.question).join("\n\n") ?? "")
