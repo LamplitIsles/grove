@@ -12,7 +12,7 @@
   import { Button } from "$lib/components/ui/button/index.js";
   import { questionPanels, setQuestionPanel } from "./question-state.svelte";
   import { navigation, setSurface, removeQuestionDrawer, back } from "./navigation.svelte";
-  import { untrack, onMount } from "svelte";
+  import { untrack, onMount, tick } from "svelte";
   import type { Answer, Agent, Detail, Skill, Message, Delivery } from "./contracts";
   import { elapsed } from "./api";
   import { executionStatus } from "./execution-status";
@@ -48,6 +48,14 @@
   const previousError = $derived(detail.currentExecution?.state === "idle" && !obsoleteDisconnect ? detail.error : undefined);
   const queued = $derived((detail.followUpCount ?? 0) > 0);
   let timeline = $state<ConversationTimeline>();
+  function beginPosition() { return timeline?.beginSend(); }
+  function positionSent(operation: string, generation: number) { void timeline?.positionSent(operation, generation); }
+  let answerPosition = $state(false);
+  function positionAnswer(operation: string, generation: number) {
+    answerPosition = true;
+    const target = timeline;
+    void target?.positionSent(operation, generation, true).then(() => { if (!panelVisible) target.releaseAnswerSpace(); });
+  }
   let follow = $state(true);
   let outlineOpen=$state(false), currentAnchor=$state<string>();
   let outlineTrigger=$state<HTMLButtonElement|null>(null);
@@ -90,6 +98,12 @@
     if (requested && !drawerOpen && !navigation.surfaces.length) setSurface("questions", true);
   });
   const panelVisible = $derived(panelOpen && (!narrow ? !navigation.surfaces.length : navigation.surfaces.at(-1) === "questions"));
+  $effect(() => {
+    if (answerPosition && !panelVisible) {
+      answerPosition = false;
+      void tick().then(() => timeline?.releaseAnswerSpace());
+    }
+  });
   function toggleQuestions() {
     if (record) { closeRecord(); if (!beforeRecord) removeQuestionDrawer(); return; }
     setQuestionPanel(detail.id, !pendingOpen);
@@ -220,12 +234,12 @@
       <div class:question-hidden={!!record} class="pending-content">
         {#if questionError || batchError}<div class="question-load"><p class="inline-error" role="alert">{questionError || batchError}</p><Button variant="secondary" size="sm" disabled={!connected} onclick={() => questionRevision++}>Retry</Button></div>{/if}
         {#if questionLoading && !shownQuestions.length}<p class="question-load" role="status">Loading questions…</p>{:else if !shownQuestions.length && !questionError}<p class="question-load" role="status">{!connected ? "Reconnect to load questions." : "No pending questions."}</p>{/if}
-        {#if detail.role === "orc"}<Questions agentId={detail.id} questions={shownQuestions} deliveries={shownBatches} selectedItem={pendingItem} recovering={batchLoading || !!batchError} connected={ready && connected && detail.state !== "stopping"} {onanswer} {onretry} />
+        {#if detail.role === "orc"}<Questions agentId={detail.id} questions={shownQuestions} deliveries={shownBatches} selectedItem={pendingItem} recovering={batchLoading || !!batchError} connected={ready && connected && detail.state !== "stopping"} {onanswer} {onretry} onbeginSend={beginPosition} onpositionSent={positionAnswer} />
         {:else}<div class="delegated-questions">{#each shownQuestions as q}<div><Markdown text={q.text} agentId={detail.id} /><span>{m.delegated()}</span></div>{/each}</div>{/if}
       </div>
     </section>{/if}
     <div class:question-hidden={panelVisible}>
-    {#if detail.role === "orc"}<Composer suspended={panelVisible} followUps={detail.followUps ?? []} paused={!!detail.followUpPaused} {queueReady} {onenqueue} {oncheckqueue} {onqueueaction} agentId={detail.id} project={detail.project.alias} centralSkills={!!detail.project.environment && detail.project.environment.id!=="local"} {skills} connected={connected && ready} working={visibleState === "working" && detail.state === "working" && !!detail.turnId} stopping={detail.state === "stopping"} {onstop} {onsend} />{:else}<footer class="read-only"><p>{m.read_only()}</p>{#if owner}<button onclick={() => onopen(owner.id)}>{m.through_orc()}</button>{/if}</footer>{/if}
+    {#if detail.role === "orc"}<Composer suspended={panelVisible} followUps={detail.followUps ?? []} paused={!!detail.followUpPaused} {queueReady} {onenqueue} {oncheckqueue} {onqueueaction} agentId={detail.id} project={detail.project.alias} centralSkills={!!detail.project.environment && detail.project.environment.id!=="local"} {skills} connected={connected && ready} working={visibleState === "working" && detail.state === "working" && !!detail.turnId} stopping={detail.state === "stopping"} {onstop} {onsend} onbeginSend={beginPosition} onpositionSent={positionSent} />{:else}<footer class="read-only"><p>{m.read_only()}</p>{#if owner}<button onclick={() => onopen(owner.id)}>{m.through_orc()}</button>{/if}</footer>{/if}
     </div>
   </div></div>{#if detail.role==="orc"}<MessageOutline agent={detail.id} revision={JSON.stringify([detail.readingRevision,detail.deliveries.map(d=>[d.id,d.status])])} {connected} {showAuthors} {users} bind:open={outlineOpen} current={currentAnchor} onselect={async operation=>timeline?.locate(operation)} oncancel={()=>timeline?.cancelNavigation()} onclose={()=>outlineTrigger?.focus({preventScroll:true})} />{/if}</div>
   {#if navigation.preview && !navigation.surfaces.includes("history-preview")}<div class:preview-hidden={navigation.surfaces.at(-1) !== "file-preview"}><FilePreview {connected} agent={navigation.preview.agent} href={navigation.preview.href} onclose={() => void back()} /></div>{/if}

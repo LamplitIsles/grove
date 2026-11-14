@@ -8,6 +8,7 @@ export type TranscriptPosition = {
   headerHeight: number;
   width: number;
   height: number;
+  sendSpace?: { operation: string; size: number };
   reports: Set<string>;
   closedReports?: Set<string>;
   groups?: Set<string>;

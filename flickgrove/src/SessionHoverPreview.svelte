@@ -16,27 +16,20 @@
     agent: Agent; detail: Detail | ReadingDetail | null; loading: boolean; error: string; cached: boolean; connected: boolean; agents: Agent[]; showAuthors: boolean; users?: Human[];
   } = $props();
   const savedPosition = untrack(() => transcriptPositions.get(agent.id));
-  const savedAnchor = savedPosition?.anchor;
-  const rows = $derived.by(() => {
-    const all = projectConversation(detail?.messages ?? [], detail?.deliveries ?? []);
-    const index = savedAnchor ? all.findIndex(row => row.id === savedAnchor.id || (row.type === "group" && row.messages.some(message => message.id === savedAnchor.id))) : -1;
-    return index < 0 ? all.slice(-25) : all.slice(Math.max(0, index - 12), index + 13);
-  });
+  const rows = $derived(projectConversation(detail?.messages ?? [], detail?.deliveries ?? []).slice(-25));
   const state = $derived(executionStatus(agent));
   let transcript: HTMLDivElement;
-  // One initial position per displayed copy, never the selected transcript's anchor.
-  let positioned = false, restoredAnchor = false;
+  // The first fresh detail may replace an older cached preview. Later refreshes
+  // must not follow new content while the pointer remains over this session.
+  let positioned = false, positionedFresh = false;
   $effect(() => {
-    const current = detail;
-    if (!current) return;
-    const row = savedAnchor && rows.find(row => row.id === savedAnchor.id || (row.type === "group" && row.messages.some(message => message.id === savedAnchor.id)));
-    if (positioned && (!row || restoredAnchor)) return;
-    positioned = true; restoredAnchor = !!row;
+    const current = detail, fromCache = cached;
+    if (!current || (positioned && (fromCache || positionedFresh))) return;
+    positioned = true;
+    if (!fromCache) positionedFresh = true;
     untrack(() => void tick().then(() => {
       if (!transcript?.isConnected) return;
-      const element = row && transcript.querySelector<HTMLElement>(`[data-preview-row="${CSS.escape(row.id)}"]`);
-      if (!row || !element) transcript.scrollTop = transcript.scrollHeight;
-      else transcript.scrollTop += element.getBoundingClientRect().top - transcript.getBoundingClientRect().top + (row.id === savedAnchor?.id ? savedAnchor.offset : 0);
+      transcript.scrollTop = transcript.scrollHeight;
     }));
   });
 </script>

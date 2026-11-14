@@ -297,7 +297,7 @@ test("previewing a Worker does not consume its pending question", async ({
   ).toBeVisible();
 });
 
-test("hover preview starts at the session's saved reading anchor when available", async ({
+test("hover shows recent content while selecting restores the reading anchor", async ({
   page,
   request,
 }) => {
@@ -336,9 +336,74 @@ test("hover preview starts at the session's saved reading anchor when available"
   await selected.click();
   await reader.hover();
   const preview = page.locator(".hover-preview");
-  await expect(preview).toContainText("Reader performance: Paragraph");
-  await expect(preview.getByText(visible!, { exact: true })).toBeInViewport();
+  await expect(
+    preview
+      .locator(".markdown p")
+      .filter({ hasText: "Reader performance: Paragraph 70." }),
+  ).toBeInViewport();
+  await expect(
+    preview.getByText(visible!, { exact: true }),
+  ).not.toBeInViewport();
   await expect(selected).toHaveAttribute("aria-current", "true");
+  await reader.click();
+  await expect(
+    conversation.getByText(visible!, { exact: true }),
+  ).toBeInViewport();
+});
+
+test("hover moves from cached content to the latest fresh detail once", async ({
+  page,
+  request,
+}) => {
+  await request.post(origin + "/fixture/reset", { data: { mode: "long" } });
+  await page.goto(origin);
+  await openSidebar(page);
+  const reader = page.getByRole("button", {
+    name: open("Reader performance"),
+    exact: true,
+  });
+  const selected = page.getByRole("button", {
+    name: open("Streaming voice input"),
+    exact: true,
+  });
+  await reader.click();
+  await expect(page.locator(".conversation")).toContainText(
+    "Reader performance: Paragraph 70",
+  );
+  await selected.click();
+  await request.post(origin + "/fixture/change", {
+    data: { detailDelay: 800 },
+  });
+  await request.post(origin + "/fixture/change", {
+    data: {
+      execution: {
+        agentId: "reader-orc",
+        event: { type: "working", turnId: "hover-fresh" },
+      },
+    },
+  });
+  await request.post(origin + "/fixture/change", {
+    data: {
+      execution: {
+        agentId: "reader-orc",
+        event: {
+          type: "item",
+          item: {
+            type: "agentMessage",
+            id: "hover-fresh-result",
+            phase: "final_answer",
+            text: "Newest fresh preview",
+          },
+        },
+      },
+    },
+  });
+  await reader.hover();
+  const preview = page.locator(".hover-preview");
+  await expect(preview).toContainText("Reader performance: Paragraph");
+  await expect(
+    preview.getByText("Newest fresh preview", { exact: true }),
+  ).toBeInViewport();
 });
 
 test("hovered conversation refreshes without following newly appended messages", async ({

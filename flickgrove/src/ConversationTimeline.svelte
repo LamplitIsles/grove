@@ -17,6 +17,10 @@
   const id = untrack(() => agentId);
   const initiallyReady = untrack(() => ready);
   const saved = untrack(() => transcriptPositions.get(id));
+  let sendSpace = $state(untrack(() => saved?.sendSpace?.size ?? 0));
+  let spaceOperation = $state<string | undefined>(untrack(() => saved?.sendSpace?.operation));
+  let positioningGeneration: number | undefined;
+  let answerHolding = $state(false);
   let history = $state.raw<LoadedHistory | null>(untrack(() => boundary ? historyCache.get(id, boundary) : null));
   let historyLoaded = $state(untrack(() => !!history?.loaded));
   let historical = $state.raw(untrack(() => history?.messages ?? []));
@@ -26,7 +30,8 @@
   let locating: AbortController | undefined;
   let locationGeneration = 0;
   const request = new AbortController();
-  function cancelLocation() { locationGeneration++; locating?.abort(); locating=undefined; }
+  function cancelLocation() { locationGeneration++; positioningGeneration=undefined; locating?.abort(); locating=undefined; }
+  function userReading() { answerHolding = false; cancelLocation(); }
   export function cancelNavigation() { cancelLocation(); }
   $effect(()=>{if(!connected) untrack(cancelLocation);});
   export async function locate(operation:string) {
@@ -166,7 +171,7 @@
       if (rect.width && rect.height) { lastWidth = rect.width; lastHeight = rect.height; }
       changed(rect);
     }),
-    paddingStart: 24, paddingEnd: 24,
+    paddingStart: 24, paddingEnd: 24 + untrack(() => sendSpace),
   });
   // Preserve the reading point when an item entirely above it changes size,
   // including while scrolling backward. Growth spanning the fold stays below
@@ -181,11 +186,28 @@
   let leadingMessageAnchor: { key: string | number | bigint; offset: number } | undefined;
   let previousRows = untrack(() => rows);
   let foldingGroups = $state.raw(new Map<string, Message[]>());
+  let foldingHold = $state(false);
+  let foldingGeneration = 0;
   $effect.pre(() => {
-    const current = rows, element = transcript, pin = pinned, end = footerHeight + 24;
+    const current = rows, element = transcript, pin = pinned, end = footerHeight + 24 + sendSpace;
     untrack(() => {
       const previous = $virtualizer.options;
       const scroll = $virtualizer.scrollOffset ?? 0;
+      // A result may replace a large measured progress row with a short group.
+      // Reserve its current height before that removal can clamp scrollTop.
+      if (element && spaceOperation) {
+        const sentIndex = previousRows.findIndex(row => row.type === "message" && (row.message.clientId === spaceOperation || row.message.id === spaceOperation));
+        const oldIds = new Set(previousRows.map(row => row.id));
+        const folded = new Set(current.filter(row => row.type === "group" && !oldIds.has(row.id)).flatMap(row => row.type === "group" ? row.messages.map(message => message.id) : []));
+        const sizes = new Map($virtualizer.takeSnapshot().map(item => [item.key, item.size]));
+        const reserve = sentIndex < 0 ? 0 : previousRows.slice(sentIndex + 1).reduce((sum, row) => sum + (folded.has(row.id) ? sizes.get(row.id) ?? 0 : 0), 0);
+        if (reserve) {
+          sendSpace += reserve;
+          foldingHold = true;
+          const generation = ++foldingGeneration;
+          setTimeout(() => { if (active && generation === foldingGeneration) foldingHold = false; }, 350);
+        }
+      }
       // Only animate live work that was actually in view before a new result.
       // History loading and virtual row remounts must not replay the transition.
       if (element && !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
@@ -263,7 +285,7 @@
       prependCommit ||= prepending;
       $virtualizer.setOptions({
         count: current.length + 1, getItemKey: index => index === 0 ? headerKey : current[index - 1].id,
-        getScrollElement: () => element ?? null, paddingEnd: end,
+        getScrollElement: () => element ?? null, paddingEnd: Math.max(end, footerHeight + 24 + sendSpace),
         rangeExtractor: range => {
           const indexes = defaultRangeExtractor(range), messageIndex = current.findIndex(row => row.id === pin || (row.type === "group" && row.messages.some(message => message.id === pin)));
           const index = messageIndex < 0 ? -1 : messageIndex + 1;
@@ -276,6 +298,22 @@
   function virtualChanged(instance: Virtualizer<HTMLDivElement, HTMLDivElement>) {
     if (active && transcript?.isConnected && transcript.clientHeight) onfollow(windowState && !windowState.joined ? false : instance.isAtEnd());
   }
+  // Reserve only the unfilled part of the viewport beneath the sent input.
+  // Ignore estimated rows: their eventual measurement may be much smaller.
+  $effect(() => {
+    const operation = spaceOperation, current = rows, total = $virtualizer.getTotalSize(), element = transcript, space = sendSpace, end = footerHeight, holding = foldingHold || answerHolding;
+    if (!operation || !element || !space || !total || holding) return;
+    untrack(() => {
+      const index = current.findIndex(row => row.type === "message" && (row.message.clientId === operation || row.message.id === operation));
+      if (index < 0) return;
+      const measured = new Map($virtualizer.takeSnapshot().map(item => [item.key, item.size]));
+      if (!measured.has(current[index].id)) return;
+      const occupied = current.slice(index).reduce((height, row) => height + (measured.get(row.id) ?? 0), 0);
+      const slack = Math.max(0, element.scrollHeight - element.clientHeight - element.scrollTop);
+      const needed = Math.max(0, space - slack, element.clientHeight - 24 - end - 24 - occupied);
+      if (needed < space - 0.5) sendSpace = needed;
+    });
+  });
   // The published Svelte adapter applies options before Svelte commits the
   // sizer. A public options refresh after a size commit lets the adapter retry
   // a scroll clamped against the previous DOM height. Guard the store update
@@ -349,6 +387,15 @@
   function saveReading() {
     if (!transcript?.isConnected || !transcript.clientHeight || !ready) return;
     lastScroll = transcript.scrollTop;
+    // Remove only space that is already above the physical scroll limit, so
+    // a reader moving upward never sees the browser clamp the viewport back.
+    if (positioningGeneration === undefined && !foldingHold && !answerHolding && sendSpace > 0) {
+      const slack = Math.max(0, transcript.scrollHeight - transcript.clientHeight - lastScroll);
+      if (slack > 0.5) {
+        sendSpace = Math.max(0, sendSpace - slack);
+        if (!sendSpace) spaceOperation = undefined;
+      }
+    }
     lastFollow = transcript.scrollHeight - lastScroll - transcript.clientHeight < 80;
     if(windowState && !windowState.joined) lastFollow=false;
     onfollow(lastFollow);
@@ -364,20 +411,65 @@
     $virtualizer.measureElement(node);
     return { destroy: () => $virtualizer.measureElement(null) };
   }
+  export function beginSend() {
+    cancelLocation();
+    return locationGeneration;
+  }
+  export async function positionSent(operation: string, generation: number, answer = false) {
+    if (!active || generation !== locationGeneration || !transcript?.isConnected) return;
+    if (windowState) {
+      windowState = undefined; historical = [];
+      if (history) { history.window = undefined; history.messages = []; history.loaded = false; history.cursor = null; history.synchronized = undefined; }
+    }
+    // The caller has journalled the provisional row. Wait for it to enter the
+    // projection without letting an intervening reading action steal focus.
+    for (let attempt = 0; attempt < 6; attempt++) {
+      await tick();
+      if (!active || generation !== locationGeneration || !transcript?.isConnected) return;
+      if (rows.some(row => row.type === "message" && (row.message.clientId === operation || row.message.id === operation))) break;
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    }
+    if (!rows.some(row => row.type === "message" && (row.message.clientId === operation || row.message.id === operation))) return;
+    positioningGeneration = generation;
+    answerHolding = answer;
+    spaceOperation = operation;
+    sendSpace = Math.max(0, (answer ? Math.max(transcript.clientHeight, window.innerHeight) : transcript.clientHeight) - 24);
+    try {
+      await tick();
+      let requestedRow = false;
+      for (let attempt = 0; attempt < 6; attempt++) {
+        if (!active || generation !== locationGeneration || !transcript?.isConnected) return;
+        const index = rows.findIndex(row => row.type === "message" && (row.message.clientId === operation || row.message.id === operation));
+        if (index < 0) return;
+        const row = transcript.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(rows[index].id)}"]`);
+        if (row) {
+          const delta = row.getBoundingClientRect().top - transcript.getBoundingClientRect().top - 24;
+          if (Math.abs(delta) > 0.5) transcript.scrollTop += delta;
+        } else if (!requestedRow) {
+          requestedRow = true;
+          $virtualizer.scrollToIndex(index + 1, { align: "start" });
+        }
+        await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+        await tick();
+      }
+    } finally { if (positioningGeneration === generation) positioningGeneration = undefined; }
+  }
+  export function releaseAnswerSpace() { answerHolding = false; }
   export async function jumpToBottom() {
     cancelLocation();
+    answerHolding = false; sendSpace = 0; spaceOperation = undefined;
     if(windowState) {
       windowState=undefined; historical=[];
       if(history) {history.window=undefined; history.messages=[];history.loaded=false;history.cursor=null;history.synchronized=undefined;}
       await load(); await tick();
     }
-    $virtualizer.scrollToEnd();
+    await tick(); $virtualizer.scrollToEnd();
   }
   onMount(() => {
     footerHeight = tail.getBoundingClientRect().height;
     const readingKey=(event:KeyboardEvent)=>{
       if(!["PageUp","PageDown","Home","End","ArrowUp","ArrowDown"," "].includes(event.key) || event.isComposing) return;
-      if(event.target===document.body || (event.target instanceof Node && transcript?.contains(event.target))) cancelLocation();
+      if(event.target===document.body || (event.target instanceof Node && transcript?.contains(event.target))) userReading();
     };
     window.addEventListener("keydown",readingKey,true);
     const observer = new ResizeObserver(() => {
@@ -397,13 +489,14 @@
         anchor: item ? { id: String(item.key), offset: scroll - item.start } : undefined,
         measurements, headerHeight: measurements.find(item => item.key === headerKey)?.size ?? 0,
         width: lastWidth, height: lastHeight,
+        ...(spaceOperation ? { sendSpace: { operation: spaceOperation, size: sendSpace } } : {}),
         reports, closedReports, groups: expandedGroups,
       });
     };
   });
 </script>
 <div class="conversation-region" aria-busy={initialLoading}>
-<div class="conversation" role="region" aria-label={m.conversation_region()} bind:this={transcript} onscroll={saveReading} onwheel={cancelLocation} ontouchstart={cancelLocation} onpointerdown={cancelLocation}>
+<div class="conversation" role="region" aria-label={m.conversation_region()} bind:this={transcript} onscroll={saveReading} onwheel={userReading} ontouchstart={userReading} onpointerdown={userReading}>
   <div class="message-timeline" class:historical-messages={!!boundary} style:height={`${$virtualizer.getTotalSize()}px`}>
     <!-- Always mounted, but measured as the leading item so header changes
          use the same library anchoring as messages, rather than padding. -->
@@ -421,7 +514,7 @@
         {:else}<MessageGroup messages={entry.messages} {renderMessage} initiallyExpanded={expandedGroups.has(entry.id)} folding={foldingGroups.get(entry.id)} onfolding={() => { const next = new Map(foldingGroups); next.delete(entry.id); foldingGroups = next; }} onexpanded={value => { if (value) expandedGroups.add(entry.id); else expandedGroups.delete(entry.id); }} />{/if}
       </div>{/if}
     {/each}
-    <div class="timeline-footer" bind:this={tail} style:top={`${$virtualizer.getTotalSize() - footerHeight - 24}px`}>{#if windowState}<div class="history-controls">{#if windowState.newerCursor}<Button variant="ghost" size="sm" disabled={loading || !connected} onclick={()=>loadWindow("newer")}>{m.later_messages()}</Button>{/if}{#if error}<span class="inline-error" role="alert">{error}</span><Button variant="ghost" size="sm" disabled={loading || !connected} onclick={()=>loadWindow(errorDirection)}>{m.retry()}</Button>{/if}</div>{/if}{@render footer(readingSettled)}</div>
+    <div class="timeline-footer" bind:this={tail} style:top={`${$virtualizer.getTotalSize() - footerHeight - 24 - sendSpace}px`}>{#if windowState}<div class="history-controls">{#if windowState.newerCursor}<Button variant="ghost" size="sm" disabled={loading || !connected} onclick={()=>loadWindow("newer")}>{m.later_messages()}</Button>{/if}{#if error}<span class="inline-error" role="alert">{error}</span><Button variant="ghost" size="sm" disabled={loading || !connected} onclick={()=>loadWindow(errorDirection)}>{m.retry()}</Button>{/if}</div>{/if}{@render footer(readingSettled)}</div>
   </div>
 </div>
 {#if initialLoading}<div class="conversation-loading" role="status" aria-label={m.loading_conversation()}><LoaderCircle size={28} aria-hidden="true" class="conversation-spinner" /></div>{/if}
