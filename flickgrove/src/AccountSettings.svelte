@@ -3,6 +3,7 @@
   import { untrack } from "svelte";
   import { toast } from "svelte-sonner";
   import type { Human } from "./contracts";
+  import ExternalMcpSettings from "./ExternalMcpSettings.svelte";
   import * as m from "./paraglide/messages";
   let { user, colors, onpasskey, onsaved } = $props<{user: Human; colors: string[]; onpasskey: () => void; onsaved: (user: Human) => void}>();
   let name = $state(untrack(() => user.name)), color = $state(untrack(() => user.color)), saving = $state(false), error = $state("");
@@ -32,4 +33,5 @@
     <Button type="submit" size="sm" disabled={saving || !name.trim() || !colors.includes(color)}>{saving ? m.saving() : m.save_profile()}</Button>
   </form>
   <div class="account-security"><h3>{m.passkeys()}</h3><Button variant="outline" size="sm" onclick={onpasskey}>{m.add_passkey()}</Button></div>
+  <ExternalMcpSettings />
 </section>

@@ -49,6 +49,14 @@ const pairingPlugin = {
         generation: { type: "string", required: true },
       },
     },
+    externalMcpTokens: {
+      modelName: "external_mcp_tokens",
+      disableMigration: true,
+      fields: {
+        userId: { type: "string", required: true, fieldName: "user_id" },
+        tokenHash: { type: "string", required: true, fieldName: "token_hash" },
+      },
+    },
   },
 } satisfies BetterAuthPlugin;
 type Pairing = {
@@ -206,7 +214,7 @@ export class GroveAuth {
                   where: [{ field: "id", value: pair.userId }],
                 });
                 if (!target) throw invalid();
-                for (const model of ["passkey", "session"])
+                for (const model of ["passkey", "session", "externalMcpTokens"])
                   await adapter.deleteMany({
                     model,
                     where: [{ field: "userId", value: pair.userId }],
@@ -332,6 +340,62 @@ export class GroveAuth {
   }
   user(id: string) {
     return this.users().find((u) => u.id === id);
+  }
+  manageExternalToken(
+    session: HumanSession,
+    method: "GET" | "POST" | "DELETE",
+  ) {
+    // Lock and recheck the browser session in the same transaction as the
+    // token mutation, so recovery cannot commit between the check and write.
+    return this.store.db.transaction(
+      (tx) => {
+        const active = tx
+          .select({ id: schema.authSessions.id })
+          .from(schema.authSessions)
+          .where(
+            and(
+              eq(schema.authSessions.id, session.sessionId),
+              eq(schema.authSessions.userId, session.user.id),
+              gt(schema.authSessions.expiresAt, new Date().toISOString()),
+            ),
+          )
+          .get();
+        if (!active) return null;
+        if (method === "GET")
+          return {
+            active: !!tx
+              .select({ userId: schema.externalMcpTokens.userId })
+              .from(schema.externalMcpTokens)
+              .where(eq(schema.externalMcpTokens.userId, session.user.id))
+              .get(),
+          };
+        if (method === "DELETE") {
+          tx.delete(schema.externalMcpTokens)
+            .where(eq(schema.externalMcpTokens.userId, session.user.id))
+            .run();
+          return { active: false };
+        }
+        const token = `grove_ext_${random()}`;
+        tx.insert(schema.externalMcpTokens)
+          .values({ userId: session.user.id, tokenHash: hash(token) })
+          .onConflictDoUpdate({
+            target: schema.externalMcpTokens.userId,
+            set: { tokenHash: hash(token) },
+          })
+          .run();
+        return { token };
+      },
+      { behavior: "immediate" },
+    );
+  }
+  externalTokenUser(token: string) {
+    if (!/^grove_ext_[A-Za-z0-9_-]{43}$/.test(token)) return undefined;
+    const row = this.store.db
+      .select({ userId: schema.externalMcpTokens.userId })
+      .from(schema.externalMcpTokens)
+      .where(eq(schema.externalMcpTokens.tokenHash, hash(token)))
+      .get();
+    return row && this.user(row.userId);
   }
   sessionActive(sessionId: string): boolean {
     return !!this.store.db

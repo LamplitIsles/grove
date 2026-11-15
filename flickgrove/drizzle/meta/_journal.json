@@ -57,6 +57,13 @@
       "when": 1794068496513,
       "tag": "0007_member_preset_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1794720214452,
+      "tag": "0008_external_mcp_tokens",
+      "breakpoints": true
     }
   ]
 }

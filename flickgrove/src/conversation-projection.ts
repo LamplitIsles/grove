@@ -4,6 +4,22 @@ export type ConversationRow =
   | { type: "message"; id: string; message: Message }
   | { type: "group"; id: string; messages: Message[] };
 
+export function isHiddenMemberDelivery(
+  message: Message,
+  delivery = message.delivery,
+) {
+  return (
+    !!delivery &&
+    (delivery.source === "worker" ||
+      delivery.source === "reviewer" ||
+      delivery.source === "researcher") &&
+    delivery.status === "sent" &&
+    !delivery.error &&
+    !message.provisional &&
+    !message.questionItemId
+  );
+}
+
 // This is a reading projection: neither the native order nor the messages are
 // changed. User inputs and uncertain/actionable records remain outside groups.
 export function projectConversation(
@@ -20,14 +36,7 @@ export function projectConversation(
       delivery?.source === "worker" ||
       delivery?.source === "reviewer" ||
       delivery?.source === "researcher";
-    if (
-      memberDelivery &&
-      delivery?.status === "sent" &&
-      !delivery.error &&
-      !message.provisional &&
-      !message.questionItemId
-    )
-      continue;
+    if (isHiddenMemberDelivery(message, delivery)) continue;
     const eligible =
       !message.provisional &&
       !message.questionItemId &&

@@ -323,6 +323,14 @@ _Avoid_：置顶会话、会话副本
 通过 Passkey 认证、以自己的身份参与共享会话的人。同一用户可拥有多个 Passkey，昵称可以变化。
 _Avoid_：Owner、Member、Agent
 
+**内部协作 MCP**：
+供 Grove 所管理的 Agent 按所属关系和角色协作使用的 MCP。它以 Agent 的身份和职责为准，不代表 Grove 用户。
+_Avoid_：外部 MCP、用户访问令牌
+
+**外部 MCP 访问令牌**：
+供外部 MCP 客户端以某个 Grove 用户身份访问该实例的凭据。同一用户在一个实例上同时最多有一个有效令牌；它与 Agent 的内部协作身份分别表达。
+_Avoid_：Agent 令牌、Passkey、匿名共享令牌
+
 **用户邀请**：
 已登录用户发起的、供新用户加入共享 Grove 的一次性授权。
 _Avoid_：账户恢复、添加 Passkey

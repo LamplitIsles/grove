@@ -223,13 +223,20 @@ export class HostService {
       await this.workspace.resumeHistory(alias, threadId, archived),
     );
   }
-  async createOrc(alias: string, settings: Settings) {
+  async createOrc(
+    alias: string,
+    settings?: Settings,
+    classifyPreflight = false,
+  ) {
     return qualified(
       this.local(),
-      await this.workspace.createOrc(alias, settings),
+      await this.workspace.createOrc(alias, settings, classifyPreflight),
     );
   }
   async detail(id: string) {
+    return this.detailSnapshot(id);
+  }
+  detailSnapshot(id: string) {
     return qualified(this.local(), this.workspace.detail(this.raw(id)));
   }
   userMessageOutline(id: string) {
@@ -243,10 +250,33 @@ export class HostService {
       this.qualifyMessage(m),
     );
   }
-  async agentHistory(id: string, cursor?: string) {
-    return this.workspace.agentHistory(this.raw(id), cursor, (m) =>
-      this.qualifyMessage(m),
+  async agentHistory(
+    id: string,
+    cursor?: string,
+    budget?: import("./conversation-reading").HistoryReadBudget,
+  ) {
+    return this.workspace.agentHistory(
+      this.raw(id),
+      cursor,
+      (m) => this.qualifyMessage(m),
+      budget,
     );
+  }
+  watchProvisional(
+    id: string,
+    messages: import("../src/contracts").Message[],
+    signal: AbortSignal,
+  ) {
+    return this.workspace.watchProvisional(this.raw(id), messages, signal);
+  }
+  projectMessages(
+    id: string,
+    messages: import("../src/contracts").Message[],
+    observed?: ReadonlySet<string>,
+  ) {
+    return this.workspace
+      .projectMessages(this.raw(id), messages, observed)
+      .map((m) => this.qualifyMessage(m));
   }
   private qualifyMessage(m: import("../src/contracts").Message) {
     return {
@@ -302,6 +332,9 @@ export class HostService {
   messageBody(id: string, itemId: string) {
     return this.workspace.messageBody(this.raw(id), itemId);
   }
+  liveMessageBody(id: string, itemId: string, operation?: string) {
+    return this.workspace.liveMessageBody(this.raw(id), itemId, operation);
+  }
   historyBody(alias: string, threadId: string, itemId: string) {
     return this.workspace.historyBody(alias, threadId, itemId);
   }
@@ -353,12 +386,50 @@ export class HostService {
     );
     return qualified(this.local(), result);
   }
+  // External user calls generate their own operation identity and never depend
+  // on a client-side reservation or a replay after an uncertain response.
+  async externalSend(
+    id: string,
+    text: string,
+    operationId: string,
+    userId: string,
+  ) {
+    return this.workspace.send(
+      this.raw(id),
+      text,
+      operationId,
+      undefined,
+      userId,
+      false,
+      undefined,
+      undefined,
+      true,
+    );
+  }
+  async externalAnswer(
+    id: string,
+    answers: Answer[],
+    operationId: string,
+    userId: string,
+  ) {
+    return this.workspace.answerBatch(
+      this.raw(id),
+      answers,
+      operationId,
+      userId,
+      false,
+      undefined,
+      undefined,
+      true,
+    );
+  }
   async enqueueFollowUp(
     id: string,
     text: string,
     operationId: string,
     images?: MessageImage[],
     authorUserId?: string,
+    singleCall = false,
   ) {
     return qualified(
       this.local(),
@@ -368,6 +439,7 @@ export class HostService {
         operationId,
         images,
         authorUserId,
+        singleCall,
       ),
     );
   }

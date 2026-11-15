@@ -31,6 +31,18 @@ A successful recovery revokes the target user's credentials and sessions present
 
 The browser session and same-origin checks protect HTTP reads, images, voice and WebSocket operations. The local agent MCP bridge continues to use its separate per-agent bearer token and does not represent a human. A message author comes from the verified browser session attached to the original persisted operation; old and external messages without a matching identity have no author. Participant activity is recorded per user and tree only after native admission, independent of agent activity. Unknown delivery outcomes retain the original operation identity and are never automatically resent.
 
+### External MCP
+
+In Settings → Account, generate an external MCP token and copy it when shown. Each user has at most one active token on this Grove instance; rotation or revocation invalidates that user's previous token immediately. If the token is lost, rotate it and update the clients. The instance stores only its verifier. The token represents the signed-in Grove user and is separate from managed Agents' internal collaboration credentials.
+
+Connect a header-capable client to `https://<your-grove-origin>/external-mcp` using `Authorization: Bearer <token>`. Use HTTPS for remote access, for example through the instance's secured reverse proxy. For Codex, keep the token in the `GROVE_MCP_TOKEN` environment variable and configure the endpoint with `codex mcp add grove --url https://<your-grove-origin>/external-mcp --bearer-token-env-var GROVE_MCP_TOKEN`. OAuth is not provided in this version.
+
+The external tools list open sessions, registered projects and built-in skills, read messages and pending questions, send or queue messages and answer questions in an Orc, and create an Orc for a registered project. `get_config_files` returns the same configuration locations and partial-resolution issues as Settings, without file contents. Session messages page backward and retain visible progress/result kinds where known; confirmed member reports are hidden from the Orc view. Reads and writes are subject to the existing user and session rules.
+
+An oversized message may include `bodyRef` for `read_message_body`, which returns bounded chunks. A live body may be temporarily unavailable when it exceeds the shared in-memory limit; in that case `bodyUnavailable` is returned instead of an unreadable reference. A previously returned live reference can also expire when the message leaves the live window before it appears in native history.
+
+Writes are single synchronous tool calls: send/answer acceptance confirms native admission, queue success confirms enqueue, and session creation returns the created session. None means the Orc has completed the work. If a response is lost or an outcome is unknown, inspect the session, messages, questions and deliveries before acting; Grove never automatically repeats the operation. Simultaneous similar operations may remain ambiguous.
+
 ## Project execution environments
 
 Spec **#4424** keeps Grove, Codex App Server and agent sessions, FlickNote and FlickLog on the instance machine. An SSH Mac supplies checkout files, the compatible native `codex exec-server`, `og`, Git and `python3` (3.9 or newer) for bounded project/preview reads. It does not need a separate Grove or agent session. No deployment, device application installation, credentials synchronization or real n5pro→Mac connection is performed by this change.

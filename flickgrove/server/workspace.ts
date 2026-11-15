@@ -7,6 +7,7 @@ import {
   readingPage,
   nativeBody,
   deliveryMetadata,
+  type HistoryReadBudget,
 } from "./conversation-reading";
 import { ImageStore } from "./images";
 import {
@@ -68,6 +69,16 @@ import {
   type MemberModelChoice,
 } from "./member-presets";
 import { listConfigFiles, type ConfigFileLocations } from "./config-files";
+import { sessions } from "./schema";
+export const LIVE_BODY_LIMIT_BYTES = 128 * 1024 * 1024;
+type ProvisionalWatch = {
+  agentId: string;
+  operations: Set<string>;
+  observed: Set<string>;
+  invalidated: boolean;
+  stop(): void;
+  invalidate(): void;
+};
 
 function reviewTargetText(target: ReviewTarget) {
   return `${target.profile} · spec ${target.spec} · fixed point ${target.fixedPoint} → reviewed HEAD ${target.reviewedHead}`;
@@ -334,6 +345,7 @@ export class Workspace {
   private readonly state: State;
   private readonly handles = new Map<string, RuntimeHandle>();
   private readonly subscribers = new Set<() => void>();
+  private readonly provisionalWatches = new Set<ProvisionalWatch>();
   private readonly treeActions = new Set<string>();
   private readonly closingTrees = new Set<string>();
   private readonly queues = new Map<string, Promise<unknown>>();
@@ -477,6 +489,77 @@ export class Workspace {
     string,
     { turnId: string; ids: Set<string> }
   >();
+  // Only clipped messages in the current live windows need a transient body.
+  // The native transcript remains authoritative once it contains the item.
+  private readonly liveBodies = new Map<
+    string,
+    {
+      agentId: string;
+      itemId: string;
+      clientId?: string;
+      provisional?: boolean;
+      text: string;
+      bytes: number;
+    }
+  >();
+  private liveBodyBytes = 0;
+  private forgetLiveBody(key: string) {
+    const body = this.liveBodies.get(key);
+    if (body) this.liveBodyBytes -= body.bytes;
+    this.liveBodies.delete(key);
+  }
+  private rememberLiveBodies(agent: RuntimeAgent, projected: Message[]) {
+    const refs = new Set(
+      projected.flatMap((m) => (m.bodyRef ? [m.bodyRef] : [])),
+    );
+    for (const [key, body] of this.liveBodies)
+      if (body.agentId === agent.id && !refs.has(body.itemId))
+        this.forgetLiveBody(key);
+    for (const message of agent.messages) {
+      if (!refs.has(message.id) || !message.text) continue;
+      const key = JSON.stringify([agent.id, message.id]);
+      this.forgetLiveBody(key);
+      const bytes = Math.max(
+        Buffer.byteLength(message.text),
+        message.text.length * 2,
+      );
+      const limit = this.options.liveBodyLimitBytes ?? LIVE_BODY_LIMIT_BYTES;
+      if (bytes > limit) continue;
+      // Do not invalidate another live window's published body reference to
+      // make room. That reference retires with its window or session.
+      if (this.liveBodyBytes + bytes > limit) continue;
+      this.liveBodies.set(key, {
+        agentId: agent.id,
+        itemId: message.id,
+        clientId: message.clientId,
+        provisional: message.provisional,
+        text: message.text,
+        bytes,
+      });
+      this.liveBodyBytes += bytes;
+    }
+  }
+  liveMessageBody(id: string, itemId: string, operation?: string) {
+    const agent = this.agent(id);
+    const matching = agent.messages.filter((m) => m.id === itemId);
+    const message = matching[0];
+    if (!message) return;
+    if (
+      operation &&
+      (matching.length !== 1 ||
+        !message.provisional ||
+        message.clientId !== operation)
+    )
+      return;
+    // The detail projection can clip a complete live entry after adding ledger
+    // metadata. That original is already bounded by the live window.
+    if (!message.bodyRef) return message.text;
+    if (message.bodyRef !== itemId) return;
+    const cached = this.liveBodies.get(JSON.stringify([id, itemId]));
+    if (operation && (!cached?.provisional || cached.clientId !== operation))
+      return;
+    return cached?.text;
+  }
   private readonly closingChildren = new Set<string>();
   private readonly stopRequests = new Set<string>();
   private readonly deferredReports = new Map<string, string>();
@@ -499,6 +582,7 @@ export class Workspace {
       ) => Promise<import("./reviewer-config").ReviewerSnapshot>;
       memberPresets?: { directory: string };
       configFiles?: ConfigFileLocations;
+      liveBodyLimitBytes?: number;
       branches?: { read?: BranchReader; intervalMs?: number };
     },
   ) {
@@ -617,9 +701,18 @@ export class Workspace {
   }
   private save() {
     if (this.disposed) return;
+    for (const watch of this.provisionalWatches)
+      if (
+        !this.state.agents.some(
+          (agent) => agent.id === watch.agentId && !agent.closed,
+        )
+      )
+        watch.invalidate();
     for (const a of this.store.windows) {
       this.rememberCompletedItems(a, a.messages);
-      a.messages = recentWindow(a.messages, []);
+      const window = recentWindow(a.messages, []);
+      this.rememberLiveBodies(a, window);
+      a.messages = window;
     }
     this.store.windows.clear();
     try {
@@ -629,6 +722,9 @@ export class Workspace {
       throw error;
     }
     this.state.agents = this.state.agents.filter((a) => !a.closed);
+    const openIds = new Set(this.state.agents.map((a) => a.id));
+    for (const [key, body] of this.liveBodies)
+      if (!openIds.has(body.agentId)) this.forgetLiveBody(key);
     for (const id of this.connections.keys())
       if (!this.state.agents.some((a) => a.id === id))
         this.connections.delete(id);
@@ -642,6 +738,43 @@ export class Workspace {
   subscribe(listener: () => void) {
     this.subscribers.add(listener);
     return () => this.subscribers.delete(listener);
+  }
+  watchProvisional(id: string, messages: Message[], signal: AbortSignal) {
+    this.agent(id);
+    const operations = new Set(
+      messages
+        .slice(-100)
+        .flatMap((m) =>
+          m.provisional &&
+          m.clientId === m.id &&
+          m.delivery?.id === m.id &&
+          ["worker", "reviewer", "researcher"].includes(m.delivery.source)
+            ? [m.id]
+            : [],
+        ),
+    );
+    const watch: ProvisionalWatch = {
+      agentId: id,
+      operations,
+      observed: new Set(),
+      invalidated: false,
+      stop: () => {
+        this.provisionalWatches.delete(watch);
+        signal.removeEventListener("abort", watch.invalidate);
+        watch.operations.clear();
+        watch.observed.clear();
+      },
+      invalidate: () => {
+        watch.invalidated = true;
+        watch.stop();
+      },
+    };
+    if (signal.aborted || this.disposed) watch.invalidate();
+    else if (operations.size) {
+      this.provisionalWatches.add(watch);
+      signal.addEventListener("abort", watch.invalidate, { once: true });
+    }
+    return watch;
   }
   updateHuman(user: import("../src/contracts").Human) {
     for (const agent of this.state.agents) {
@@ -890,6 +1023,10 @@ export class Workspace {
           this.cancelHandoff(a.ownerId ?? a.id);
           a.messages.push(message);
         }
+        if (item.clientId)
+          for (const watch of this.provisionalWatches)
+            if (watch.agentId === a.id && watch.operations.has(item.clientId))
+              watch.observed.add(item.clientId);
         // Only native item positions can correct an out-of-order notification.
         if (
           matched < 0 &&
@@ -1299,6 +1436,20 @@ export class Workspace {
       settings: null,
       revision: this.state.revision,
     };
+  }
+  // External responses can include user-authored conversation text and runtime
+  // errors. Do not disclose managed-agent bearer credentials even if echoed.
+  redactExternalSecrets(value: string) {
+    // The plaintext of rotated/revoked tokens is deliberately not retained.
+    // Match every token form accepted by authentication, including in prose.
+    value = value.replace(/grove_ext_[A-Za-z0-9_-]{43}/g, "[redacted]");
+    for (const { token } of this.store.db
+      .select({ token: sessions.token })
+      .from(sessions)
+      .all()) {
+      if (token) value = value.replaceAll(token, "[redacted]");
+    }
+    return value;
   }
   private supersededDeliveries(id: string, deliveries: Delivery[]) {
     const candidates = deliveries.filter(
@@ -2021,6 +2172,7 @@ export class Workspace {
     id: string,
     cursor?: string,
     project?: (m: Message) => Message,
+    budget?: HistoryReadBudget,
   ) {
     const agent = this.agent(id);
     if (!agent.threadId) return { messages: [], nextCursor: null };
@@ -2046,9 +2198,41 @@ export class Workspace {
         );
         return project ? project(message) : message;
       },
+      budget,
     );
     if (confirmed) this.save();
     return page;
+  }
+  projectMessages(
+    id: string,
+    messages: Message[],
+    observed: ReadonlySet<string> = new Set(),
+  ) {
+    const agent = this.agent(id);
+    return messages.map((message) => {
+      // A real native notification can replace a provisional operation while
+      // a history read is in flight. Only the same operation proves that the
+      // snapshot's provisional exception has retired.
+      const replaced =
+        message.provisional &&
+        message.clientId === message.id &&
+        (observed.has(message.id) ||
+          agent.messages.some(
+            (current) =>
+              current.clientId === message.clientId && !current.provisional,
+          ));
+      return questionEntry(
+        associate(
+          {
+            ...message,
+            ...(replaced ? { provisional: undefined } : {}),
+            delivery: undefined,
+          },
+          agent.deliveries,
+        ),
+        agent.questions,
+      );
+    });
   }
 
   async resumeHistory(alias: string, threadId: string, archived: boolean) {
@@ -2169,35 +2353,46 @@ export class Workspace {
     };
     return { orc: capture(value.orc) };
   }
-  async createOrc(alias: string, settings?: Settings) {
-    this.assertInstanceAvailable();
+  async createOrc(
+    alias: string,
+    settings?: Settings,
+    classifyPreflight = false,
+  ) {
     this.creating++;
     try {
-      const reference = parseProjectReference(alias);
-      const project = (await this.projects(reference.environment)).find(
-        (p) => p.alias === reference.alias,
-      );
-      if (!project) throw new Error("Registered project not found");
-      if (settings) await this.assertProject(project, settings.orc.backend);
-      const captured = await this.executionSettings(settings);
-      await this.assertProject(project, captured.orc.backend);
-      const a: RuntimeAgent = {
-        id: crypto.randomUUID(),
-        token: crypto.randomUUID(),
-        role: "orc",
-        project,
-        title: "New session",
-        ...captured.orc,
-        treeFast: settings?.fast ?? false,
-        orcPromptSnapshot: await this.options.orcPrompt?.(),
-        // Captured once, at creation: later file changes affect only new Orcs.
-        roleDivisionSnapshot: await this.options.roleDivision?.(),
-        state: "idle",
-        closed: false,
-        questions: [],
-        messages: [],
-        deliveries: [],
-      };
+      let a: RuntimeAgent;
+      try {
+        this.assertInstanceAvailable();
+        const reference = parseProjectReference(alias);
+        const project = (await this.projects(reference.environment)).find(
+          (p) => p.alias === reference.alias,
+        );
+        if (!project) throw new Error("Registered project not found");
+        if (settings) await this.assertProject(project, settings.orc.backend);
+        const captured = await this.executionSettings(settings);
+        await this.assertProject(project, captured.orc.backend);
+        a = {
+          id: crypto.randomUUID(),
+          token: crypto.randomUUID(),
+          role: "orc",
+          project,
+          title: "New session",
+          ...captured.orc,
+          treeFast: settings?.fast ?? false,
+          orcPromptSnapshot: await this.options.orcPrompt?.(),
+          // Captured once, at creation: later file changes affect only new Orcs.
+          roleDivisionSnapshot: await this.options.roleDivision?.(),
+          state: "idle",
+          closed: false,
+          questions: [],
+          messages: [],
+          deliveries: [],
+        };
+      } catch (error) {
+        if (classifyPreflight)
+          throw new RequestRefused("Session creation was not started");
+        throw error;
+      }
       this.store.track(a, true);
       this.state.agents.push(a);
       this.save();
@@ -2206,6 +2401,8 @@ export class Workspace {
       } catch (error) {
         a.closed = true;
         this.save();
+        if (classifyPreflight)
+          throw new Error("Session creation outcome unknown");
         throw error;
       }
       return this.publicAgent(a);
@@ -2331,9 +2528,18 @@ export class Workspace {
     startOnly = false,
     authorUserId?: string,
     claim?: string,
+    claimNew = false,
   ) {
-    if (this.writeFailure) throw this.writeFailure;
-    if (this.disposed) throw new Error("Workspace is stopped");
+    if (this.writeFailure) {
+      if (claimNew && !a.deliveries.some((d) => d.id === requestId))
+        throw new RequestRefused("Workspace storage is unavailable");
+      throw this.writeFailure;
+    }
+    if (this.disposed) {
+      if (claimNew && !a.deliveries.some((d) => d.id === requestId))
+        throw new RequestRefused("Workspace is stopped");
+      throw new Error("Workspace is stopped");
+    }
     if (a.closeRequest && !questionIds.length)
       throw new Error(
         "Owned agent is awaiting closure and cannot accept new tasks",
@@ -2405,7 +2611,9 @@ export class Workspace {
         a.id,
         requestId,
         claim,
-        encodeFence({ ...fence, state: "reserved", hash: undefined }),
+        claimNew
+          ? undefined
+          : encodeFence({ ...fence, state: "reserved", hash: undefined }),
       );
     }
     this.save();
@@ -3336,11 +3544,19 @@ export class Workspace {
     requestId: string,
     images?: MessageImage[],
     authorUserId?: string,
+    singleCall = false,
   ) {
     this.automaticFollowUps.delete(id);
     return this.serialize(id, async () => {
-      if (this.writeFailure) throw this.writeFailure;
-      if (this.disposed) throw new Error("Workspace is stopped");
+      if (this.writeFailure) {
+        if (singleCall)
+          throw new RequestRefused("Workspace storage is unavailable");
+        throw this.writeFailure;
+      }
+      if (this.disposed) {
+        if (singleCall) throw new RequestRefused("Workspace is stopped");
+        throw new Error("Workspace is stopped");
+      }
       this.automaticFollowUps.delete(id);
       const a = this.agent(id, true);
       if (this.store.submissionFence(id, requestId))
@@ -3806,99 +4022,119 @@ export class Workspace {
     requireReservation = false,
     predecessor?: SubmissionEnvelope,
     claimToken?: string,
+    singleCall = false,
   ): Promise<import("../src/chord-contract").SendResult> {
     this.automaticFollowUps.delete(id);
     return this.serialize(id, async () => {
-      this.automaticFollowUps.delete(id);
-      const a = this.agent(id, true);
-      if (a.role !== "orc") throw new Error("Send instructions through Orc");
-      const fence = this.submissionFence(
-        id,
-        requestId,
-        { source: "user", text, images },
-        authorUserId,
-      );
-      if (requireReservation && !fence)
-        throw new Error("Submission reservation required");
-      if (fence?.state === "rejected")
-        throw new Error("Submission was not admitted");
-      if (fence?.state === "superseded")
-        throw new Error("Submission has already been replaced");
-      const previous = a.deliveries.find((d) => d.id === requestId);
-      if (fence?.state === "claimed") {
-        if (!previous) throw new Error("Submission outcome unknown");
-        return this.detail(id);
-      }
-      if (fence && previous) throw new Error("Submission outcome unknown");
-      if (previous) {
-        if (previous.mode === "follow_up")
-          throw new Error("Operation belongs to a follow-up");
-        if (
-          previous.text !== text ||
-          previous.source !== "user" ||
-          JSON.stringify(previous.images ?? []) !== JSON.stringify(images ?? [])
-        )
-          throw new Error("Operation ID is bound to different content");
-        return this.detail(id);
-      }
-      await this.verifyRetry(
-        a,
-        requestId,
-        fence,
-        predecessor,
-        { source: "user", text, images },
-        authorUserId,
-        claimToken,
-      );
-      if (images?.length) this.images.validate(a.id, requestId, text, images);
-      if (a.state === "stopping") {
-        a.deliveries.push({
-          id: requestId,
-          text,
-          source: "user",
+      try {
+        this.automaticFollowUps.delete(id);
+        const a = this.agent(id, true);
+        if (a.role !== "orc") throw new Error("Send instructions through Orc");
+        const fence = this.submissionFence(
+          id,
+          requestId,
+          { source: "user", text, images },
           authorUserId,
-          author: authorUserId ? this.store.user(authorUserId) : undefined,
-          status: "failed",
-          questionIds: [],
+        );
+        if (requireReservation && !fence)
+          throw new Error("Submission reservation required");
+        if (fence?.state === "rejected")
+          throw new Error("Submission was not admitted");
+        if (fence?.state === "superseded")
+          throw new Error("Submission has already been replaced");
+        const previous = a.deliveries.find((d) => d.id === requestId);
+        if (singleCall && (fence || previous))
+          throw new Error("Operation already exists");
+        if (fence?.state === "claimed") {
+          if (!previous) throw new Error("Submission outcome unknown");
+          return this.detail(id);
+        }
+        if (fence && previous) throw new Error("Submission outcome unknown");
+        if (previous) {
+          if (previous.mode === "follow_up")
+            throw new Error("Operation belongs to a follow-up");
+          if (
+            previous.text !== text ||
+            previous.source !== "user" ||
+            JSON.stringify(previous.images ?? []) !==
+              JSON.stringify(images ?? [])
+          )
+            throw new Error("Operation ID is bound to different content");
+          return this.detail(id);
+        }
+        await this.verifyRetry(
+          a,
+          requestId,
+          fence,
+          predecessor,
+          { source: "user", text, images },
+          authorUserId,
+          claimToken,
+        );
+        if (images?.length) this.images.validate(a.id, requestId, text, images);
+        if (a.state === "stopping") {
+          a.deliveries.push({
+            id: requestId,
+            text,
+            source: "user",
+            authorUserId,
+            author: authorUserId ? this.store.user(authorUserId) : undefined,
+            status: "failed",
+            questionIds: [],
+            images,
+            at: Date.now(),
+            error: "Wait for the observed turn outcome before sending",
+          });
+          if (fence || singleCall)
+            this.store.queueSubmissionFence(
+              id,
+              requestId,
+              encodeFence({
+                state: "claimed",
+                owner: fence?.owner ?? submissionOwner(authorUserId),
+                hash:
+                  fence?.hash ?? envelopeHash({ source: "user", text, images }),
+                retryOf: fence?.retryOf,
+                tokenHash: fence?.tokenHash,
+              }),
+              fence
+                ? encodeFence({ ...fence, state: "reserved", hash: undefined })
+                : undefined,
+            );
+          this.save();
+          return this.detail(id);
+        }
+        return this.deliver(
+          a,
+          text,
+          requestId,
+          "user",
+          [],
+          undefined,
           images,
-          at: Date.now(),
-          error: "Wait for the observed turn outcome before sending",
-        });
-        if (fence)
-          this.store.queueSubmissionFence(
-            id,
-            requestId,
-            encodeFence({
-              state: "claimed",
-              owner: fence.owner,
-              hash: fence.hash,
-              retryOf: fence.retryOf,
-              tokenHash: fence.tokenHash,
-            }),
-            encodeFence({ ...fence, state: "reserved", hash: undefined }),
-          );
-        this.save();
-        return this.detail(id);
+          false,
+          authorUserId,
+          fence
+            ? encodeFence({
+                state: "claimed",
+                owner: fence.owner,
+                hash: fence.hash,
+                retryOf: fence.retryOf,
+                tokenHash: fence.tokenHash,
+              })
+            : singleCall
+              ? encodeFence({
+                  state: "claimed",
+                  owner: submissionOwner(authorUserId),
+                  hash: envelopeHash({ source: "user", text, images }),
+                })
+              : undefined,
+          singleCall,
+        );
+      } catch (error) {
+        if (singleCall) throw new RequestRefused("Message was not admitted");
+        throw error;
       }
-      return this.deliver(
-        a,
-        text,
-        requestId,
-        "user",
-        [],
-        undefined,
-        images,
-        false,
-        authorUserId,
-        fence &&
-          encodeFence({
-            state: "claimed",
-            owner: fence.owner,
-            hash: fence.hash,
-            retryOf: fence.retryOf,
-            tokenHash: fence.tokenHash,
-          }),
-      );
     });
   }
   abandonCloseCandidate(id: string) {
@@ -4062,129 +4298,151 @@ export class Workspace {
     requireReservation = false,
     predecessor?: SubmissionEnvelope,
     claimToken?: string,
+    singleCall = false,
   ) {
     return this.serialize(id, async () => {
-      const a = this.agent(id, true);
-      if (a.role !== "orc")
-        throw new Error("Answer owned agent questions through Orc");
-      const frozen = answers.map((answer) => ({
-        questionId: answer.questionId,
-        answer: answer.answer.trim(),
-      }));
-      const fence = this.submissionFence(
-        id,
-        operationId,
-        { source: "question", answers: frozen },
-        authorUserId,
-      );
-      if (requireReservation && !fence)
-        throw new Error("Submission reservation required");
-      if (fence?.state === "rejected")
-        throw new Error("Submission was not admitted");
-      if (fence?.state === "superseded")
-        throw new Error("Submission has already been replaced");
-      const prior = a.deliveries.find((d) => d.id === operationId);
-      if (fence?.state === "claimed") {
-        if (!prior) throw new Error("Submission outcome unknown");
-        return this.detail(id);
-      }
-      if (fence && prior) throw new Error("Submission outcome unknown");
-      if (prior) {
-        if (
-          prior.source !== "question" ||
-          JSON.stringify(prior.answers) !== JSON.stringify(frozen)
-        )
-          throw new Error("Operation ID is bound to different content");
-        return this.detail(id);
-      }
-      await this.verifyRetry(
-        a,
-        operationId,
-        fence,
-        predecessor,
-        { source: "question", answers: frozen },
-        authorUserId,
-        claimToken,
-      );
-      if (a.state === "stopping")
-        throw new Error("Wait for the observed turn outcome before answering");
-      if (
-        !frozen.length ||
-        new Set(frozen.map((answer) => answer.questionId)).size !==
-          frozen.length
-      )
-        throw new Error("Choose a non-empty batch of distinct questions");
-      const validateQuestions = () =>
-        frozen.map((answer) => {
-          const q = a.questions.find((q) => q.id === answer.questionId);
-          if (!q || q.state !== "unanswered")
-            throw new Error(
-              "Every submitted question must belong to this Orc and remain unanswered",
-            );
-          if (!answer.answer || answer.answer.length > 100_000)
-            throw new Error("Write a valid answer for every question");
-          // An earlier batch that already settled as unknown does not block a
-          // new explicit answer: it is neither replayed nor rewritten, and its
-          // receipt stays unknown. Work that is still in flight does block.
+      try {
+        const a = this.agent(id, true);
+        if (a.role !== "orc")
+          throw new Error("Answer owned agent questions through Orc");
+        const frozen = answers.map((answer) => ({
+          questionId: answer.questionId,
+          answer: answer.answer.trim(),
+        }));
+        const fence = this.submissionFence(
+          id,
+          operationId,
+          { source: "question", answers: frozen },
+          authorUserId,
+        );
+        if (requireReservation && !fence)
+          throw new Error("Submission reservation required");
+        if (fence?.state === "rejected")
+          throw new Error("Submission was not admitted");
+        if (fence?.state === "superseded")
+          throw new Error("Submission has already been replaced");
+        const prior = a.deliveries.find((d) => d.id === operationId);
+        if (singleCall && (fence || prior))
+          throw new Error("Operation already exists");
+        if (fence?.state === "claimed") {
+          if (!prior) throw new Error("Submission outcome unknown");
+          return this.detail(id);
+        }
+        if (fence && prior) throw new Error("Submission outcome unknown");
+        if (prior) {
           if (
-            a.deliveries.some(
-              (d) =>
-                d.source === "question" &&
-                d.questionIds.includes(q.id) &&
-                ["sending", "queued"].includes(d.status),
-            )
+            prior.source !== "question" ||
+            JSON.stringify(prior.answers) !== JSON.stringify(frozen)
           )
-            throw new Error(
-              "Check the original answer batch before another submission",
-            );
-          return q;
-        });
-      validateQuestions();
-      const questionIds = new Set(frozen.map((answer) => answer.questionId));
-      const failed = a.deliveries.filter(
-        (delivery) =>
-          delivery.source === "question" &&
-          delivery.status === "failed" &&
-          delivery.questionIds.some((questionId) =>
-            questionIds.has(questionId),
-          ),
-      );
-      for (const delivery of failed)
-        await this.requireNativeRejection(a, delivery.id);
-      // Native events may arrive while history is being read, independently of
-      // this session's serialized submissions.
-      if (this.disposed || this.agent(id) !== a)
-        throw new Error("Conversation changed while checking native history");
-      if (this.agent(id).state === "stopping")
-        throw new Error("Wait for the observed turn outcome before answering");
-      const questions = validateQuestions();
-      if (requireReservation && failed.length && !fence?.retryOf)
-        throw new Error("Retry requires a linked reservation");
-      const text = frozen
-        .map(
-          (answer, i) =>
-            `Question: ${questions[i].text}\nAnswer: ${answer.answer}`,
+            throw new Error("Operation ID is bound to different content");
+          return this.detail(id);
+        }
+        await this.verifyRetry(
+          a,
+          operationId,
+          fence,
+          predecessor,
+          { source: "question", answers: frozen },
+          authorUserId,
+          claimToken,
+        );
+        if (a.state === "stopping")
+          throw new Error(
+            "Wait for the observed turn outcome before answering",
+          );
+        if (
+          !frozen.length ||
+          new Set(frozen.map((answer) => answer.questionId)).size !==
+            frozen.length
         )
-        .join("\n\n");
-      return this.deliver(
-        a,
-        text,
-        operationId,
-        "question",
-        frozen.map((answer) => answer.questionId),
-        frozen,
-        undefined,
-        false,
-        authorUserId,
-        fence &&
-          encodeFence({
-            state: "claimed",
-            owner: fence.owner,
-            hash: fence.hash,
-            retryOf: fence.retryOf,
-            tokenHash: fence.tokenHash,
-          }),
-      );
+          throw new Error("Choose a non-empty batch of distinct questions");
+        const validateQuestions = () =>
+          frozen.map((answer) => {
+            const q = a.questions.find((q) => q.id === answer.questionId);
+            if (!q || q.state !== "unanswered")
+              throw new Error(
+                "Every submitted question must belong to this Orc and remain unanswered",
+              );
+            if (!answer.answer || answer.answer.length > 100_000)
+              throw new Error("Write a valid answer for every question");
+            // An earlier batch that already settled as unknown does not block a
+            // new explicit answer: it is neither replayed nor rewritten, and its
+            // receipt stays unknown. Work that is still in flight does block.
+            if (
+              a.deliveries.some(
+                (d) =>
+                  d.source === "question" &&
+                  d.questionIds.includes(q.id) &&
+                  ["sending", "queued"].includes(d.status),
+              )
+            )
+              throw new Error(
+                "Check the original answer batch before another submission",
+              );
+            return q;
+          });
+        validateQuestions();
+        const questionIds = new Set(frozen.map((answer) => answer.questionId));
+        const failed = a.deliveries.filter(
+          (delivery) =>
+            delivery.source === "question" &&
+            delivery.status === "failed" &&
+            delivery.questionIds.some((questionId) =>
+              questionIds.has(questionId),
+            ),
+        );
+        for (const delivery of failed)
+          await this.requireNativeRejection(a, delivery.id);
+        // Native events may arrive while history is being read, independently of
+        // this session's serialized submissions.
+        if (this.disposed || this.agent(id) !== a)
+          throw new Error("Conversation changed while checking native history");
+        if (this.agent(id).state === "stopping")
+          throw new Error(
+            "Wait for the observed turn outcome before answering",
+          );
+        const questions = validateQuestions();
+        if (requireReservation && failed.length && !fence?.retryOf)
+          throw new Error("Retry requires a linked reservation");
+        const text = frozen
+          .map(
+            (answer, i) =>
+              `Question: ${questions[i].text}\nAnswer: ${answer.answer}`,
+          )
+          .join("\n\n");
+        return this.deliver(
+          a,
+          text,
+          operationId,
+          "question",
+          frozen.map((answer) => answer.questionId),
+          frozen,
+          undefined,
+          false,
+          authorUserId,
+          fence
+            ? encodeFence({
+                state: "claimed",
+                owner: fence.owner,
+                hash: fence.hash,
+                retryOf: fence.retryOf,
+                tokenHash: fence.tokenHash,
+              })
+            : singleCall
+              ? encodeFence({
+                  state: "claimed",
+                  owner: submissionOwner(authorUserId),
+                  hash: envelopeHash({ source: "question", answers: frozen }),
+                })
+              : undefined,
+          singleCall,
+        );
+      } catch (error) {
+        // No new answer can be sent before deliver() starts. Do not propagate
+        // runtime/read details from this pre-admission phase to MCP callers.
+        if (singleCall) throw new RequestRefused("Answer was not admitted");
+        throw error;
+      }
     });
   }
   skills(id: string) {
@@ -4857,8 +5115,11 @@ export class Workspace {
     this.automaticFollowUps.clear();
     this.deferredReports.clear();
     this.branches.dispose();
+    for (const watch of this.provisionalWatches) watch.invalidate();
     this.subscribers.clear();
     this.completedItems.clear();
+    this.liveBodies.clear();
+    this.liveBodyBytes = 0;
     this.connections.clear();
     void this.options.runtime.close().catch(() => {
       console.error("Runtime shutdown could not release all resources");

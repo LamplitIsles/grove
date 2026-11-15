@@ -4,6 +4,19 @@ export const LIVE_BYTES = 256 * 1024;
 export const PAGE_BYTES = 1024 * 1024;
 export const encodedBytes = (value: unknown) =>
   new TextEncoder().encode(JSON.stringify(value)).length;
+export type HistoryReadBudget = {
+  remaining: number;
+  onPage?: (page: Awaited<ReturnType<Runtime["historyMessages"]>>) => void;
+};
+export function boundedHistory(runtime: Runtime, budget?: HistoryReadBudget) {
+  return async (threadId: string, cursor?: string) => {
+    if (budget && budget.remaining-- <= 0)
+      throw new Error("History read budget exhausted");
+    const page = await runtime.historyMessages(threadId, cursor);
+    budget?.onPage?.(page);
+    return page;
+  };
+}
 export function deliveryMetadata(d: Delivery): Delivery {
   return {
     id: d.id,
@@ -101,10 +114,12 @@ export async function readingPage(
   deliveries: Delivery[],
   budget = PAGE_BYTES,
   project: (m: Message) => Message | Promise<Message> = (m) => m,
+  readBudget?: HistoryReadBudget,
 ) {
   let { native, before } = decode(cursor);
+  const read = boundedHistory(runtime, readBudget);
   for (;;) {
-    const page = await runtime.historyMessages(threadId, native);
+    const page = await read(threadId, native);
     let messages = page.messages;
     if (before) {
       const index = messages.findIndex((m) => m.id === before);

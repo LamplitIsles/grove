@@ -139,6 +139,16 @@ test("synthetic passkeys preserve other users, consume invitations and roll back
     const bob = cookie(second, "better-auth.session_token");
     const users = auth.users();
     expect(users.map((u) => u.name)).toEqual(["Alice", "Bob"]);
+    const oldAliceSession = (await auth.session(
+      new Headers({ cookie: alice }),
+    ))!;
+    const bobSession = (await auth.session(new Headers({ cookie: bob })))!;
+    const aliceExternal = (
+      auth.manageExternalToken(oldAliceSession, "POST") as { token: string }
+    ).token;
+    const bobExternal = (
+      auth.manageExternalToken(bobSession, "POST") as { token: string }
+    ).token;
     expect(users[0]!.color).not.toBe(users[1]!.color);
     const wrongUserOptions = await call(
       "/api/auth/passkey/generate-register-options",
@@ -203,6 +213,14 @@ test("synthetic passkeys preserve other users, consume invitations and roll back
       (await auth.session(new Headers({ cookie: alice })))?.user.name,
     ).toBe("Alice");
     expect((await register(recoveryCookie, true)).status).not.toBe(200);
+    store.sqlite.exec(
+      "CREATE TRIGGER fail_external_revoke BEFORE DELETE ON external_mcp_tokens BEGIN SELECT RAISE(ABORT, 'synthetic revoke'); END",
+    );
+    expect((await register(recoveryCookie)).status).not.toBe(200);
+    expect(auth.externalTokenUser(aliceExternal)?.id).toBe(users[0]!.id);
+    expect(auth.externalTokenUser(bobExternal)?.id).toBe(users[1]!.id);
+    expect(await auth.session(new Headers({ cookie: alice }))).not.toBeNull();
+    store.sqlite.exec("DROP TRIGGER fail_external_revoke");
     expect(
       (await auth.session(new Headers({ cookie: alice })))?.user.name,
     ).toBe("Alice");
@@ -210,12 +228,17 @@ test("synthetic passkeys preserve other users, consume invitations and roll back
       "CREATE TRIGGER fail_passkey BEFORE INSERT ON passkey BEGIN SELECT RAISE(ABORT, 'synthetic'); END",
     );
     expect((await register(recoveryCookie)).status).not.toBe(200);
+    expect(auth.externalTokenUser(aliceExternal)?.id).toBe(users[0]!.id);
+    expect(auth.externalTokenUser(bobExternal)?.id).toBe(users[1]!.id);
     expect(
       (await auth.session(new Headers({ cookie: alice })))?.user.name,
     ).toBe("Alice");
     store.sqlite.exec("DROP TRIGGER fail_passkey");
     const recovered = await register(recoveryCookie);
     expect(recovered.status).toBe(200);
+    expect(auth.externalTokenUser(aliceExternal)).toBeUndefined();
+    expect(auth.externalTokenUser(bobExternal)?.id).toBe(users[1]!.id);
+    expect(auth.manageExternalToken(oldAliceSession, "POST")).toBeNull();
     expect(revocations).toEqual([users[0]!.id]);
     offRevoke();
     expect(await auth.session(new Headers({ cookie: alice }))).toBeNull();

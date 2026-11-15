@@ -14,6 +14,7 @@ import type { Server } from "bun";
 import type { Workspace } from "./workspace";
 import { qualify, type HostService } from "./hosts";
 import { groveWebsocket, type SocketData } from "./chord-socket";
+import { externalMcp } from "./external-mcp";
 const json = (value: unknown, status = 200) =>
   Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
 type Options = {
@@ -79,6 +80,22 @@ export function createHandler(workspace: Workspace, options: Options) {
   const preview = filePreview(options.service, Date.now, () => options.auth);
   return async (request: Request): Promise<Response> => {
     const url = new URL(request.url);
+    if (url.pathname === "/external-mcp") {
+      const origins = [options.origin(), options.localOrigin?.()].filter(
+        (value): value is string => !!value,
+      );
+      if (
+        !origins.some((value) => url.host === new URL(value).host) ||
+        (request.headers.has("origin") && !browserOrigin(request, origins))
+      )
+        return json({ error: "Wrong origin" }, 403);
+      const token = /^Bearer (.+)$/.exec(
+        request.headers.get("authorization") ?? "",
+      )?.[1];
+      const user = token && options.auth?.externalTokenUser(token);
+      if (!user) return json({ error: "Bearer authorization required" }, 401);
+      return externalMcp(request, options.service, user);
+    }
     const mcp = url.pathname.startsWith("/api/mcp/");
     const origin = mcp
       ? (options.localOrigin?.() ?? options.origin())
@@ -135,6 +152,26 @@ export function createHandler(workspace: Workspace, options: Options) {
         403,
       );
     try {
+      if (url.pathname === "/api/external-mcp/token") {
+        if (!options.auth || !human)
+          return json({ error: "Authentication required" }, 401);
+        if (!browserOrigin(request, origins))
+          return json({ error: "Wrong origin" }, 403);
+        if (
+          request.method === "GET" ||
+          request.method === "POST" ||
+          request.method === "DELETE"
+        ) {
+          const result = options.auth.manageExternalToken(
+            human,
+            request.method,
+          );
+          return result
+            ? json(result)
+            : json({ error: "Authentication required" }, 401);
+        }
+        return json({ error: "Method denied" }, 405);
+      }
       const presets = await memberPresetsHttp(
         request,
         options.service,
