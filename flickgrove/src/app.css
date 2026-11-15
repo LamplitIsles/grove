@@ -1231,12 +1231,6 @@ pre {
 .opened-toggle[aria-expanded="true"] .disclosure-chevron {
   transform: rotate(90deg);
 }
-.worker-working-count i {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--primary);
-}
 .detail-empty {
   flex: 1;
   min-width: 0;

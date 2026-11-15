@@ -641,7 +641,7 @@ async function reset(mode = "working") {
       message: "Implement reader",
     });
   }
-  if (mode === "researchers") {
+  if (mode === "researchers" || mode === "member-count") {
     const r = (await current.app.tool("fixture-orc", "researcher_start", {
       project: "experiments",
       title:
@@ -680,7 +680,7 @@ async function reset(mode = "working") {
       },
     });
   }
-  if (mode === "reviewers") {
+  if (mode === "reviewers" || mode === "member-count") {
     const r = (await current.app.tool("fixture-orc", "reviewer_start", {
       project: "experiments",
       profile: "standards",

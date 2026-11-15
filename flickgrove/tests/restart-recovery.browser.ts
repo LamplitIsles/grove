@@ -2,6 +2,80 @@ import { expect, test } from "@playwright/test";
 import { openSidebar } from "./browser-actions";
 
 for (const width of [1440, 390]) {
+  test(`member disclosure shows working count or total at ${width}`, async ({
+    page,
+    request,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 900 });
+    await request.post("/fixture/reset", { data: { mode: "member-count" } });
+    const fixture = await (await request.get("/fixture/info")).json();
+    const members = fixture.localAgents.filter(
+      (agent: { ownerId?: string }) => agent.ownerId === "orc",
+    );
+    expect(members.map((agent: { role: string }) => agent.role).sort()).toEqual(
+      ["researcher", "reviewer", "worker", "worker"],
+    );
+    const setWorking = async (ids: string[]) => {
+      const result = await request.post("/fixture/change", {
+        data: {
+          executionViews: members
+            .filter((agent: { id: string }) => agent.id !== "docs")
+            .map((agent: { id: string }) => ({
+              id: agent.id,
+              state: ids.includes(agent.id) ? "working" : "idle",
+            })),
+        },
+      });
+      expect(result.ok()).toBeTruthy();
+    };
+    await setWorking([]);
+    await page.goto("/");
+    await openSidebar(page);
+    const root = page
+      .getByRole("button", { name: "Open Streaming voice input Orc" })
+      .first();
+    const disclosure = root.locator("..").locator(".worker-disclosure");
+    await expect(disclosure).toHaveText("4");
+    await expect(disclosure.locator(".worker-working-count")).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath(`member-count-total-${width}.png`),
+    });
+    const researcher = members.find(
+      (agent: { role: string }) => agent.role === "researcher",
+    );
+    const reviewer = members.find(
+      (agent: { role: string }) => agent.role === "reviewer",
+    );
+    await setWorking([researcher.id]);
+    await expect(disclosure).toHaveText("1");
+    await expect(disclosure.locator(".worker-working-count")).toHaveText("1");
+    await expect(disclosure.locator(".worker-working-count i")).toHaveCount(0);
+    await page.screenshot({
+      path: testInfo.outputPath(`member-count-active-${width}.png`),
+    });
+    await setWorking([researcher.id, reviewer.id]);
+    await expect(disclosure).toHaveText("2");
+    await setWorking([]);
+    await expect(disclosure).toHaveText("4");
+    if ((await disclosure.getAttribute("aria-expanded")) !== "false")
+      await disclosure.click();
+    await disclosure.click();
+    await expect(
+      page
+        .getByRole("button", {
+          name: /Open Native collaboration evidence.* Researcher/,
+        })
+        .first(),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByRole("button", { name: /Open Standards review.* Reviewer/ })
+        .first(),
+    ).toBeVisible();
+  });
+}
+
+for (const width of [1440, 390]) {
   test(`pending Stop remains visible while a send is pending at ${width}`, async ({
     page,
     request,
