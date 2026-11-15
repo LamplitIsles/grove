@@ -64,6 +64,7 @@ import type { ProjectEnvironments } from "./project-environments";
 import { DeliveryRejected, RequestRefused, StaleTurn } from "./runtime";
 import { z } from "zod";
 import { roleTools, toolDefinitions, sessionTitle } from "./tools";
+import { callWebTool } from "./web-tools";
 import {
   currentMemberPreset as resolveMemberPreset,
   memberPresetsStatus as readMemberPresetsStatus,
@@ -4713,6 +4714,11 @@ export class Workspace {
     if (name.endsWith("_start") || name.endsWith("_send"))
       this.cancelHandoff(a.id);
     switch (name) {
+      case "web_fetch_structured":
+      case "web_links":
+      case "web_docs_resolve":
+      case "web_docs_fetch":
+        return callWebTool(name, args, this.options.configFiles?.configPath);
       case "orc_handoff": {
         const input = z
           .object(toolDefinitions.orc_handoff.shape)

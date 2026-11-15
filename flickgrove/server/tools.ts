@@ -11,7 +11,49 @@ const target = {
 };
 const researcherId = z.string().min(1);
 const question = z.string().trim().min(1).max(10_000);
+const renderShape = {
+  render: z.enum(["http", "browser"]).optional(),
+  waitMs: z.number().int().min(0).max(30_000).optional(),
+};
+export const webToolNames = [
+  "web_fetch_structured",
+  "web_links",
+  "web_docs_resolve",
+  "web_docs_fetch",
+] as const;
 export const toolDefinitions = {
+  web_fetch_structured: {
+    description:
+      'Read an HTTP(S) page with structured Markdown navigation. HTTP is default and can reach Grove machine localhost and private networks. Browser rendering permits public targets only and is limited to the target domain and allowed CDNs; explicit render="browser" requires waitMs 0–30000 and an installed agent-browser. No automatic fallback. This is distinct from Pi DeepSeek web_fetch.',
+    shape: {
+      url: z.string(),
+      mode: z.enum(["auto", "full", "tree"]).optional(),
+      section_id: z.string().min(1).optional(),
+      ...renderShape,
+    },
+  },
+  web_links: {
+    description:
+      'Extract HTTP(S) links from a page. HTTP is default and can reach Grove machine localhost and private networks. Browser rendering permits public targets only and is limited to the target domain and allowed CDNs; explicit render="browser" requires waitMs 0–30000 and agent-browser.',
+    shape: {
+      url: z.string(),
+      limit: z.number().int().min(1).max(100).optional(),
+      ...renderShape,
+    },
+  },
+  web_docs_resolve: {
+    description:
+      "Find Context7 libraries by name; anonymous when no instance key is configured.",
+    shape: { query: z.string().min(1) },
+  },
+  web_docs_fetch: {
+    description: "Read Context7 documentation for a resolved library ID.",
+    shape: {
+      library_id: z.string().min(1),
+      topic: z.string().optional(),
+      tokens: z.number().int().optional(),
+    },
+  },
   orc_handoff: {
     description:
       "Mark this turn's user handoff only after delivering the result and waiting for the user's next instruction. No notification until successful completion with no pending work. Do not use for progress, waiting for members or product questions (use request_user_input_async). Does not send, stop or close anything. Unknown outcomes must be inspected, never automatically replayed.",
@@ -166,8 +208,9 @@ export const roleTools = {
     "reviewer_read",
     "reviewer_send",
     "reviewer_close",
+    ...webToolNames,
   ],
-  worker: ["worker_report"],
-  reviewer: ["reviewer_report"],
-  researcher: ["researcher_report"],
+  worker: ["worker_report", ...webToolNames],
+  reviewer: ["reviewer_report", ...webToolNames],
+  researcher: ["researcher_report", ...webToolNames],
 } as const;

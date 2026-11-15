@@ -3,6 +3,7 @@ import { browserOrigin } from "./browser-origin";
 import { readingHttp } from "./reading-http";
 import { filePreview } from "./file-preview";
 import { voiceHttp } from "./voice-http";
+import { webSettingsHttp } from "./web-settings-http";
 import { memberPresetsHttp } from "./member-presets-http";
 import { configFilesHttp } from "./config-files-http";
 import type { VoiceOptions } from "./voice";
@@ -137,6 +138,14 @@ export function createHandler(workspace: Workspace, options: Options) {
         : undefined,
     );
     if (voice && voice !== true) return voice;
+    const webSettings = await webSettingsHttp(
+      request,
+      options.service,
+      origins,
+      options.voice?.configPath,
+      !!options.auth && !!human,
+    );
+    if (webSettings) return webSettings;
     if (file) return file;
     const reading = await readingHttp(request, options.service, origins);
     if (reading) return reading;

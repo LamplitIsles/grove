@@ -28,6 +28,19 @@ test("installed shared native isolates all role tool catalogs and authenticated 
   });
   let origin = "";
   const service = new HostService(app, { directory, origin: () => origin });
+  const fixture = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: (request) =>
+      new URL(request.url).pathname === "/error"
+        ? new Response("fixture failure", { status: 503 })
+        : new Response(
+            `<html><head><title>Fixture</title></head><body><main><h1>Fixture guide</h1><p>${"Fixture content with enough article text. ".repeat(40)}</p><a href="/linked">MCP fixture link</a></main></body></html>`,
+            {
+              headers: { "content-type": "text/html" },
+            },
+          ),
+  });
   const http = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -52,6 +65,36 @@ test("installed shared native isolates all role tool catalogs and authenticated 
       XDG_DATA_HOME: join(directory, "data"),
     },
   });
+  const previousCacheHome = process.env.XDG_CACHE_HOME;
+  process.env.XDG_CACHE_HOME = join(directory, "cache");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (
+      url.startsWith("https://context7.com/api/v1/search") &&
+      new URL(url).searchParams.get("query") === "rate-limit"
+    )
+      return new Response("fixture", { status: 429 });
+    if (url.startsWith("https://context7.com/api/v1/missing/library"))
+      return new Response("fixture", { status: 404 });
+    if (url.startsWith("https://context7.com/api/v1/search"))
+      return Response.json({
+        results: [
+          {
+            id: "/test/library",
+            title: "MCP docs library",
+            description: "fixture",
+            trustScore: 1,
+            totalSnippets: 1,
+          },
+        ],
+      });
+    if (url.startsWith("https://context7.com/api/v1/test/library"))
+      return new Response("MCP docs fixture");
+    if (url.startsWith(`http://127.0.0.1:${fixture.port}/`))
+      return originalFetch(input, init);
+    throw new Error(`Unexpected fixture request: ${url}`);
+  }) as typeof fetch;
   try {
     const orc = await app.createOrc("alpha");
     const token = runtime.agents.get(orc.id)!.token;
@@ -116,6 +159,14 @@ test("installed shared native isolates all role tool catalogs and authenticated 
       });
       const grove = status.data.find((s) => s.name === "flickgrove")!;
       expect(grove.toolsError).toBeNull();
+      for (const name of ["web_fetch_structured", "web_links"]) {
+        const description =
+          Object.values(grove.tools).find((tool) => tool?.name === name)
+            ?.description ?? "";
+        expect(description).toContain("localhost and private networks");
+        expect(description).toContain("public targets only");
+        expect(description).toContain("target domain and allowed CDNs");
+      }
       expect(
         Object.values(grove.tools)
           .map((t) => t!.name)
@@ -138,6 +189,67 @@ test("installed shared native isolates all role tool catalogs and authenticated 
           .map((t) => t!.name)
           .sort(),
       ).toEqual([...roleTools[agent.role]].sort());
+      const webResult = await client.call("mcpServer/tool/call", {
+        threadId,
+        server: "flickgrove",
+        tool: "web_links",
+        arguments: { url: `http://127.0.0.1:${fixture.port}/page` },
+      });
+      expect(webResult.isError).not.toBe(true);
+      expect(JSON.stringify(webResult)).toContain("MCP fixture link");
+      const invalid = await client.call("mcpServer/tool/call", {
+        threadId,
+        server: "flickgrove",
+        tool: "web_links",
+        arguments: { url: `http://127.0.0.1:${fixture.port}/page`, waitMs: 0 },
+      });
+      expect(invalid.isError).toBe(true);
+      for (const [tool, args, expected] of [
+        [
+          "web_fetch_structured",
+          { url: `http://127.0.0.1:${fixture.port}/page`, mode: "full" },
+          "MCP fixture link",
+        ],
+        ["web_docs_resolve", { query: "fixture" }, "MCP docs library"],
+        ["web_docs_fetch", { library_id: "/test/library" }, "MCP docs fixture"],
+      ] as const) {
+        const result = await client.call("mcpServer/tool/call", {
+          threadId,
+          server: "flickgrove",
+          tool,
+          arguments: args,
+        });
+        if (result.isError)
+          throw new Error(`${tool}: ${JSON.stringify(result)}`);
+        expect(JSON.stringify(result)).toContain(expected);
+      }
+      for (const [tool, args, expected] of [
+        [
+          "web_fetch_structured",
+          { url: `http://127.0.0.1:${fixture.port}/error` },
+          "HTTP 503",
+        ],
+        [
+          "web_links",
+          { url: `http://127.0.0.1:${fixture.port}/error` },
+          "HTTP 503",
+        ],
+        ["web_docs_resolve", { query: "rate-limit" }, "Settings → Web"],
+        [
+          "web_docs_fetch",
+          { library_id: "/missing/library" },
+          "web_docs_resolve",
+        ],
+      ] as const) {
+        const errorResult = await client.call("mcpServer/tool/call", {
+          threadId,
+          server: "flickgrove",
+          tool,
+          arguments: args,
+        });
+        expect(errorResult.isError).toBe(true);
+        expect(JSON.stringify(errorResult.content)).toContain(expected);
+      }
       if (agent.role === "orc") continue;
       const args =
         agent.role === "reviewer"
@@ -168,8 +280,12 @@ test("installed shared native isolates all role tool catalogs and authenticated 
       }
     }
   } finally {
+    globalThis.fetch = originalFetch;
+    if (previousCacheHome === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = previousCacheHome;
     await client.close();
     await http.stop(true);
+    fixture.stop(true);
     app.dispose();
     rmSync(directory, { recursive: true, force: true });
   }

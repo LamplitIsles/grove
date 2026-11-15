@@ -37,6 +37,7 @@
   import SessionList from "./SessionList.svelte";
   import AccountSettings from "./AccountSettings.svelte";
   import VoiceSettings from "./VoiceSettings.svelte";
+  import WebSettings from "./WebSettings.svelte";
   import MemberPresets from "./MemberPresets.svelte";
   import ConfigFiles from "./ConfigFiles.svelte";
   import InstanceBlockers from "./InstanceBlockers.svelte";
@@ -50,7 +51,7 @@
   let users = $state<Human[] | undefined>();
   const showAuthors = $derived((users?.length ?? 0) > 1);
   const currentUser = $derived(users?.find(person => person.id === user.id) ?? user);
-  let settingsPage = $state<"account" | "users" | "models" | "voice" | "grove">("account");
+  let settingsPage = $state<"account" | "users" | "models" | "voice" | "web" | "grove">("account");
   let instance = $state<InstanceStatus | null>(null), instanceError = $state(""), instanceNotice = $state(""), instanceStatusError = $state(""), instanceAction = $state(false);
   let instanceBusyError = false;
   let maintenanceAction = $state<"reload" | "restart">("restart"), confirmationInstance = $state<string | null>(null);
@@ -954,6 +955,7 @@
           <button class:active={settingsPage === "users"} aria-current={settingsPage === "users" ? "page" : undefined} onclick={() => settingsPage = "users"}>{m.users()}</button>
           <button class:active={settingsPage === "models"} aria-current={settingsPage === "models" ? "page" : undefined} onclick={() => settingsPage = "models"}>{m.models()}</button>
           <button class:active={settingsPage === "voice"} aria-current={settingsPage === "voice" ? "page" : undefined} onclick={() => settingsPage = "voice"}>{m.voice_settings()}</button>
+          <button class:active={settingsPage === "web"} aria-current={settingsPage === "web" ? "page" : undefined} onclick={() => settingsPage = "web"}>{m.web_settings()}</button>
           <button class:active={settingsPage === "grove"} aria-current={settingsPage === "grove" ? "page" : undefined} onclick={() => { settingsPage = "grove"; void refreshInstance(); }}>{m.grove_settings()}</button>
         </nav>
         <div class="settings-content">
@@ -963,6 +965,8 @@
             <section class="settings-section"><h2>{m.users()}</h2>{#if users}<ul class="account-users">{#each users as person (person.id)}<li><span class="account-avatar" style:background={person.color}>{person.name.slice(0,1).toUpperCase()}</span><span>{person.name}</span>{#if person.id === user.id}<small>{m.you()}</small>{/if}</li>{/each}</ul>{:else}<p>{m.loading_users()}</p>{/if}<div class="account-actions"><Button variant="outline" size="sm" disabled={inviteBusy} onclick={invite}>{m.create_invitation()}</Button></div>{#if invitation}<div class="invite-code"><code>{invitation.code}</code><Button variant="ghost" size="sm" onclick={() => navigator.clipboard.writeText(invitation!.code).then(() => toast.success(m.copied())).catch(() => toast.error(m.could_not_copy()))}>{m.copy()}</Button><small>{m.expires_at({time:new Date(invitation.expiresAt).toLocaleTimeString()})}</small></div>{/if}{#if inviteError}<p role="alert">{inviteError}</p>{/if}</section>
           {:else if settingsPage === "voice"}
             <VoiceSettings peerId={snapshot.entryId ?? ""} {connected} />
+          {:else if settingsPage === "web"}
+            <WebSettings peerId={snapshot.entryId ?? ""} {connected} />
           {:else if settingsPage === "grove"}
             <section class="settings-section instance-settings"><h2>{m.grove_settings()}</h2>
               <div class="instance-actions"><Button variant="outline" size="sm" disabled={!connected || !instance || !!instanceStatusError || (instance.busy && !instance.canConfirmBusy) || instanceAction || !!restartPending} onclick={() => beginMaintenance("reload")}>{instanceAction && !restartPending ? m.reloading_mcp() : m.reload_mcp()}</Button><Button variant="outline" size="sm" disabled={!connected || !instance || !!instanceStatusError || (instance.busy && !instance.canConfirmBusy) || !instance.restartAvailable || instanceAction || !!restartPending} onclick={() => beginMaintenance("restart")}>{m.restart_grove()}</Button></div>

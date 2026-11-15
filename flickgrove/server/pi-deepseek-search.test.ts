@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { openPiSession } from "./pi-session";
+import { callWebTool } from "./web-tools";
 import type { RuntimeAgent, RuntimeEvent } from "./runtime";
 
 test("vendored DeepSeek tools execute in an isolated Grove Pi session", async () => {
@@ -132,6 +133,36 @@ test("vendored DeepSeek tools execute in an isolated Grove Pi session", async ()
           : input.url;
     if (url.startsWith(`http://127.0.0.1:${model.port}/`))
       return originalFetch(input, init);
+    if (url === "https://fixture.example/error")
+      return new Response("fixture failure", { status: 503 });
+    if (url === "https://fixture.example/page")
+      return new Response(
+        `<html><head><title>Fixture</title></head><body><main><h1>Fixture guide</h1><p>${"Fixture content for this article. ".repeat(40)}</p><a href="/owned">Pi fixture link</a></main></body></html>`,
+        {
+          headers: { "content-type": "text/html" },
+        },
+      );
+    if (
+      url.startsWith("https://context7.com/api/v1/search") &&
+      new URL(url).searchParams.get("query") === "rate-limit"
+    )
+      return new Response("fixture", { status: 429 });
+    if (url.startsWith("https://context7.com/api/v1/missing/library"))
+      return new Response("fixture", { status: 404 });
+    if (url.startsWith("https://context7.com/api/v1/search"))
+      return Response.json({
+        results: [
+          {
+            id: "/test/library",
+            title: "Pi docs library",
+            description: "fixture",
+            trustScore: 1,
+            totalSnippets: 1,
+          },
+        ],
+      });
+    if (url.startsWith("https://context7.com/api/v1/test/library"))
+      return new Response("Pi docs fixture");
     if (!url.startsWith("https://api.deepseek.com/"))
       throw new Error("Unexpected network request");
     const headers = new Headers(init?.headers);
@@ -218,7 +249,8 @@ test("vendored DeepSeek tools execute in an isolated Grove Pi session", async ()
     agentDir,
     sessionDir: join(agentDir, "grove-durable"),
     selection: { provider: "fixture", model: "fake", effort: "off" },
-    tool: async () => ({ ok: true }),
+    tool: async (_token: string, name: string, args: unknown) =>
+      callWebTool(name as Parameters<typeof callWebTool>[0], args),
   };
   let handle = await openPiSession(agent, notify, options);
   const run = async (name: string, args: object) => {
@@ -233,7 +265,12 @@ test("vendored DeepSeek tools execute in an isolated Grove Pi session", async ()
       crypto.randomUUID(),
     );
     await done;
-    return JSON.stringify(modelBodies.at(-1).messages);
+    const messages = modelBodies.at(-1).messages;
+    const toolResult = messages
+      .filter((message: any) => message.role === "tool")
+      .at(-1);
+    expect(toolResult).toBeDefined();
+    return JSON.stringify(toolResult);
   };
   try {
     process.env.DEEPSEEK_API_KEY = "unused-environment-key";
@@ -250,6 +287,55 @@ test("vendored DeepSeek tools execute in an isolated Grove Pi session", async ()
     const names = modelBodies[0].tools.map((t: any) => t.function.name);
     expect(names).toContain("web_search");
     expect(names).toContain("web_fetch");
+    for (const name of [
+      "web_fetch_structured",
+      "web_links",
+      "web_docs_resolve",
+      "web_docs_fetch",
+    ])
+      expect(names).toContain(name);
+    const webOutput = await run("web_links", {
+      url: "https://fixture.example/page",
+    });
+    expect(webOutput).toContain("Pi fixture link");
+    expect(
+      await run("web_fetch_structured", {
+        url: "https://fixture.example/page",
+        mode: "full",
+      }),
+    ).toContain("Pi fixture link");
+    expect(await run("web_docs_resolve", { query: "fixture" })).toContain(
+      "Pi docs library",
+    );
+    expect(
+      await run("web_docs_fetch", { library_id: "/test/library" }),
+    ).toContain("Pi docs fixture");
+    for (const name of ["web_fetch_structured", "web_links"]) {
+      const description = modelBodies[0].tools.find(
+        (t: any) => t.function.name === name,
+      ).function.description;
+      expect(description).toContain("localhost and private networks");
+      expect(description).toContain("public targets only");
+      expect(description).toContain("target domain and allowed CDNs");
+    }
+    for (const [name, args, expected] of [
+      [
+        "web_fetch_structured",
+        { url: "https://fixture.example/error" },
+        "HTTP 503",
+      ],
+      ["web_links", { url: "https://fixture.example/error" }, "HTTP 503"],
+      ["web_docs_resolve", { query: "rate-limit" }, "Settings → Web"],
+      [
+        "web_docs_fetch",
+        { library_id: "/missing/library" },
+        "web_docs_resolve",
+      ],
+    ] as const) {
+      const result = await run(name, args);
+      expect(result).toContain("[error]");
+      expect(result).toContain(expected);
+    }
     expect(names).not.toContain("worker_start");
     output = await run("web_fetch", { url: "https://example.test/page" });
     expect(output).toContain("Owned markdown");

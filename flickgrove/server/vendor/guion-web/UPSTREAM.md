@@ -1,0 +1,1 @@
+Copied from GuionAI/web, https://github.com/guionai/web, revision d5ca0272e95a52a4ac236d276ee3c583be665609, packages/web-core/src. Licensed under Apache-2.0; see LICENSE. Includes fetch, links, documentation and their required support modules. Grove integrates these directly and does not use the upstream search providers.

@@ -314,6 +314,7 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
       "/api/voice/capability",
       "/api/voice/stream",
       "/api/voice/settings",
+      "/api/web/settings",
     ])
       expect((await call(path)).status).toBe(401);
     expect((await call("/preview/random/test.html")).status).toBe(410);
@@ -342,6 +343,54 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
     );
     expect(result.status).toBe(200);
     const session = cookie(result, "better-auth.session_token");
+    const webSettings = (
+      method: string,
+      key?: string,
+      peer = service.identity.id,
+      requestOrigin = origin,
+    ) =>
+      fetch(origin.replace("localhost", "127.0.0.1") + "/api/web/settings", {
+        method,
+        headers: {
+          host: `localhost:${server.port}`,
+          origin: requestOrigin,
+          cookie: session,
+          "x-grove-peer": peer,
+          ...(key === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(key === undefined
+          ? {}
+          : { body: JSON.stringify({ context7ApiKey: key }) }),
+      });
+    expect(await (await webSettings("GET")).json()).toEqual({
+      context7Configured: false,
+    });
+    expect((await webSettings("PUT", "fixture-key", "wrong-peer")).status).toBe(
+      403,
+    );
+    expect(
+      (
+        await webSettings(
+          "PUT",
+          "fixture-key",
+          service.identity.id,
+          "http://evil.invalid",
+        )
+      ).status,
+    ).toBe(403);
+    expect(await (await webSettings("PUT", "fixture-key")).json()).toEqual({
+      context7Configured: true,
+    });
+    expect(await (await webSettings("GET")).json()).toEqual({
+      context7Configured: true,
+    });
+    expect(await (await webSettings("PUT", "replacement-key")).json()).toEqual({
+      context7Configured: true,
+    });
+    expect((await webSettings("PUT", "invalid key")).status).toBe(400);
+    expect(await (await webSettings("DELETE")).json()).toEqual({
+      context7Configured: false,
+    });
     expect((await call("/api/identity", undefined, [session])).status).toBe(
       200,
     );
