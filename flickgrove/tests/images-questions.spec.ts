@@ -604,6 +604,12 @@ test("storage failure keeps complete editable draft; HTTP rejection preserves ne
   request,
 }) => {
   await setup(page, request, 1440);
+  await page
+    .getByRole("button", {
+      name: "Open Streaming voice input Orc",
+      exact: true,
+    })
+    .click();
   await add(page);
   await composer(page).fill("Never discard this");
   const info = await (await request.get(origin + "/fixture/info")).json();
@@ -669,6 +675,8 @@ test("storage failure keeps complete editable draft; HTTP rejection preserves ne
       questionCount: 2,
     },
   });
+  await expect(composer(page)).toHaveValue("Newer original-session draft");
+  await page.getByRole("button", { name: /pending question/ }).click();
   await expect(page.locator(".question-card")).toHaveCount(1);
   await page.screenshot({ path: `${shots}/desktop-questions-long.png` });
   await page.setViewportSize({ width: 390, height: 844 });

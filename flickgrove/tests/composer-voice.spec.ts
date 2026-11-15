@@ -1233,6 +1233,12 @@ test("question takeover cancels capture and late microphone while retaining the 
   request,
 }) => {
   await setup(page, request);
+  await page
+    .getByRole("button", {
+      name: "Open Streaming voice input Orc",
+      exact: true,
+    })
+    .click();
   await input(page).fill("Keep ordinary voice draft");
   await page.evaluate(() => ((window as any).capture.hold = true));
   await page
@@ -1248,6 +1254,8 @@ test("question takeover cancels capture and late microphone while retaining the 
       questionOptions: false,
     },
   });
+  await expect(input(page)).toBeVisible();
+  await page.getByRole("button", { name: /pending question/ }).click();
   await expect(page.locator(".question-panel")).toBeVisible();
   await expect(input(page)).not.toBeVisible();
   await page.evaluate(() => (window as any).capture.release());

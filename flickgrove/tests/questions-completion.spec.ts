@@ -51,6 +51,8 @@ for (const width of [1440, 390])
     );
     await page.keyboard.press("Escape");
     await expect(dialog).not.toBeVisible();
+    await expect(input(page)).toHaveValue("ordinary draft");
+    await page.getByRole("button", { name: /pending question/ }).click();
     await expect(panel(page).getByRole("heading", { level: 3 })).toHaveText(
       "foreground question 1",
     );
@@ -94,6 +96,8 @@ test("mobile New/Back and widening preserve questions and foreground hierarchy",
   await expect(field).toHaveValue("New draft");
   await expect(panel(page)).not.toBeVisible();
   await page.goBack();
+  await expect(input(page)).toHaveValue("navigation draft");
+  await page.getByRole("button", { name: /pending question/ }).click();
   await expect(panel(page).getByRole("heading", { level: 3 })).toHaveText(
     "deferred question 1",
   );
@@ -115,6 +119,7 @@ test("mobile New/Back and widening preserve questions and foreground hierarchy",
   await page
     .getByRole("button", { name: "Open Streaming voice input Orc" })
     .click();
+  await page.getByRole("button", { name: /pending question/ }).click();
   await expect(panel(page).locator("textarea")).toHaveValue("question draft");
 });
 test("unadmitted answer retains exact identity after reload and null lookup never replays", async ({

@@ -9,6 +9,7 @@
   import { canCaptureVoice, VoiceRecordingController, type VoiceRecordingStatus } from './voice-input';
   import { imagePreview, loadImages, saveImages, draftKey, operationKey, intakeError, IMAGE_ACCEPT, type ImageDraft } from './image-drafts';
   import { onMount, tick, untrack } from 'svelte';
+  import { registerComposerDraft } from './question-state.svelte';
   import type { Delivery, Skill } from './contracts';
   import SkillSearch from './SkillSearch.svelte';
   import * as m from './paraglide/messages';
@@ -19,6 +20,7 @@
     catch { draftReadable = false; return fallback; }
   }
   let text = $state(untrack(() => readDraft()));
+  let composerDraft: ReturnType<typeof registerComposerDraft> | undefined;
   let input = $state<HTMLTextAreaElement | null>(null);
   let composing = false;
   let images = $state<ImageDraft[]>([]); let previews = $state<string[]>([]); let imageError=$state(""); let preparing=$state(false); let ready=$state(false); let imageStorage=$state(true); let picker: HTMLInputElement; let active=true;
@@ -84,13 +86,14 @@
     return()=>{abort.abort();if(retry)clearTimeout(retry);};
   });
   onMount(()=>{
+    composerDraft = registerComposerDraft(agentId, text);
     const hidden=()=>{if(document.hidden)cancelVoice();else voiceSettingsRevision++;};
     const settingsChanged=()=>voiceSettingsRevision++;
     const navigating=(e:Event)=>{if(!(e as CustomEvent<{foreground:boolean}>).detail.foreground)cancelVoice();};
     const escape=(e:KeyboardEvent)=>{if(e.key==="Escape" && !e.isComposing && voiceBusy && !navigation.surfaces.length && !(e.target instanceof HTMLElement && e.target.closest(".title-editor"))){e.preventDefault();e.stopImmediatePropagation();cancelVoice();}};
     const timer=setInterval(()=>{voiceSeconds=Math.floor(voice.elapsedMs/1000);},500);
     window.addEventListener("keydown",escape,true);document.addEventListener("visibilitychange",hidden);window.addEventListener("focus",settingsChanged);window.addEventListener("pagehide",cancelVoice);window.addEventListener("grove-navigation-pop",navigating);window.addEventListener("grove-voice-settings-changed",settingsChanged);
-    return()=>{clearInterval(timer);voice.dispose();window.removeEventListener("keydown",escape,true);document.removeEventListener("visibilitychange",hidden);window.removeEventListener("focus",settingsChanged);window.removeEventListener("pagehide",cancelVoice);window.removeEventListener("grove-navigation-pop",navigating);window.removeEventListener("grove-voice-settings-changed",settingsChanged);};
+    return()=>{composerDraft?.dispose();clearInterval(timer);voice.dispose();window.removeEventListener("keydown",escape,true);document.removeEventListener("visibilitychange",hidden);window.removeEventListener("focus",settingsChanged);window.removeEventListener("pagehide",cancelVoice);window.removeEventListener("grove-navigation-pop",navigating);window.removeEventListener("grove-voice-settings-changed",settingsChanged);};
   });
   let ordinarySelection: {start: number; end: number} | undefined;
   $effect(() => {
@@ -181,6 +184,8 @@
 
   const skillOpen = $derived(navigation.surfaces.includes("skill")); let insertion = {start:0,end:0};
   $effect(() => {
+    const value = text;
+    composerDraft?.update(value);
     if(!draftReadable)return; // Never overwrite an unreadable stored draft with the display fallback.
     try { readingCache.writeDevice(`${storagePrefix}/composer/${agentId}`, text); }
     catch(e) { imageError=(e as Error).message; }
@@ -355,7 +360,7 @@
     {#if imageError}<p class="inline-error" role="alert">{imageError}</p>{/if}
     {#if queueError}<p class="inline-error" role="alert">{queueError}</p>{/if}
     {#if preparing}<p role="status">Preparing images…</p>{/if}
-    <Textarea onpaste={paste} bind:ref={input} bind:value={text} aria-label={m.message_orc()} placeholder={m.message_placeholder()} readonly={voiceBusy} disabled={stopping || submitting} rows={2} oncompositionstart={() => { composing = true; }} oncompositionend={() => { composing = false; }} onkeydown={keydown} />
+    <Textarea onpaste={paste} oninput={e => composerDraft?.update(e.currentTarget.value)} bind:ref={input} bind:value={text} aria-label={m.message_orc()} placeholder={m.message_placeholder()} readonly={voiceBusy} disabled={stopping || submitting} rows={2} oncompositionstart={() => { composing = true; }} oncompositionend={() => { composing = false; }} onkeydown={keydown} />
     {#if voiceError}<p class="inline-error" role="alert">{voiceError}</p>{/if}
     <div class="composer-bottom">
       <div class="composer-tools">
