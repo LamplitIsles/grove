@@ -710,3 +710,390 @@ test("same-turn question answers follow their question, provisional replacements
     late.app.detail(b.id).messages.filter((m) => m.clientId === "initial"),
   ).toHaveLength(1);
 });
+
+test("browser history filters identified Orc reports without changing pagination, member reads or unknown provenance", async () => {
+  const f = fixture();
+  const orc = await f.app.createOrc("alpha");
+  const ownerToken = f.runtime.agents.get(orc.id)!.token;
+  const worker = (await f.app.tool(ownerToken, "worker_start", {
+    project: "alpha",
+    title: "History reporter",
+    spec: "fixture",
+    message: "Member assignment visible",
+  })) as Detail;
+  await f.app.tool(f.runtime.agents.get(worker.id)!.token, "worker_report", {
+    message: "History report hidden",
+  });
+  const thread = orc.threadId!;
+  const report = f.runtime.historyItems
+    .get(thread)!
+    .find((m) => m.text.includes("History report hidden"))!;
+  f.runtime.emit(orc.id, {
+    type: "submission",
+    operationId: report.clientId!,
+    turnId: report.turnId!,
+    status: "unanswered",
+    reason: "aborted",
+  });
+  expect(f.app.recovery(orc.id, report.clientId!).error).toBe(
+    "Accepted input was cancelled by Stop.",
+  );
+  const others: Message[] = Array.from({ length: 61 }, (_, i) => ({
+    id: `history-${i}`,
+    role: "user",
+    text: `History ${i}`,
+    at: i + 1,
+  }));
+  others.splice(20, 0, {
+    id: "unassociated",
+    role: "user",
+    text: report.text,
+    at: 25,
+  });
+  others.splice(40, 0, report);
+  f.runtime.historyItems.set(thread, others);
+  const id = qualify(f.service.identity.id, orc.id);
+  for (const query of [
+    `agent=${encodeURIComponent(id)}`,
+    `project=alpha&thread=${encodeURIComponent(thread)}`,
+  ]) {
+    let cursor: string | null = null;
+    const result: Message[] = [];
+    do {
+      const response = await f.request(
+        `/messages?${query}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+      );
+      expect(response.ok).toBe(true);
+      const page = await response.json();
+      result.push(...page.messages);
+      cursor = page.nextCursor;
+    } while (cursor);
+    expect(result.some((m) => m.id === report.id)).toBe(false);
+    expect(result.some((m) => m.id === "unassociated")).toBe(true);
+    expect(result.filter((m) => m.id.startsWith("history-")).length).toBe(61);
+  }
+  expect(
+    (await f.service.agentHistory(id)).messages.some((m) => m.id === report.id),
+  ).toBe(true);
+  for (const query of [
+    `agent=${encodeURIComponent(id)}`,
+    `project=alpha&thread=${encodeURIComponent(thread)}`,
+  ]) {
+    expect(
+      (await f.request(`/body?${query}&item=${encodeURIComponent(report.id)}`))
+        .status,
+    ).toBe(404);
+    const body = await (
+      await f.request(`/body?${query}&item=unassociated`)
+    ).json();
+    expect(body.text).toBe(report.text);
+  }
+  expect(
+    (
+      await f.request(
+        `/recovery?agent=${encodeURIComponent(id)}&operation=${encodeURIComponent(report.clientId!)}`,
+      )
+    ).status,
+  ).toBe(404);
+  f.runtime.sendOverride = async () => {
+    throw new DeliveryRejected("Known rejection");
+  };
+  await f.app.tool(f.runtime.agents.get(worker.id)!.token, "worker_report", {
+    message: "Actionable failure",
+  });
+  const failed = f.app
+    .detail(orc.id)
+    .deliveries.find((d) => d.status === "failed")!;
+  const recovery = await f.request(
+    `/recovery?agent=${encodeURIComponent(id)}&operation=${encodeURIComponent(failed.id)}`,
+  );
+  expect(recovery.status).toBe(404);
+  expect(f.app.recovery(orc.id, failed.id).text).toContain(
+    "Actionable failure",
+  );
+  const member = (await f.app.tool(ownerToken, "worker_read", {
+    workerId: worker.id,
+  })) as { messages: Message[] };
+  expect(
+    member.messages.some((m) => m.text.includes("Member assignment visible")),
+  ).toBe(true);
+  const memberId = qualify(f.service.identity.id, worker.id);
+  const memberPage = await (
+    await f.request(`/messages?agent=${encodeURIComponent(memberId)}`)
+  ).json();
+  expect(
+    memberPage.messages.some((m: Message) =>
+      m.text.includes("Member assignment visible"),
+    ),
+  ).toBe(true);
+});
+
+test("browser recovery filters member statuses without losing non-member pages or raw ledger", async () => {
+  const f = fixture();
+  const orc = await f.app.createOrc("alpha");
+  const worker = (await f.app.tool(
+    f.runtime.agents.get(orc.id)!.token,
+    "worker_start",
+    {
+      project: "alpha",
+      title: "Reporter",
+      spec: "fixture",
+      message: "Member task visible",
+    },
+  )) as Detail;
+  const token = f.runtime.agents.get(worker.id)!.token;
+  await f.app.send(orc.id, "Start", "recovery-start");
+  f.runtime.emit(orc.id, {
+    type: "item",
+    turnId: f.app.detail(orc.id).turnId!,
+    item: {
+      type: "agentMessage",
+      id: "recovery-question",
+      delivery: "async",
+      questions: [{ question: "Choose?" }],
+    },
+  });
+  f.runtime.sendOverride = async () => {
+    throw new DeliveryRejected("user failure");
+  };
+  await f.app.send(orc.id, "Older human input", "older-human");
+  await f.app.answerBatch(
+    orc.id,
+    [{ questionId: "recovery-question:0", answer: "A" }],
+    "older-answer",
+  );
+  await Bun.sleep(5);
+  for (let i = 0; i < 101; i++)
+    await f.app.tool(token, "worker_report", {
+      message: `Private failed report ${i}`,
+    });
+  const raw = f.app.detail(orc.id).deliveries;
+  const member = raw.find(
+    (d) => d.source === "worker" && d.status === "failed",
+  )!;
+  const agentId = qualify(f.service.identity.id, orc.id),
+    id = encodeURIComponent(agentId);
+  const first = await (await f.request(`/deliveries?agent=${id}`)).json();
+  const rawFirst = f.service.recoveryPage(agentId);
+  const anchor = rawFirst.deliveries.at(-1)!;
+  expect(anchor.source).toBe("worker");
+  expect(first.nextCursor).toBeNull();
+  expect(new Set(first.deliveries.map((d: { id: string }) => d.id))).toEqual(
+    new Set(["older-human", "older-answer"]),
+  );
+  for (const d of raw.filter((d) => d.source === "worker")) {
+    expect(JSON.stringify(first)).not.toContain(d.id);
+    expect(JSON.stringify(first)).not.toContain(String(d.at));
+  }
+  // Existing clients may already hold an old raw cursor at a hidden member.
+  const resumed = await (
+    await f.request(
+      `/deliveries?agent=${id}&cursor=${encodeURIComponent(rawFirst.nextCursor!)}`,
+    )
+  ).json();
+  expect(resumed.deliveries.map((d: { id: string }) => d.id).sort()).toEqual([
+    "older-answer",
+    "older-human",
+  ]);
+  expect(resumed.nextCursor).toBeNull();
+  expect(
+    (
+      await f.request(
+        `/recovery?agent=${id}&operation=${encodeURIComponent(member.id)}`,
+      )
+    ).status,
+  ).toBe(404);
+  expect(
+    (await f.request(`/recovery?agent=${id}&operation=older-human`)).status,
+  ).toBe(200);
+  expect(
+    (await f.request(`/recovery?agent=${id}&operation=older-answer`)).status,
+  ).toBe(200);
+  expect(f.app.recovery(orc.id, member.id).status).toBe("failed");
+  expect(
+    (
+      await f.request(
+        `/member-status?agent=${id}&operation=${encodeURIComponent(member.id)}`,
+      )
+    ).status,
+  ).toBe(404);
+  expect(f.app.recovery(orc.id, member.id).text).toContain(
+    "Private failed report",
+  );
+  expect(f.service.recoveryPage(agentId).deliveries).toHaveLength(100);
+  expect(f.app.detail(orc.id).recoveryCount).toBe(103);
+
+  // Equal timestamps exercise the ID tie-breaker and a cursor between visible
+  // pages, with hidden member entries mixed into the same ledger ordering.
+  for (let i = 0; i < 105; i++) {
+    await f.app.send(
+      orc.id,
+      `Visible ${i}`,
+      `z-user-${String(i).padStart(3, "0")}`,
+    );
+    if (i === 97) {
+      const exact = await (await f.request(`/deliveries?agent=${id}`)).json();
+      expect(exact.deliveries).toHaveLength(100);
+      expect(exact.nextCursor).toBeNull();
+    }
+  }
+  const state = (
+    f.app as unknown as {
+      state: { agents: import("./runtime").RuntimeAgent[] };
+    }
+  ).state.agents.find((a) => a.id === orc.id)!;
+  for (const d of state.deliveries.filter((d) => d.status === "failed"))
+    d.at = 1_700_000_000_000;
+  const visible = state.deliveries
+    .filter((d) => d.status === "failed" && d.source !== "worker")
+    .sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+  const hidden = state.deliveries.filter((d) => d.source === "worker");
+  const page1 = await (await f.request(`/deliveries?agent=${id}`)).json();
+  expect(page1.deliveries.map((d: { id: string }) => d.id)).toEqual(
+    visible.slice(0, 100).map((d) => d.id),
+  );
+  expect(
+    JSON.parse(Buffer.from(page1.nextCursor, "base64url").toString()),
+  ).toEqual([visible[99]!.at, visible[99]!.id]);
+  const page2 = await (
+    await f.request(
+      `/deliveries?agent=${id}&cursor=${encodeURIComponent(page1.nextCursor)}`,
+    )
+  ).json();
+  expect(page2.deliveries.map((d: { id: string }) => d.id)).toEqual(
+    visible.slice(100).map((d) => d.id),
+  );
+  expect(page2.nextCursor).toBeNull();
+  for (const d of hidden) {
+    expect(JSON.stringify([page1, page2])).not.toContain(d.id);
+    expect(JSON.stringify([page1, page2])).not.toContain(d.text);
+  }
+  const rawPage1 = f.service.recoveryPage(agentId);
+  const rawPage2 = f.service.recoveryPage(agentId, rawPage1.nextCursor!);
+  const rawPage3 = f.service.recoveryPage(agentId, rawPage2.nextCursor!);
+  expect([
+    ...rawPage1.deliveries,
+    ...rawPage2.deliveries,
+    ...rawPage3.deliveries,
+  ]).toHaveLength(208);
+  expect(rawPage3.nextCursor).toBeNull();
+  // A distinctive member-only timestamp must not appear in a response or cursor.
+  for (const d of hidden) d.at = 1_800_000_000_001;
+  const distinct = await (await f.request(`/deliveries?agent=${id}`)).json();
+  expect(JSON.stringify(distinct)).not.toContain("1800000000001");
+  expect(
+    JSON.parse(Buffer.from(distinct.nextCursor, "base64url").toString()),
+  ).toEqual([visible[99]!.at, visible[99]!.id]);
+  const memberState = (
+    f.app as unknown as {
+      state: { agents: import("./runtime").RuntimeAgent[] };
+    }
+  ).state.agents.find((a) => a.id === worker.id)!;
+  memberState.deliveries.push({ ...hidden[0]!, id: "member-own-recovery" });
+  const qualifiedMember = qualify(f.service.identity.id, worker.id);
+  const ownPage = await (
+    await f.request(`/deliveries?agent=${encodeURIComponent(qualifiedMember)}`)
+  ).json();
+  expect(ownPage).toEqual(f.service.recoveryPage(qualifiedMember));
+  expect(
+    ownPage.deliveries.some(
+      (d: { id: string }) => d.id === "member-own-recovery",
+    ),
+  ).toBe(true);
+  let view: View | undefined;
+  const socket = socketWithHeaders(
+    f.origin.replace(/^http/, "ws") + "/api/socket",
+    { Origin: f.origin },
+  );
+  const client = await openGrove(
+    socket,
+    (v) => {
+      view = v;
+    },
+    () => {},
+  );
+  cleanups.push(() => client.close());
+  await client.call("select", { ids: [agentId] });
+  await until(() => !!view?.details[agentId]);
+  expect(view!.details[agentId].recoveryCount).toBe(107);
+  expect(
+    view!.snapshot.agents.find((a) => a.id === agentId)?.recoveryCount,
+  ).toBe(107);
+  const memberId = encodeURIComponent(
+    qualify(f.service.identity.id, worker.id),
+  );
+  const memberPage = await (
+    await f.request(`/messages?agent=${memberId}`)
+  ).json();
+  expect(
+    memberPage.messages.some((m: Message) =>
+      m.text.includes("Member task visible"),
+    ),
+  ).toBe(true);
+}, 30000);
+
+test("forwarded member question keeps native routing while browser history hides it", async () => {
+  const f = fixture(),
+    orc = await f.app.createOrc("alpha"),
+    owner = f.runtime.agents.get(orc.id)!.token;
+  const worker = (await f.app.tool(owner, "worker_start", {
+    project: "alpha",
+    title: "Asker",
+    spec: "fixture",
+    message: "work",
+  })) as Detail;
+  f.runtime.emit(worker.id, {
+    type: "item",
+    turnId: f.app.detail(worker.id).turnId!,
+    item: {
+      type: "agentMessage",
+      id: "member-ask",
+      delivery: "async",
+      text: "Member private context",
+      questions: [{ question: "Member question?" }],
+    },
+  });
+  const op = `report:${worker.id}:member-ask`;
+  await until(() =>
+    f.app
+      .detail(orc.id)
+      .deliveries.some((d) => d.id === op && d.status === "sent"),
+  );
+  const native = f.runtime.historyItems
+    .get(orc.threadId!)!
+    .find((m) => m.clientId === op)!;
+  expect(native).toBeDefined();
+  expect(f.runtime.inputs.filter((i) => i.clientId === op)).toHaveLength(1);
+  const id = encodeURIComponent(qualify(f.service.identity.id, orc.id));
+  const page = await (await f.request(`/messages?agent=${id}`)).json();
+  expect(page.messages.some((m: Message) => m.clientId === op)).toBe(false);
+  expect(
+    (await f.request(`/body?agent=${id}&item=${encodeURIComponent(native.id)}`))
+      .status,
+  ).toBe(404);
+  expect(
+    (
+      await f.request(
+        `/recovery?agent=${id}&operation=${encodeURIComponent(op)}`,
+      )
+    ).status,
+  ).toBe(404);
+  expect(f.app.recovery(orc.id, op).text).toContain("member-ask:0");
+  expect(
+    f.app.detail(worker.id).questions.find((q) => q.id === "member-ask:0")
+      ?.state,
+  ).toBe("delegated");
+  await f.app.tool(owner, "worker_send", {
+    workerId: worker.id,
+    message: "Use option A",
+    questionIds: ["member-ask:0"],
+  });
+  const reply = f.app.detail(worker.id).deliveries.at(-1)!;
+  expect(f.app.recovery(worker.id, reply.id).questionIds).toEqual([
+    "member-ask:0",
+  ]);
+  expect(
+    f.app.detail(worker.id).questions.find((q) => q.id === "member-ask:0")
+      ?.state,
+  ).toBe("answered");
+});

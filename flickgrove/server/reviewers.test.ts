@@ -207,11 +207,12 @@ test("Reviewer lifecycle crosses real Peer/Chord with target-bound reports, isol
       fixedPoint: "base",
       reviewedHead: "head1",
     });
-    const report = (
-      await client.call<Detail>("detail", {
-        id: qualify(service.identity.id, orc.id),
-      })
-    ).deliveries.at(-1)!;
+    const ownerId = qualify(service.identity.id, orc.id);
+    const browserOwner = await client.call<Detail>("detail", { id: ownerId });
+    expect(browserOwner.deliveries.some((d) => d.source === "reviewer")).toBe(
+      false,
+    );
+    const report = (await service.detail(ownerId)).deliveries.at(-1)!;
     expect(report).toMatchObject({
       source: "reviewer",
       reportingReviewerId: id,

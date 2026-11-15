@@ -17,6 +17,8 @@ import {
 } from "../src/chord-contract";
 const MAX_FRAME = 2 * 1024 * 1024;
 import { invoke } from "./chord-methods";
+import { browserDetail } from "./browser-presentation";
+import type { Detail } from "../src/contracts";
 import { DeliveryRejected, RequestRefused } from "./runtime";
 import { FollowUpRejected } from "./workspace";
 import type { HostService } from "./hosts";
@@ -54,6 +56,22 @@ function connect(socket: ServerWebSocket<SocketData>) {
     dirty = false;
   let refreshTask: Promise<void> | undefined,
     unobserve = () => {};
+  const presentDetail = (detail: Detail) =>
+    browserDetail(
+      detail,
+      detail.role === "orc" ? app.browserRecoveryCount(detail.id) : undefined,
+    );
+  const presentSnapshot = () => {
+    const snapshot = app.snapshot();
+    return {
+      ...snapshot,
+      agents: snapshot.agents.map((a) =>
+        a.role === "orc"
+          ? { ...a, recoveryCount: app.browserRecoveryCount(a.id) }
+          : a,
+      ),
+    };
+  };
   const refresh = () => {
     dirty = true;
     return (refreshTask ??= (async () => {
@@ -66,7 +84,7 @@ function connect(socket: ServerWebSocket<SocketData>) {
             await Promise.all(
               ids.map(async (id) => {
                 try {
-                  return [id, await app.detail(id)] as const;
+                  return [id, presentDetail(await app.detail(id))] as const;
                 } catch {
                   return null;
                 }
@@ -80,7 +98,7 @@ function connect(socket: ServerWebSocket<SocketData>) {
           continue;
         }
         const next = jsonValue<View>({
-          snapshot: app.snapshot(),
+          snapshot: presentSnapshot(),
           details,
           ...users(),
         });
@@ -101,7 +119,7 @@ function connect(socket: ServerWebSocket<SocketData>) {
     view = self.state(
       "view",
       {},
-      jsonValue<View>({ snapshot: app.snapshot(), details: {}, ...users() }),
+      jsonValue<View>({ snapshot: presentSnapshot(), details: {}, ...users() }),
     );
     return {
       variant: "default" as const,
@@ -162,14 +180,56 @@ function connect(socket: ServerWebSocket<SocketData>) {
             }
           }
           const parsed = inputs[member as Method].parse(input);
+          if (
+            [
+              "lookup",
+              "finalizeSubmission",
+              "inspectRetry",
+              "reserveRetry",
+              "deleteFailedSubmission",
+              "retryDelivery",
+            ].includes(member)
+          ) {
+            const p = parsed as {
+              id: string;
+              operationId?: string;
+              deliveryId?: string;
+            };
+            if (
+              app.browserMemberOperation(
+                p.id,
+                p.operationId ?? p.deliveryId ?? "",
+              )
+            ) {
+              if (member === "lookup" || member === "finalizeSubmission")
+                return { ok: true, value: null };
+              if (member === "retryDelivery") {
+                invoked = true;
+                await invoke(app, member, parsed, principal.userId);
+                return {
+                  ok: true,
+                  value: jsonValue(presentDetail(await app.detail(p.id))),
+                };
+              }
+              throw new RequestRefused("Delivery unavailable");
+            }
+          }
           invoked = true;
-          return {
-            ok: true,
-            value: jsonValue(
-              (await invoke(app, member as Method, parsed, principal.userId)) ??
-                null,
-            ),
-          };
+          const result = await invoke(
+            app,
+            member as Method,
+            parsed,
+            principal.userId,
+          );
+          const value =
+            result &&
+            typeof result === "object" &&
+            "messages" in result &&
+            "deliveries" in result &&
+            "role" in result
+              ? presentDetail(result as Detail)
+              : result;
+          return { ok: true, value: jsonValue(value ?? null) };
         } catch (error) {
           return {
             ok: false,

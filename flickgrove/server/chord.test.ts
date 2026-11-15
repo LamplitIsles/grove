@@ -1594,3 +1594,454 @@ test("close status reports open after failed release without retrying it", async
   expect(releases).toBe(1);
   expect(f.runtime.inputs).toHaveLength(0);
 });
+
+test("member reports do not reach Orc Chord views while native notification lags admission", async () => {
+  const f = fixture("ordered");
+  const held: (() => void)[] = [];
+  const open = f.runtime.open.bind(f.runtime);
+  f.runtime.open = (agent, notify) =>
+    open(agent, (event) => {
+      if (
+        event.type === "item" &&
+        event.item.type === "userMessage" &&
+        event.item.text?.includes("Report marker #150")
+      )
+        held.push(() => notify(event));
+      else notify(event);
+    });
+  const orc = await f.app.createOrc("alpha");
+  const worker = (await f.app.tool(
+    f.runtime.agents.get(orc.id)!.token,
+    "worker_start",
+    {
+      project: "alpha",
+      title: "Reporter",
+      spec: "fixture",
+      message: "task",
+    },
+  )) as Detail;
+  const id = qualify(f.service.identity.id, orc.id);
+  const seen: Detail[] = [];
+  const client = await f.client((view) => {
+    if (view.details[id]) seen.push(view.details[id]);
+  });
+  await client.call("select", { ids: [id] });
+  await f.app.tool(f.runtime.agents.get(worker.id)!.token, "worker_report", {
+    message: "Report marker #150",
+  });
+  expect(held).toHaveLength(1);
+  await until(() => seen.some((d) => d.state === "working"));
+  await Bun.sleep(1000);
+  expect(
+    f.app
+      .detail(orc.id)
+      .messages.some(
+        (m) => m.provisional && m.text.includes("Report marker #150"),
+      ),
+  ).toBe(true);
+  expect(
+    seen
+      .flatMap((d) => d.messages)
+      .some((m) => m.text.includes("Report marker #150")),
+  ).toBe(false);
+  expect(
+    (await client.call<Detail>("detail", { id })).messages.some((m) =>
+      m.text.includes("Report marker #150"),
+    ),
+  ).toBe(false);
+  held[0]();
+  await until(() =>
+    f.app
+      .detail(orc.id)
+      .messages.some(
+        (m) => m.text.includes("Report marker #150") && !m.provisional,
+      ),
+  );
+  const reconnected = await f.client();
+  await reconnected.call("select", { ids: [id] });
+  expect(
+    (await reconnected.call<Detail>("detail", { id })).messages.some((m) =>
+      m.text.includes("Report marker #150"),
+    ),
+  ).toBe(false);
+  const memberId = qualify(f.service.identity.id, worker.id);
+  expect(
+    (await reconnected.call<Detail>("detail", { id: memberId })).messages.some(
+      (m) => m.text.includes("task"),
+    ),
+  ).toBe(true);
+  expect(
+    f.runtime.inputs.filter(
+      (i) => i.agentId === orc.id && i.text.includes("Report marker #150"),
+    ),
+  ).toHaveLength(1);
+});
+
+test("browser hides member reports in every state while the raw ledger retains them", async () => {
+  const f = fixture("ordered");
+  const orc = await f.app.createOrc("alpha");
+  const worker = (await f.app.tool(
+    f.runtime.agents.get(orc.id)!.token,
+    "worker_start",
+    {
+      project: "alpha",
+      title: "Reporter",
+      spec: "fixture",
+      message: "task",
+    },
+  )) as Detail;
+  const id = qualify(f.service.identity.id, orc.id);
+  const client = await f.client();
+  const gate = Promise.withResolvers<string>();
+  f.runtime.sendOverride = async (agentId, _text, turn) =>
+    agentId === orc.id ? gate.promise : turn!;
+  const token = f.runtime.agents.get(worker.id)!.token;
+  const first = f.app.tool(token, "worker_report", { message: "Held report" });
+  await until(() =>
+    f.app
+      .detail(orc.id)
+      .deliveries.some((d) => d.source === "worker" && d.status === "sending"),
+  );
+  const second = f.app.tool(token, "worker_report", {
+    message: "Queued report",
+  });
+  await until(() =>
+    f.app
+      .detail(orc.id)
+      .deliveries.some((d) => d.source === "worker" && d.status === "queued"),
+  );
+  const raw = f.app
+    .detail(orc.id)
+    .deliveries.filter((d) => d.source === "worker");
+  const detail = await client.call<Detail>("detail", { id });
+  expect(detail.deliveries.filter((d) => d.source === "worker")).toEqual([]);
+  expect(detail.recoveryCount).toBe(0);
+  for (const delivery of raw)
+    expect(
+      await client.call("lookup", { id, operationId: delivery.id }),
+    ).toBeNull();
+  expect(detail.messages.some((m) => m.text.includes("report"))).toBe(false);
+  gate.resolve("owner-turn");
+  await Promise.all([first, second]);
+  f.runtime.sendOverride = async () => {
+    throw new DeliveryRejected("Rejected report");
+  };
+  await f.app.tool(token, "worker_report", { message: "Failure report" });
+  f.runtime.sendOverride = async () => {
+    throw new Error("Unknown report");
+  };
+  await f.app.tool(token, "worker_report", { message: "Unknown report" });
+  const sentId = raw[0].id;
+  f.runtime.emit(orc.id, {
+    type: "submission",
+    operationId: sentId,
+    turnId: "late-error",
+    status: "unanswered",
+    reason: "aborted",
+  });
+  const actual = f.app
+    .detail(orc.id)
+    .deliveries.filter((d) => d.source === "worker");
+  const browser = await client.call<Detail>("detail", { id });
+  expect(browser.deliveries.filter((d) => d.source === "worker")).toEqual([]);
+  expect(browser.recoveryCount).toBe(0);
+  expect(
+    actual.filter((d) => ["failed", "uncertain"].includes(d.status)),
+  ).toHaveLength(2);
+  for (const delivery of actual) {
+    expect(
+      await client.call("lookup", { id, operationId: delivery.id }),
+    ).toBeNull();
+    expect(
+      await client.call("finalizeSubmission", {
+        id,
+        operationId: delivery.id,
+        envelope: { source: "user", text: "fixture" },
+      }),
+    ).toBeNull();
+  }
+  expect(actual.filter((d) => d.status === "sent").map((d) => d.id)).toEqual(
+    raw.map((d) => d.id),
+  );
+  expect(f.runtime.inputs.filter((i) => i.agentId === orc.id)).toHaveLength(4);
+  f.runtime.sendOverride = async () => {
+    throw new DeliveryRejected("explicit retry rejected");
+  };
+  const failed = actual.find((d) => d.status === "failed")!;
+  const retried = await client.call<Detail>("retryDelivery", {
+    id,
+    deliveryId: failed.id,
+  });
+  expect(retried.deliveries.some((d) => d.source === "worker")).toBe(false);
+  expect(retried.recoveryCount).toBe(0);
+  expect(f.app.recovery(orc.id, failed.id).status).toBe("failed");
+  expect(f.runtime.inputs.filter((i) => i.agentId === orc.id)).toHaveLength(5);
+});
+
+test("native report item arriving before send returns is hidden by its original operation identity", async () => {
+  const f = fixture("ordered");
+  const orc = await f.app.createOrc("alpha");
+  const worker = (await f.app.tool(
+    f.runtime.agents.get(orc.id)!.token,
+    "worker_start",
+    {
+      project: "alpha",
+      title: "Early item",
+      spec: "fixture",
+      message: "task",
+    },
+  )) as Detail;
+  const id = qualify(f.service.identity.id, orc.id);
+  let latest: View | undefined;
+  const client = await f.client((view) => (latest = view));
+  await client.call("select", { ids: [id] });
+  const hold = Promise.withResolvers<string>();
+  f.runtime.sendOverride = async (agentId, text, turn) => {
+    if (agentId === orc.id) {
+      const operation = f.runtime.inputs.at(-1)!.clientId!;
+      f.runtime.emit(agentId, {
+        type: "item",
+        turnId: "early-turn",
+        item: {
+          type: "userMessage",
+          id: "early-native",
+          clientId: operation,
+          text,
+        },
+      });
+      return hold.promise;
+    }
+    return turn!;
+  };
+  const reporting = f.app.tool(
+    f.runtime.agents.get(worker.id)!.token,
+    "worker_report",
+    { message: "Early item marker" },
+  );
+  try {
+    await until(() =>
+      f.app.detail(orc.id).messages.some((m) => m.id === "early-native"),
+    );
+    await until(() => !!latest?.details[id]);
+    await Bun.sleep(50);
+    expect(
+      latest!.details[id].messages.some((m) =>
+        m.text.includes("Early item marker"),
+      ),
+    ).toBe(false);
+    expect(
+      (await client.call<Detail>("detail", { id })).messages.some(
+        (m) => m.id === "early-native",
+      ),
+    ).toBe(false);
+    expect(
+      f.app.detail(orc.id).messages.find((m) => m.id === "early-native")
+        ?.delivery?.source,
+    ).toBe("worker");
+  } finally {
+    hold.resolve("early-turn");
+    await reporting;
+  }
+});
+
+test("direct Orc questions remain visible to the browser", async () => {
+  const f = fixture("ordered");
+  const orc = await f.app.createOrc("alpha");
+  await f.app.send(orc.id, "Start", "start");
+  f.runtime.emit(orc.id, {
+    type: "item",
+    turnId: f.app.detail(orc.id).turnId!,
+    item: {
+      type: "agentMessage",
+      id: "direct-question",
+      delivery: "async",
+      text: "Need your decision",
+      questions: [{ question: "Which option?" }],
+    },
+  });
+  const client = await f.client();
+  const id = qualify(f.service.identity.id, orc.id);
+  const detail = await client.call<Detail>("detail", { id });
+  expect(
+    detail.questions.some(
+      (q) => q.itemId === "direct-question" && q.state === "unanswered",
+    ),
+  ).toBe(true);
+  expect(
+    detail.messages.some(
+      (m) =>
+        m.id === "direct-question" && m.questionItemId === "direct-question",
+    ),
+  ).toBe(true);
+  const { operationId } = await client.call<{ operationId: string }>(
+    "reserveSubmission",
+    { id },
+  );
+  await client.call("answerBatch", {
+    id,
+    answers: [{ questionId: "direct-question:0", answer: "Option A" }],
+    operationId,
+  });
+  expect(
+    f.app.detail(orc.id).questions.find((q) => q.id === "direct-question:0")
+      ?.state,
+  ).toBe("answered");
+});
+
+test("member delegated questions reach the Orc natively but not its browser", async () => {
+  const f = fixture("ordered"),
+    orc = await f.app.createOrc("alpha");
+  const owner = f.runtime.agents.get(orc.id)!.token;
+  const worker = (await f.app.tool(owner, "worker_start", {
+    project: "alpha",
+    title: "Reporter",
+    spec: "fixture",
+    message: "Work",
+  })) as Detail;
+  const itemId = "member-question",
+    questionId = `${itemId}:0`;
+  f.runtime.emit(worker.id, {
+    type: "item",
+    turnId: f.app.detail(worker.id).turnId!,
+    item: {
+      type: "agentMessage",
+      id: itemId,
+      delivery: "async",
+      text: "Member context",
+      questions: [{ question: "Member decision?" }],
+    },
+  });
+  await until(() =>
+    f.app
+      .detail(orc.id)
+      .deliveries.some(
+        (d) =>
+          d.source === "worker" &&
+          d.id === `report:${worker.id}:${itemId}` &&
+          d.status === "sent",
+      ),
+  );
+  const forwarded = f.app
+    .detail(orc.id)
+    .deliveries.find((d) => d.id === `report:${worker.id}:${itemId}`)!;
+  expect(
+    f.runtime.inputs.filter(
+      (i) => i.agentId === orc.id && i.clientId === forwarded.id,
+    ),
+  ).toHaveLength(1);
+  expect(f.app.recovery(orc.id, forwarded.id).text).toContain(questionId);
+  expect(
+    f.app.detail(worker.id).questions.find((q) => q.id === questionId)?.state,
+  ).toBe("delegated");
+  const client = await f.client(),
+    id = qualify(f.service.identity.id, orc.id);
+  await client.call("select", { ids: [id] });
+  const browser = await client.call<Detail>("detail", { id });
+  expect(browser.deliveries.some((d) => d.id === forwarded.id)).toBe(false);
+  expect(browser.messages.some((m) => m.clientId === forwarded.id)).toBe(false);
+  const history = await f.service.agentHistory(id);
+  expect(history.messages.some((m) => m.clientId === forwarded.id)).toBe(true);
+  await f.app.tool(owner, "worker_send", {
+    workerId: worker.id,
+    message: "Use option A",
+    questionIds: [questionId],
+  });
+  expect(
+    f.app.detail(worker.id).questions.find((q) => q.id === questionId)?.state,
+  ).toBe("answered");
+  const reply = f.app.detail(worker.id).deliveries.at(-1)!;
+  expect(f.app.recovery(worker.id, reply.id).questionIds).toEqual([questionId]);
+});
+
+async function failedMemberRetryFixture() {
+  const f = fixture("ordered");
+  const orc = await f.app.createOrc("alpha");
+  const worker = (await f.app.tool(
+    f.runtime.agents.get(orc.id)!.token,
+    "worker_start",
+    {
+      project: "alpha",
+      title: "Reporter",
+      spec: "fixture",
+      message: "task",
+    },
+  )) as Detail;
+  f.runtime.sendOverride = async () => {
+    throw new DeliveryRejected("Initial rejection");
+  };
+  await f.app.tool(f.runtime.agents.get(worker.id)!.token, "worker_report", {
+    message: "Retry report",
+  });
+  const operation = f.app
+    .detail(orc.id)
+    .deliveries.find((d) => d.source === "worker" && d.status === "failed")!.id;
+  const id = qualify(f.service.identity.id, orc.id);
+  const client = await f.client();
+  return { f, orc, operation, id, client };
+}
+
+test("member retry reports unknown when native acceptance cannot be persisted", async () => {
+  const { f, orc, operation, id, client } = await failedMemberRetryFixture();
+  const gate = Promise.withResolvers<void>();
+  f.runtime.sendOverride = async (_agent, _text, turn) => {
+    await gate.promise;
+    return turn ?? "retry-turn";
+  };
+  f.app.store.sqlite.exec(
+    `CREATE TRIGGER fail_member_retry BEFORE UPDATE ON deliveries WHEN NEW.operation_id = '${operation}' AND NEW.status = 'sent' BEGIN SELECT RAISE(ABORT, 'fixture member retry commit failure'); END`,
+  );
+  try {
+    const pending = client
+      .call("retryDelivery", { id, deliveryId: operation })
+      .catch((e) => e);
+    await until(
+      () =>
+        f.runtime.inputs.filter((i) => i.clientId === operation).length === 2,
+    );
+    await Bun.sleep(50);
+    gate.resolve();
+    const error = await pending;
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) throw new Error("Expected retry error");
+    expect(error.message).toContain("fixture member retry commit failure");
+    expect(
+      f.runtime.historyItems
+        .get(orc.threadId!)!
+        .filter((m) => m.clientId === operation),
+    ).toHaveLength(1);
+    expect(
+      f.app.store.sqlite
+        .query(
+          "SELECT status FROM deliveries WHERE session_id = ? AND operation_id = ?",
+        )
+        .get(orc.id, operation),
+    ).toEqual({ status: "sending" });
+    await Bun.sleep(50);
+    expect(
+      f.runtime.inputs.filter((i) => i.clientId === operation),
+    ).toHaveLength(2);
+    expect(error).not.toBeInstanceOf(RequestRejected);
+  } finally {
+    gate.resolve();
+  }
+});
+
+test("member retry preserves explicit maintenance rejection without another native input", async () => {
+  const { f, orc, operation, id, client } = await failedMemberRetryFixture();
+  await until(() => f.app.instanceActivity().canConfirmBusy);
+  f.app.beginMaintenance(true);
+  try {
+    const error = await client
+      .call("retryDelivery", { id, deliveryId: operation })
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(RequestRejected);
+    if (!(error instanceof Error)) throw new Error("Expected retry error");
+    expect(error.message).toContain("maintenance");
+    expect(f.app.recovery(orc.id, operation).status).toBe("failed");
+    expect(
+      f.runtime.inputs.filter((i) => i.clientId === operation),
+    ).toHaveLength(1);
+  } finally {
+    f.app.endMaintenance();
+  }
+});

@@ -9,6 +9,7 @@ import {
   memberPresetsFixtureSync,
 } from "../server/testing";
 import { projectConversation } from "../src/conversation-projection";
+import { browserDetail, browserMessages } from "../server/browser-presentation";
 import type { Detail, Message, Delivery } from "../src/contracts";
 
 test("confirmed forwarded member questions are hidden across live and native history", async () => {
@@ -104,6 +105,14 @@ test("confirmed forwarded member questions are hidden across live and native his
     };
     let live = app.detail(orc.id);
     check(live.messages, live.deliveries);
+    const browser = browserDetail(live);
+    for (const id of questionIds) {
+      expect(browser.messages.some((m) => m.clientId === id)).toBe(false);
+      expect(browser.deliveries.some((d) => d.id === id)).toBe(false);
+      expect(
+        runtime.inputs.filter((i) => i.agentId === orc.id && i.clientId === id),
+      ).toHaveLength(1);
+    }
     runtime.emit(orc.id, {
       type: "item",
       turnId: app.detail(orc.id).turnId!,
@@ -118,6 +127,9 @@ test("confirmed forwarded member questions are hidden across live and native his
     check(live.messages, live.deliveries);
     const history = await app.agentHistory(orc.id);
     check(history.messages);
+    const browserHistory = browserMessages(history.messages);
+    for (const id of questionIds)
+      expect(browserHistory.some((m) => m.clientId === id)).toBe(false);
   } finally {
     app.dispose();
     await rm(directory, { recursive: true, force: true });

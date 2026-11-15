@@ -137,6 +137,39 @@ test("reconnect latest pages fill the middle gap in native order and then resume
   expect(entry.cursor).toBe("older-history");
 });
 
+for (const olderCursor of [null, "earlier"] as const) {
+  test(`reconnect fills a gap after empty filtered pages with older cursor ${olderCursor}`, async () => {
+    const cache = new HistoryCache();
+    const entry = cache.get("peer:a", "thread");
+    await cache.load("peer:a", entry, async () => ({
+      messages: [message("old")],
+      nextCursor: olderCursor,
+    }));
+    await cache.refresh("peer:a", entry, 2, async () => ({
+      messages: [],
+      nextCursor: "gap-1",
+    }));
+    expect(entry.cursor).toBe("gap-1");
+    await cache.load("peer:a", entry, async (cursor) => {
+      expect(cursor).toBe("gap-1");
+      return { messages: [], nextCursor: "gap-2" };
+    });
+    expect(entry.cursor).toBe("gap-2");
+    await cache.load("peer:a", entry, async () => ({
+      messages: [message("middle")],
+      nextCursor: "gap-3",
+    }));
+    expect(entry.messages.map((m) => m.id)).toEqual(["old", "middle"]);
+    await cache.load("peer:a", entry, async () => ({
+      messages: [message("old")],
+      nextCursor: "ignored",
+    }));
+    expect(entry.messages.map((m) => m.id)).toEqual(["old", "middle"]);
+    expect(entry.cursor).toBe(olderCursor);
+    expect(entry.gap).toBeUndefined();
+  });
+}
+
 test("history cache retains native classification across refresh and page overlap", async () => {
   const cache = new HistoryCache();
   const entry = cache.get("peer:agent", "thread");

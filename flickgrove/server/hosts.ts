@@ -311,6 +311,19 @@ export class HostService {
       deliveries: page.deliveries.map((d) => this.qualifyDelivery(d)),
     };
   }
+  browserRecoveryPage(id: string, cursor?: string) {
+    const page = this.workspace.browserRecoveryPage(this.raw(id), cursor);
+    return {
+      ...page,
+      deliveries: page.deliveries.map((d) => this.qualifyDelivery(d)),
+    };
+  }
+  browserRecoveryCount(id: string) {
+    return this.workspace.browserRecoveryCount(this.raw(id));
+  }
+  browserMemberOperation(id: string, operationId: string) {
+    return this.workspace.browserMemberOperation(this.raw(id), operationId);
+  }
   recovery(id: string, operationId: string) {
     return this.qualifyDelivery(
       this.workspace.recovery(this.raw(id), operationId),
@@ -328,6 +341,19 @@ export class HostService {
     selection: { item?: string; operation?: string },
   ) {
     return this.workspace.historyQuestions(alias, threadId, selection);
+  }
+  browserBodyMessage(
+    id: string | undefined,
+    alias: string,
+    threadId: string,
+    itemId: string,
+  ) {
+    return this.workspace.browserBodyMessage(
+      id ? this.raw(id) : undefined,
+      alias,
+      threadId,
+      itemId,
+    );
   }
   messageBody(id: string, itemId: string) {
     return this.workspace.messageBody(this.raw(id), itemId);

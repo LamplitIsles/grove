@@ -201,13 +201,14 @@ test("Researcher survives two real Peer/Chord boundaries, async questions/report
     hold.resolve("owner-turn");
     await reporting;
     a.runtime.sendOverride = undefined;
-    const report = detailSchema
-      .parse(
-        await a.client.call("detail", {
-          id: qualify(a.service.identity.id, owner.id),
-        }),
-      )
-      .deliveries.at(-1)!;
+    const ownerId = qualify(a.service.identity.id, owner.id);
+    const browserOwner = detailSchema.parse(
+      await a.client.call("detail", { id: ownerId }),
+    );
+    expect(browserOwner.deliveries.some((d) => d.source === "researcher")).toBe(
+      false,
+    );
+    const report = (await a.service.detail(ownerId)).deliveries.at(-1)!;
     expect(report).toMatchObject({
       source: "researcher",
       reportingResearcherId: id,

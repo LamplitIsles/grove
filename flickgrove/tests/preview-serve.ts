@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import sharp from "sharp";
 import { Workspace } from "../server/workspace";
+import { DeliveryRejected } from "../server/runtime";
 import { HostService } from "../server/hosts";
 import { createHandler, createUpgrade } from "../server/http";
 import type { ServerWebSocket } from "bun";
@@ -376,6 +377,11 @@ const origin = process.env.PREVIEW_AUTH
 let offline = false;
 const sockets = new Set<ServerWebSocket<SocketData>>();
 let local = await unit("Local", "#355d98", () => origin);
+let recoveryFixture:
+  | { agent: string; worker: string; operation: string }
+  | undefined;
+let recoveryRetryGate: { resolve: () => void } | undefined;
+let memberGapFixture: { agent: string; worker: string } | undefined;
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: 14320,
@@ -406,6 +412,199 @@ const server = Bun.serve({
     );
     if (upgraded) return upgraded === true ? undefined : upgraded;
     const url = new URL(request.url);
+    if (url.pathname === "/fixture/member-gap" && request.method === "POST") {
+      const { older } = (await request.json()) as { older: boolean };
+      const agent = await local.app.createOrc("fixture", defaults);
+      await local.app.rename(agent.id, "Gap diagnostic");
+      const owner = local.runtime.agents.get(agent.id)!;
+      const worker = (await local.app.tool(owner.token, "worker_start", {
+        project: "fixture",
+        title: "Gap reporter",
+        spec: "fixture",
+        message: "task",
+      })) as { id: string };
+      if (older)
+        for (let i = 0; i < 35; i++)
+          await local.app.send(
+            agent.id,
+            `Earlier gap ${i}`,
+            `gap-earlier-${i}`,
+          );
+      await local.app.send(agent.id, "Old gap #150", "gap-old");
+      memberGapFixture = { agent: agent.id, worker: worker.id };
+      return Response.json({ id: `${local.service.identity.id}:${agent.id}` });
+    }
+    if (
+      url.pathname === "/fixture/member-gap-append" &&
+      request.method === "POST"
+    ) {
+      const d = memberGapFixture!;
+      await local.app.send(d.agent, "Middle gap #150", "gap-middle");
+      const token = local.runtime.agents.get(d.worker)!.token;
+      for (let i = 0; i < 135; i++)
+        await local.app.tool(token, "worker_report", {
+          message: `Gap hidden report ${i}`,
+        });
+      return Response.json({ ok: true });
+    }
+    if (
+      url.pathname === "/fixture/member-recovery" &&
+      request.method === "POST"
+    ) {
+      const { mode } = (await request.json()) as {
+        mode: "failure" | "unknown";
+      };
+      const agent = await local.app.createOrc("fixture", defaults);
+      await local.app.rename(agent.id, "Recovery diagnostic");
+      const owner = local.runtime.agents.get(agent.id)!;
+      const worker = (await local.app.tool(owner.token, "worker_start", {
+        project: "fixture",
+        title: "Recovery reporter",
+        spec: "fixture",
+        message: "task",
+      })) as { id: string };
+      const token = local.runtime.agents.get(worker.id)!.token;
+      local.runtime.sendOverride = async (id, text, turn) => {
+        if (id !== agent.id) return turn ?? "worker-turn";
+        if (text.includes("Target old report") && mode === "unknown")
+          throw new Error("Target uncertain #150");
+        throw new DeliveryRejected(
+          text.includes("Target old report")
+            ? "Target failed #150"
+            : "Filler failure #150",
+        );
+      };
+      try {
+        await local.app.tool(token, "worker_report", {
+          message: "Target old report",
+        });
+        const operation = local.app
+          .detail(agent.id)
+          .deliveries.find((d) => d.source === "worker")!.id;
+        await Bun.sleep(5);
+        for (let i = 0; i < 101; i++)
+          await local.app.tool(token, "worker_report", {
+            message: `Filler ${i}`,
+          });
+        recoveryFixture = { agent: agent.id, worker: worker.id, operation };
+      } finally {
+        local.runtime.sendOverride = undefined;
+      }
+      return Response.json({ id: `${local.service.identity.id}:${agent.id}` });
+    }
+    if (
+      url.pathname === "/fixture/member-recovery-hold" &&
+      request.method === "POST"
+    ) {
+      const d = recoveryFixture!;
+      const { outcome } = (await request.json()) as {
+        outcome: "failed" | "uncertain";
+      };
+      const gate = Promise.withResolvers<void>();
+      recoveryRetryGate = gate;
+      local.runtime.sendOverride = async (id, _text, turn) => {
+        if (id !== d.agent) return turn ?? "worker-turn";
+        await gate.promise;
+        local.runtime.sendOverride = undefined;
+        if (outcome === "failed")
+          throw new DeliveryRejected("Retry rejected #150");
+        throw new Error("Retry uncertain #150");
+      };
+      return Response.json({ ok: true });
+    }
+    if (
+      url.pathname === "/fixture/member-recovery-release" &&
+      request.method === "POST"
+    ) {
+      recoveryRetryGate?.resolve();
+      recoveryRetryGate = undefined;
+      return Response.json({ ok: true });
+    }
+    if (
+      url.pathname === "/fixture/member-recovery-retry" &&
+      request.method === "POST"
+    ) {
+      const d = recoveryFixture!;
+      void local.app.retryDelivery(d.agent, d.operation).catch(() => {});
+      return Response.json({ ok: true });
+    }
+    if (
+      url.pathname === "/fixture/member-recovery-questions" &&
+      request.method === "POST"
+    ) {
+      const d = recoveryFixture!;
+      local.runtime.emit(d.worker, {
+        type: "item",
+        turnId: local.app.detail(d.worker).turnId!,
+        item: {
+          type: "agentMessage",
+          id: "member-ask-150",
+          delivery: "async",
+          text: "Member context #150",
+          questions: [{ question: "Member question #150" }],
+        },
+      });
+      local.runtime.emit(d.agent, {
+        type: "item",
+        turnId: local.app.detail(d.agent).turnId ?? "fixture-turn",
+        item: {
+          type: "agentMessage",
+          id: "orc-ask-150",
+          delivery: "async",
+          text: "Orc context #150",
+          questions: [{ question: "Orc question #150" }],
+        },
+      });
+      return Response.json({ ok: true });
+    }
+    if (
+      url.pathname === "/fixture/member-recovery-confirm" &&
+      request.method === "POST"
+    ) {
+      const d = recoveryFixture!;
+      const raw = local.app.recovery(d.agent, d.operation);
+      local.runtime.emit(d.agent, {
+        type: "item",
+        turnId: "confirmed-recovery",
+        item: {
+          type: "userMessage",
+          id: "recovery-native",
+          clientId: d.operation,
+          text: raw.text,
+        },
+      });
+      return Response.json({
+        status: local.app.recovery(d.agent, d.operation).status,
+      });
+    }
+    if (
+      url.pathname === "/fixture/member-recovery-error" &&
+      request.method === "POST"
+    ) {
+      const d = recoveryFixture!;
+      local.runtime.emit(d.agent, {
+        type: "submission",
+        operationId: d.operation,
+        turnId: "late-recovery-error",
+        status: "unanswered",
+        reason: "aborted",
+      });
+      return Response.json({
+        error: local.app.recovery(d.agent, d.operation).error,
+      });
+    }
+    if (url.pathname === "/fixture/member-recovery-state") {
+      const d = recoveryFixture!;
+      return Response.json({
+        status: local.app.recovery(d.agent, d.operation).status,
+        orcQuestion: local.app
+          .detail(d.agent)
+          .questions.find((q) => q.id === "orc-ask-150:0")?.state,
+        sends: local.runtime.inputs.filter(
+          (i) => i.agentId === d.agent && i.clientId === d.operation,
+        ).length,
+      });
+    }
     if (
       url.pathname === "/fixture/member-anchor" &&
       request.method === "POST"

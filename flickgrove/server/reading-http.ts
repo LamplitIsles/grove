@@ -1,5 +1,6 @@
 import type { HostService } from "./hosts";
 import { authorizeRead } from "./peer-http";
+import { browserMessages, browserRecoveries } from "./browser-presentation";
 export async function readingHttp(
   request: Request,
   service: HostService,
@@ -22,30 +23,50 @@ export async function readingHttp(
     switch (url.pathname) {
       case "/api/read/outline":
         return respond(service.userMessageOutline(agent));
-      case "/api/read/window":
-        return respond(
-          await service.agentMessageWindow(agent, {
-            operation: p.get("operation") ?? undefined,
-            cursor,
-            direction: p.get("direction") ?? undefined,
-          }),
-        );
-      case "/api/read/messages":
-        return respond(
-          agent
-            ? await service.agentHistory(agent, cursor)
-            : await service.historyMessages(project, thread, cursor),
-        );
-      case "/api/read/body":
-        return respond({
-          text: agent
-            ? await service.messageBody(agent, p.get("item") ?? "")
-            : await service.historyBody(project, thread, p.get("item") ?? ""),
+      case "/api/read/window": {
+        const page = await service.agentMessageWindow(agent, {
+          operation: p.get("operation") ?? undefined,
+          cursor,
+          direction: p.get("direction") ?? undefined,
         });
-      case "/api/read/deliveries":
-        return respond(service.recoveryPage(agent, cursor));
-      case "/api/read/recovery":
-        return respond(service.recovery(agent, p.get("operation") ?? ""));
+        return respond({ ...page, messages: browserMessages(page.messages) });
+      }
+      case "/api/read/messages": {
+        const page = agent
+          ? await service.agentHistory(agent, cursor)
+          : await service.historyMessages(project, thread, cursor);
+        const role = agent
+          ? (await service.detail(agent)).role
+          : (await service.historySession(project, thread)).role;
+        return respond(
+          role === "orc"
+            ? { ...page, messages: browserMessages(page.messages) }
+            : page,
+        );
+      }
+      case "/api/read/body": {
+        const { role, message } = await service.browserBodyMessage(
+          agent || undefined,
+          project,
+          thread,
+          p.get("item") ?? "",
+        );
+        if (role === "orc" && !browserMessages([message]).length)
+          return respond({ error: "Message body unavailable" }, 404);
+        return respond({ text: message.text });
+      }
+      case "/api/read/deliveries": {
+        return respond(service.browserRecoveryPage(agent, cursor));
+      }
+      case "/api/read/recovery": {
+        const delivery = service.recovery(agent, p.get("operation") ?? "");
+        if (
+          (await service.detail(agent)).role === "orc" &&
+          !browserRecoveries([delivery]).length
+        )
+          return respond({ error: "Delivery unavailable" }, 404);
+        return respond(delivery);
+      }
       case "/api/read/questions":
         return respond(
           agent

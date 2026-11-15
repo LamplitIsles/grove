@@ -163,7 +163,7 @@ export async function readingPage(
     };
   }
 }
-export async function nativeBody(
+export async function nativeMessage(
   runtime: Runtime,
   threadId: string,
   itemId: string,
@@ -172,8 +172,16 @@ export async function nativeBody(
   do {
     const page = await runtime.historyMessages(threadId, cursor);
     const message = page.messages.find((m) => m.id === itemId);
-    if (message) return message.text;
+    if (message) return message;
     cursor = page.nextCursor ?? undefined;
   } while (cursor);
   throw new Error("Message body unavailable");
+}
+
+export async function nativeBody(
+  runtime: Runtime,
+  threadId: string,
+  itemId: string,
+) {
+  return (await nativeMessage(runtime, threadId, itemId)).text;
 }

@@ -1,4 +1,5 @@
 import { MessageNavigation } from "./message-navigation";
+import { memberDelivery } from "./browser-presentation";
 import { codexMessageKind } from "./message-kind";
 import {
   associate,
@@ -6,6 +7,7 @@ import {
   recentWindow,
   readingPage,
   nativeBody,
+  nativeMessage,
   deliveryMetadata,
   type HistoryReadBudget,
 } from "./conversation-reading";
@@ -1601,7 +1603,36 @@ export class Workspace {
       stop();
     }
   }
+  browserMemberOperation(id: string, operationId: string) {
+    const a = this.readableAgent(
+      this.state.agents.find((agent) => agent.id === id) ?? this.store.byId(id),
+    );
+    if (!a) throw new Error("Agent not found");
+    return (
+      a.role === "orc" &&
+      memberDelivery(a.deliveries.find((d) => d.id === operationId))
+    );
+  }
+  browserRecoveryCount(id: string) {
+    const a = this.agent(id);
+    return a.deliveries.filter(
+      (d) =>
+        d.mode !== "follow_up" &&
+        d.status !== "sent" &&
+        (a.role !== "orc" || !memberDelivery(d)),
+    ).length;
+  }
   recoveryPage(id: string, cursor?: string) {
+    return this.recoveryPageFor(id, cursor, false);
+  }
+  browserRecoveryPage(id: string, cursor?: string) {
+    return this.recoveryPageFor(id, cursor, true);
+  }
+  private recoveryPageFor(
+    id: string,
+    cursor: string | undefined,
+    browser: boolean,
+  ) {
     const before = cursor
       ? JSON.parse(Buffer.from(cursor, "base64url").toString())
       : null;
@@ -1614,11 +1645,13 @@ export class Workspace {
     )
       throw new Error("Invalid recovery cursor");
     // Position is the immutable ledger key, even when its record is deleted.
-    const records = this.agent(id)
-      .deliveries.filter(
+    const a = this.agent(id);
+    const records = a.deliveries
+      .filter(
         (d) =>
           d.mode !== "follow_up" &&
           d.status !== "sent" &&
+          (!browser || a.role !== "orc" || !memberDelivery(d)) &&
           (!before ||
             d.at < before[0] ||
             (d.at === before[0] && d.id < before[1])),
@@ -1711,6 +1744,33 @@ export class Workspace {
         "Question record unavailable. Retry from the conversation.",
       );
     return this.questionHistory(agent.id, selection);
+  }
+  async browserBodyMessage(
+    id: string | undefined,
+    alias: string,
+    threadId: string,
+    itemId: string,
+  ) {
+    let agent: RuntimeAgent | undefined;
+    if (id) {
+      agent = this.agent(id);
+      if (!agent.threadId) throw new Error("Native session unavailable");
+      threadId = agent.threadId;
+    } else {
+      await this.historySession(alias, threadId);
+      agent = this.readableAgent(
+        this.state.agents.find((a) => a.threadId === threadId) ??
+          this.store.byThread(threadId),
+      );
+    }
+    const message = await nativeMessage(this.options.runtime, threadId, itemId);
+    return {
+      role: agent?.role,
+      message: questionEntry(
+        associate(message, agent?.deliveries ?? []),
+        agent?.questions ?? [],
+      ),
+    };
   }
   async messageBody(id: string, itemId: string) {
     const a = this.agent(id);

@@ -531,6 +531,22 @@ test("external MCP authenticates each SDK request and uses isolated workspace se
       status: "unanswered",
       reason: "aborted",
     });
+    const rawRecoveries = await call(client, "list_deliveries", {
+      session_id: sid,
+    });
+    expect(
+      rawRecoveries.deliveries.some(
+        (d: { id: string }) => d.id === memberInput.clientId,
+      ),
+    ).toBe(false);
+    expect(
+      (
+        await client.callTool({
+          name: "read_delivery",
+          arguments: { session_id: sid, delivery_id: memberInput.clientId },
+        })
+      ).isError,
+    ).toBe(true);
     await app.tool(runtime.agents.get(workerRaw)!.token, "worker_report", {
       message: "small member awaiting reconciliation",
     });
@@ -548,6 +564,96 @@ test("external MCP authenticates each SDK request and uses isolated workspace se
     )!;
     smallDelivery.status = "uncertain";
     smallDelivery.error = "fixture pending receipt";
+    const memberRecoveries = await call(client, "list_deliveries", {
+      session_id: sid,
+    });
+    expect(
+      memberRecoveries.deliveries.find(
+        (d: { id: string }) => d.id === smallInput.clientId,
+      ),
+    ).toMatchObject({ status: "uncertain", source: "worker" });
+    const memberRecovery = await call(client, "read_delivery", {
+      session_id: sid,
+      delivery_id: smallInput.clientId,
+    });
+    expect(memberRecovery.delivery.text).toContain(
+      "small member awaiting reconciliation",
+    );
+    // Browser and external MCP page over the same ledger, with different
+    // presentation rules; external retains its raw cursor and body access.
+    const originalDeliveries = [...state.deliveries];
+    try {
+      for (const source of ["worker", "user"] as const)
+        for (let i = 0; i < 105; i++)
+          state.deliveries.push({
+            ...structuredClone(smallDelivery),
+            id: `cursor-${source}-${String(i).padStart(3, "0")}`,
+            source,
+            status: "failed",
+            at: 1_700_000_000_000,
+          });
+      let cursor: string | undefined;
+      const rawIds: string[] = [];
+      do {
+        const rawPage = service.recoveryPage(sid, cursor);
+        const externalPage = await call(client, "list_deliveries", {
+          session_id: sid,
+          ...(cursor ? { cursor } : {}),
+        });
+        expect(
+          externalPage.deliveries.map((d: { id: string }) => d.id),
+        ).toEqual(rawPage.deliveries.map((d) => d.id));
+        expect(externalPage.nextCursor).toBe(rawPage.nextCursor);
+        rawIds.push(...rawPage.deliveries.map((d) => d.id));
+        cursor = rawPage.nextCursor ?? undefined;
+      } while (cursor);
+      expect(rawIds).toContain("cursor-worker-000");
+      expect(
+        (
+          await call(client, "read_delivery", {
+            session_id: sid,
+            delivery_id: "cursor-worker-000",
+          })
+        ).delivery.status,
+      ).toBe("failed");
+      const browserIds: string[] = [];
+      cursor = undefined;
+      do {
+        const url = new URL("/api/read/deliveries", origin);
+        url.searchParams.set("agent", sid);
+        if (cursor) url.searchParams.set("cursor", cursor);
+        const response = await fetch(url, {
+          headers: {
+            Origin: origin,
+            cookie: "alice",
+            "X-Grove-Peer": service.identity.id,
+          },
+        });
+        expect(response.status).toBe(200);
+        const page = await response.json();
+        browserIds.push(...page.deliveries.map((d: { id: string }) => d.id));
+        if (page.nextCursor) {
+          const [, anchor] = JSON.parse(
+            Buffer.from(page.nextCursor, "base64url").toString(),
+          );
+          expect(anchor).toBe(page.deliveries.at(-1).id);
+          expect(anchor).not.toStartWith("cursor-worker-");
+        }
+        expect(JSON.stringify(page)).not.toContain("cursor-worker-");
+        cursor = page.nextCursor ?? undefined;
+      } while (cursor);
+      expect(browserIds).toEqual(
+        rawIds.filter(
+          (id) => id !== smallDelivery.id && !id.startsWith("cursor-worker-"),
+        ),
+      );
+    } finally {
+      state.deliveries.splice(
+        0,
+        state.deliveries.length,
+        ...originalDeliveries,
+      );
+    }
     await app.tool(runtime.agents.get(workerRaw)!.token, "worker_report", {
       message: "still uncertain without native evidence",
     });

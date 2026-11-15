@@ -20,7 +20,7 @@ export type LoadedHistory = {
       newerCursor: string | null;
     }[];
   };
-  gap?: { until: string; olderCursor: string | null; before: string };
+  gap?: { until: string; olderCursor: string | null; before?: string };
 };
 
 // Native history only: no DOM, live messages, or persistent message copies.
@@ -160,14 +160,11 @@ export class HistoryCache {
         if (entry.gap) {
           const gap = entry.gap;
           const returned = new Set(page.messages.map((m) => m.id));
+          const boundary = gap.before
+            ? entry.messages.findIndex((m) => m.id === gap.before)
+            : entry.messages.length;
           const prefix = entry.messages
-            .slice(
-              0,
-              Math.max(
-                0,
-                entry.messages.findIndex((m) => m.id === gap.before),
-              ),
-            )
+            .slice(0, boundary < 0 ? entry.messages.length : boundary)
             .filter((m) => !returned.has(m.id));
           const suffix = entry.messages.filter(
             (m) => !returned.has(m.id) && !prefix.some((p) => p.id === m.id),
@@ -228,11 +225,11 @@ export class HistoryCache {
           ...entry.messages.filter((m) => !returned.has(m.id)),
           ...page.messages,
         ];
-        if (!overlap && until && page.messages.length && page.nextCursor) {
+        if (!overlap && until && page.nextCursor) {
           entry.gap = {
             until,
             olderCursor: entry.cursor,
-            before: page.messages[0].id,
+            before: page.messages[0]?.id,
           };
           entry.cursor = page.nextCursor;
         }
