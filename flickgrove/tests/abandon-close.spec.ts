@@ -15,7 +15,8 @@ test.afterAll(async () => {
   server.kill("SIGTERM");
   await exited;
 });
-const action = "Abandon unconfirmed submissions and close";
+const action = "Close session";
+const heading = "Close this session?";
 const shots = "../.scratch/abandon-unconfirmed-session/screenshots";
 async function seed(page: Page, target: string, other: string) {
   await page.goto("/");
@@ -40,6 +41,7 @@ async function seed(page: Page, target: string, other: string) {
     { target, other },
   );
   await page.reload();
+  await openSidebar(page);
   const rows = page.getByRole("button", {
     name: "Open New session Orc",
     exact: true,
@@ -64,13 +66,25 @@ async function journal(page: Page, id: string) {
     id,
   );
 }
+async function closeIntent(page: Page, id: string) {
+  return page.evaluate(
+    (id) =>
+      localStorage.getItem(
+        `flickgrove/${location.origin}/abandon-close/${encodeURIComponent(id)}`,
+      ) !== null,
+    id,
+  );
+}
 async function close(page: Page) {
   await page.keyboard.press("Alt+KeyX");
   await expect(page.getByRole("dialog")).toBeVisible();
-  await expect(page.getByRole("heading", { name: action })).toBeVisible();
+  await expect(page.getByRole("heading", { name: heading })).toBeVisible();
 }
 async function swipeClose(page: Page, target: string) {
-  const row = page.locator(`[data-swipe-id="${target}"]`);
+  const row = page
+    .locator(".session-row")
+    .filter({ has: page.locator(`.session-open[data-agent-id="${target}"]`) })
+    .first();
   const box = (await row.boundingBox())!;
   const cdp = await page.context().newCDPSession(page);
   await cdp.send("Input.dispatchTouchEvent", {
@@ -94,7 +108,7 @@ for (const [name, viewport] of [
   ["desktop", { width: 1440, height: 900 }],
   ["mobile", { width: 390, height: 844 }],
 ] as const) {
-  test(`${name}: guarded Close → explicit abandon → pruned journal and stable reload`, async ({
+  test(`${name}: confirmed Close preserves journal and stable reload`, async ({
     page,
     request,
   }) => {
@@ -106,16 +120,13 @@ for (const [name, viewport] of [
     if (name === "mobile") {
       await page.goBack();
       await swipeClose(page, target);
-      await expect(page.getByRole("heading", { name: action })).toBeVisible();
+      await expect(page.getByRole("heading", { name: heading })).toBeVisible();
     } else await close(page);
     expect(await journal(page, target)).toBe(1);
     await expect(
-      page.getByText("Reception of these submissions is still unknown.", {
+      page.getByText("Some work or deliveries need attention.", {
         exact: false,
       }),
-    ).toBeVisible();
-    await expect(
-      page.getByText("original-unknown", { exact: true }),
     ).toBeVisible();
     await page.screenshot({ path: `${shots}/${name}-confirmation.png` });
     expect(
@@ -124,11 +135,9 @@ for (const [name, viewport] of [
     await page.getByRole("button", { name: "Cancel", exact: true }).click();
     expect(await journal(page, target)).toBe(1);
     if (name === "mobile") {
+      await openSidebar(page);
       await page
-        .getByRole("heading", { name: "Sessions", exact: true })
-        .click();
-      await page
-        .getByRole("button", { name: "Open New session Orc", exact: true })
+        .locator(`.session-open[data-agent-id="${target}"]`)
         .first()
         .click();
     }
@@ -137,7 +146,8 @@ for (const [name, viewport] of [
     ).toHaveValue("Target unsent draft");
     await close(page);
     await page.getByRole("button", { name: action, exact: true }).click();
-    await expect.poll(() => journal(page, target)).toBe(0);
+    await expect.poll(() => closeIntent(page, target)).toBe(false);
+    expect(await journal(page, target)).toBe(1);
     expect(await journal(page, other)).toBe(1);
     expect(await journal(page, "other-peer:session")).toBe(1);
     expect(
@@ -168,7 +178,7 @@ for (const [name, viewport] of [
       page.getByRole("textbox", { name: "Message Orc" }),
     ).toHaveValue("Other draft preserved");
     await expect(page.getByRole("dialog")).toHaveCount(0);
-    expect(await journal(page, target)).toBe(0);
+    expect(await journal(page, target)).toBe(1);
     expect((await (await request.get("/fixture/info")).json()).inputs).toBe(1);
     await page.screenshot({ path: `${shots}/${name}-closed.png` });
   });
@@ -200,11 +210,18 @@ test("native failure keeps journal; explicit retry reads before confirming and b
     false,
   );
   await request.post("/fixture/change", { data: { closeFailure: false } });
-  await confirm.click();
-  await expect.poll(() => journal(page, target)).toBe(0);
+  await page
+    .getByRole("button", { name: "Check close status", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "previous close result remains unknown",
+  );
+  await page.getByRole("button", { name: action, exact: true }).click();
+  await expect.poll(() => closeIntent(page, target)).toBe(false);
+  expect(await journal(page, target)).toBe(1);
 });
 
-test("new unknown after confirmation is not silently abandoned", async ({
+test("new unknown before confirmation remains in the closed history", async ({
   page,
   request,
 }) => {
@@ -213,15 +230,17 @@ test("new unknown after confirmation is not silently abandoned", async ({
   await close(page);
   await request.post("/fixture/change", { data: { newUnknown: true } });
   await page.getByRole("button", { name: action, exact: true }).click();
-  await expect(
-    page
-      .getByRole("alert")
-      .filter({ hasText: "Unconfirmed submissions changed" }),
-  ).toBeVisible();
-  expect(await journal(page, target)).toBe(1);
-  expect((await (await request.get("/fixture/info")).json()).closed).toBe(
-    false,
-  );
+  await expect
+    .poll(
+      async () => (await (await request.get("/fixture/info")).json()).closed,
+    )
+    .toBe(true);
+  const info = await (await request.get("/fixture/info")).json();
+  expect(
+    info.deliveries
+      .filter((d: { status: string }) => d.status === "uncertain")
+      .map((d: { id: string }) => d.id),
+  ).toEqual(["original-unknown", "new-unknown"]);
 });
 
 test("lost close response reads confirmed closed state and clears once without replay", async ({
@@ -240,7 +259,7 @@ test("lost close response reads confirmed closed state and clears once without r
           if (
             (window as any).dropCloseResult &&
             frame.args?.member === "closeTree" &&
-            frame.args.input?.abandonUnknownOperationIds
+            frame.args.input?.confirmRisks
           )
             closeId = frame.id;
           send(data);
@@ -265,12 +284,15 @@ test("lost close response reads confirmed closed state and clears once without r
     (window as any).dropCloseResult = true;
   });
   await page.getByRole("button", { name: action, exact: true }).click();
-  await expect.poll(() => journal(page, target), { timeout: 40_000 }).toBe(0);
+  await expect
+    .poll(() => closeIntent(page, target), { timeout: 40_000 })
+    .toBe(false);
+  expect(await journal(page, target)).toBe(1);
   expect(await (await request.get("/fixture/info")).json()).toMatchObject({
     closed: true,
     inputs: 1,
-    closeCalls: 2,
-  }); // Ordinary refusal + one explicit mutation.
+    closeCalls: 1,
+  }); // Exactly one confirmed mutation.
 });
 
 test("active turn arriving during confirmation keeps journal and session open", async ({
@@ -281,24 +303,24 @@ test("active turn arriving during confirmation keeps journal and session open", 
   await seed(page, target, other);
   await close(page);
   await request.post("/fixture/change", { data: { active: true } });
-  await page.getByRole("button", { name: action, exact: true }).click();
   await expect(
-    page.getByRole("alert").filter({ hasText: "cannot abandon" }),
-  ).toBeVisible();
+    page.getByRole("button", { name: action, exact: true }),
+  ).toBeDisabled();
   expect(await journal(page, target)).toBe(1);
   expect((await (await request.get("/fixture/info")).json()).closed).toBe(
     false,
   );
 });
 
-test("late close candidate cannot open over a different conversation", async ({
+test("cancelling close preserves subsequent conversation navigation", async ({
   page,
   request,
 }) => {
   const { target, other } = await (await request.post("/fixture/reset")).json();
   await seed(page, target, other);
-  await request.post("/fixture/change", { data: { candidateDelay: 400 } });
   await page.keyboard.press("Alt+KeyX");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.locator(".agent-detail").click({ position: { x: 5, y: 5 } });
   await page.keyboard.press("Alt+KeyJ");
   await expect(page.getByRole("textbox", { name: "Message Orc" })).toHaveValue(
     "Other draft preserved",
@@ -330,7 +352,7 @@ test("committed close survives owner unavailable through catch, reconnect and re
       const frame = JSON.parse(String(data));
       if (
         frame.args?.member === "closeTree" &&
-        frame.args.input?.abandonUnknownOperationIds
+        frame.args.input?.confirmRisks
       ) {
         explicitId = frame.id;
         held = true;
@@ -358,7 +380,7 @@ test("committed close survives owner unavailable through catch, reconnect and re
   expect(await (await request.get("/fixture/info")).json()).toMatchObject({
     closed: true,
     lookup: null,
-    closeCalls: 2,
+    closeCalls: 1,
   });
   await expect(
     page
@@ -371,23 +393,21 @@ test("committed close survives owner unavailable through catch, reconnect and re
       .getByRole("button", { name: "Check close status", exact: true })
       .first(),
   ).toBeVisible();
-  await expect(
-    page.getByRole("heading", { name: action, exact: true }),
-  ).toBeVisible();
   expect(await journal(page, target)).toBe(1);
   unavailable = false;
-  await expect.poll(() => journal(page, target)).toBe(0);
+  await expect.poll(() => closeIntent(page, target)).toBe(false);
+  expect(await journal(page, target)).toBe(1);
   expect(await journal(page, other)).toBe(1);
   expect(await journal(page, "other-peer:session")).toBe(1);
   await page.reload();
   await expect(page.getByRole("textbox", { name: "Message Orc" })).toHaveValue(
     "Other draft preserved",
   );
-  expect(await journal(page, target)).toBe(0);
+  expect(await journal(page, target)).toBe(1);
   expect(await (await request.get("/fixture/info")).json()).toMatchObject({
     closed: true,
     lookup: null,
-    closeCalls: 2,
+    closeCalls: 1,
     original: { id: "original-unknown", status: "uncertain" },
   });
 });
@@ -401,7 +421,7 @@ test("scoped cleanup failure keeps reachable error and read-only retry after det
   await close(page);
   await page.evaluate((target) => {
     const remove = Storage.prototype.removeItem;
-    const key = `flickgrove/${location.origin}/outgoing/${encodeURIComponent(target)}/original-unknown`;
+    const key = `flickgrove/${location.origin}/abandon-close/${encodeURIComponent(target)}`;
     Storage.prototype.removeItem = function (k) {
       if (k === key)
         throw new DOMException("owned cleanup denied", "SecurityError");
@@ -472,13 +492,14 @@ test("scoped cleanup failure keeps reachable error and read-only retry after det
     });
   }
   await page.reload(); // Restores the unmodified storage API; recovery performs a fresh closed read.
-  await expect.poll(() => journal(page, target)).toBe(0);
+  await expect.poll(() => closeIntent(page, target)).toBe(false);
+  expect(await journal(page, target)).toBe(1);
   expect(await journal(page, other)).toBe(1);
   expect(await journal(page, "other-peer:session")).toBe(1);
   expect(await (await request.get("/fixture/info")).json()).toMatchObject({
     closed: true,
     lookup: null,
-    closeCalls: 2,
+    closeCalls: 1,
   });
 });
 
@@ -506,7 +527,7 @@ test("close-intent persistence failure prevents native close and preserves pendi
   expect(await (await request.get("/fixture/info")).json()).toMatchObject({
     closed: false,
     lookup: null,
-    closeCalls: 1,
+    closeCalls: 0,
   });
 });
 
@@ -532,7 +553,7 @@ async function holdRecoveryRead(page: Page, target: () => string | undefined) {
         if (
           control.dropClose &&
           call.member === "closeTree" &&
-          call.input.abandonUnknownOperationIds
+          call.input.confirmRisks
         ) {
           control.dropClose = false;
           control.closed = true;
@@ -541,9 +562,9 @@ async function holdRecoveryRead(page: Page, target: () => string | undefined) {
           return;
         }
         if (
-          call.member === "abandonCloseCandidate" &&
-          ((control.closed && frame.value?.value?.closed) ||
-            (control.open && frame.value?.value?.closed === false))
+          call.member === "closeStatus" &&
+          ((control.closed && frame.value?.value?.status === "closed") ||
+            (control.open && frame.value?.value?.status === "open"))
         ) {
           held.push(() => socket.send(data));
           return;
@@ -575,28 +596,16 @@ test("A recovery preserves B's current confirmation, original IDs and draft", as
   await close(page);
   const dialog = page.getByRole("dialog");
   const before = await dialog.innerText();
-  const bOriginal = await page.evaluate(
-    (other) =>
-      JSON.parse(
-        localStorage.getItem(
-          Object.keys(localStorage).find(
-            (k) =>
-              k.includes(`/outgoing/${encodeURIComponent(other)}/`) &&
-              !k.endsWith("other-pending"),
-          )!,
-        )!,
-      ).id,
-    other,
-  );
-  expect(before).toContain(bOriginal);
+  expect(before).toContain("Close this session?");
   recovery.closed = false;
   recovery.held.splice(0).forEach((release) => release());
-  await expect.poll(() => journal(page, target)).toBe(0);
+  await expect.poll(() => closeIntent(page, target)).toBe(false);
+  expect(await journal(page, target)).toBe(1);
   expect(await dialog.innerText()).toBe(before);
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(input).toHaveValue("B unsent draft");
   expect((await (await request.get("/fixture/info")).json()).closeCalls).toBe(
-    3,
+    1,
   );
 });
 
@@ -617,7 +626,9 @@ test("late manual A Check cannot open its confirmation over a new B visit", asyn
       .getByRole("alert")
       .filter({ hasText: "fixture native release failed" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Check close status", exact: true }),
+  ).toBeEnabled();
   recovery.open = true;
   await page
     .getByRole("button", { name: "Check close status", exact: true })
@@ -637,7 +648,7 @@ test("late manual A Check cannot open its confirmation over a new B visit", asyn
   ).toBeEnabled();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect((await (await request.get("/fixture/info")).json()).closeCalls).toBe(
-    2,
+    1,
   );
 });
 
@@ -658,7 +669,7 @@ test.describe("touch unknown close", () => {
     await swipeClose(page, target);
     await expect(
       page.getByRole("heading", {
-        name: "Abandon unconfirmed submissions and close",
+        name: heading,
         exact: true,
       }),
     ).toBeVisible();
@@ -686,12 +697,12 @@ test("AltX unknown refusal preserves selection and never replays", async ({
   await input.evaluate((el: HTMLTextAreaElement) => el.setSelectionRange(2, 7));
   await input.press("Alt+KeyX");
   await expect(
-    page.getByRole("heading", { name: action, exact: true }),
+    page.getByRole("heading", { name: heading, exact: true }),
   ).toBeVisible();
   await page.keyboard.press("Alt+KeyJ");
   await page.keyboard.press("Control+Digit2");
   await expect(
-    page.getByRole("heading", { name: action, exact: true }),
+    page.getByRole("heading", { name: heading, exact: true }),
   ).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.locator('.session-open[aria-current="true"]')).toHaveCount(
@@ -708,7 +719,7 @@ test("AltX unknown refusal preserves selection and never replays", async ({
   await expect(page.locator(".agent-detail")).toBeVisible();
   const after = await (await request.get(origin + "/fixture/info")).json();
   expect(after.inputs).toBe(before.inputs);
-  expect(after.closeCalls).toBe(before.closeCalls + 1);
+  expect(after.closeCalls).toBe(before.closeCalls);
   expect(after.closed).toBe(false);
   expect(after.lookup).toEqual(before.lookup);
 });

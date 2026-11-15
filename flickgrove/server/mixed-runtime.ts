@@ -149,6 +149,17 @@ export class MixedRuntime implements Runtime {
       throw new Error("This backend requires a handle to release a session");
     await runtime.releaseThread(native.id);
   }
+  async releaseColdPi(agent: RuntimeAgent) {
+    if (!agent.threadId) throw new Error("Original Pi session unavailable");
+    const native = threadIdentity(agent.threadId);
+    if (
+      native.backend !== "pi" ||
+      agent.backend !== "pi" ||
+      !this.pi.releaseColdPi
+    )
+      throw new Error("Passive Pi release unavailable");
+    return this.pi.releaseColdPi({ ...agent, threadId: native.id });
+  }
   async open(
     agent: RuntimeAgent,
     notify: (event: RuntimeEvent) => void,

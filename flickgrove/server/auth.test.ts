@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { GroveAuth } from "./auth";
 import { WorkspaceStore } from "./workspace-store";
 import { authenticator } from "./synthetic-auth";
+import type { CloseStatus } from "../src/chord-contract";
 
 const origin = "http://localhost:3082";
 const cookie = (r: Response, name: string) => {
@@ -680,6 +681,9 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
       ).status,
     ).toBe(401);
     const id = `${service.identity.id}:${orc.id}`;
+    expect(await aliceClient.call<CloseStatus>("closeStatus", { id })).toEqual({
+      status: "open",
+    });
     const [{ operationId: aliceOp }, { operationId: bobOp }] =
       await Promise.all([
         aliceClient.call<{ operationId: string }>("reserveSubmission", { id }),
@@ -771,6 +775,10 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
     ).toBe("Bob");
     expect((await call("/api/auth/sign-out", {}, [session])).status).toBe(200);
     expect(socket.readyState).toBe(WebSocket.CLOSED);
+    await expect(aliceClient.call("closeStatus", { id })).rejects.toThrow();
+    expect(await bobClient.call<CloseStatus>("closeStatus", { id })).toEqual({
+      status: "open",
+    });
     for (let i = 0; i < 100 && provider.active; i++) await Bun.sleep(5);
     expect(voiceSocket.readyState).toBe(WebSocket.CLOSED);
     expect(provider.active).toBe(0);

@@ -566,37 +566,11 @@ export function dismissPendingAnswer(
   dismissals.revision++;
 }
 
-// Only call after the owning Peer confirms this explicitly abandoned session closed.
-export function clearClosedPending(agentId: string) {
-  const scope = `${prefix}${encodeURIComponent(agentId)}/`;
-  for (const storageKey of Object.keys(localStorage)) {
-    if (!storageKey.startsWith(scope)) continue;
-    const raw = localStorage.getItem(storageKey);
-    let parsed;
-    try {
-      parsed = raw ? entry.safeParse(JSON.parse(raw)) : null;
-    } catch {
-      continue;
-    }
-    if (
-      !parsed?.success ||
-      parsed.data.agentId !== agentId ||
-      !["sending", "uncertain"].includes(parsed.data.status)
-    )
-      continue;
-    localStorage.removeItem(storageKey);
-    void saveImages(operationKey(agentId, parsed.data.id), []).catch(() => {});
-  }
-  outgoing.entries = outgoing.entries.filter(
-    (o) => o.agentId !== agentId || o.status !== "pending",
-  );
-}
-
 // A device-owned close intent contains identities only, never another submission ledger.
 const closePrefix = `flickgrove/${location.origin}/abandon-close/`;
 const closeIntent = z.object({
   agentId: z.string().min(1),
-  unknownOperationIds: z.array(z.string().min(1)).min(1),
+  unknownOperationIds: z.array(z.string().min(1)),
 });
 const savedCloses: z.infer<typeof closeIntent>[] = [];
 for (const storageKey of Object.keys(localStorage)) {

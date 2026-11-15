@@ -88,6 +88,9 @@ test("time expiry preserves detail and keyboard navigation, with shortcut close"
   await expect(page.locator(".agent-detail h1")).toBeVisible();
   await recent(page).filter({ hasText: "Earlier this week" }).click();
   await page.keyboard.press("Alt+KeyX");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(
     recent(page).filter({ hasText: "Earlier this week" }),
   ).toHaveCount(0);

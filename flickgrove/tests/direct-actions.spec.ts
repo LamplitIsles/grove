@@ -133,6 +133,9 @@ test("Close shortcut uses detail before navigation, blocks surfaces/IME and neve
   );
   await input.focus();
   await input.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: orcName })).toHaveCount(0);
   expect(
@@ -157,6 +160,9 @@ test("Close shortcut uses detail before navigation, blocks surfaces/IME and neve
     page.getByRole("button", { name: "Edit title", exact: true }),
   ).toBeVisible();
   await page.keyboard.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(page.locator(".session-open")).toHaveCount(0);
   await request.post(`${origin}/fixture/reset`, { data: {} });
   await page.reload();
@@ -194,12 +200,18 @@ test("mobile swipe only reveals, one row at a time; right/outside collapse and e
   await expect(page.locator(".agent-detail")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("mobile-swipe.png") });
   await first.locator(".tree-close-action").click();
-  await expect(first.getByRole("alert")).toContainText(
-    "is still working or has an unconfirmed delivery",
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByRole("dialog")).toContainText(
+    "Wait for work to finish or stop it before closing.",
   );
+  await expect(
+    page.getByRole("button", { name: "Close session", exact: true }),
+  ).toBeDisabled();
   await page.screenshot({
     path: testInfo.outputPath("mobile-close-refused.png"),
   });
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await openSidebar(page);
   await swipe(page, 100, box.y + 30, 150);
   await expect(page.locator(".tree-close-action")).toHaveCount(0);
   await swipe(page, 300, box.y + 30, -150);
@@ -253,6 +265,9 @@ test("mobile swipe only reveals, one row at a time; right/outside collapse and e
   await swipe(page, 300, clean.y + 30, -150);
   await expect(cleanRow.locator(".tree-close-action")).toBeVisible();
   await cleanRow.locator(".tree-close-action").click();
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(
     page.getByRole("button", { name: "Open Earlier today Orc" }),
   ).toHaveCount(0);

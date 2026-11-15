@@ -20,6 +20,9 @@ export const fixtureProjects = [
   { alias: "beta", name: "Beta", path: "/fixture/beta" },
 ];
 export class FakeRuntime implements Runtime {
+  async releaseColdPi(_agent: RuntimeAgent) {
+    return { unlock: async () => {}, hasRetainedNativeWork: false };
+  }
   readonly historySessions = new Map<string, HistorySession>();
   readonly historyItems = new Map<string, Message[]>();
   readonly lockedThreads = new Set<string>();
@@ -250,6 +253,10 @@ export class FakeRuntime implements Runtime {
       },
       title: async () => undefined,
       close: async () => {
+        await this.closeOverride?.(agent.id);
+        this.listeners.delete(agent.id);
+      },
+      closeQuiescent: async () => {
         await this.closeOverride?.(agent.id);
         this.listeners.delete(agent.id);
       },

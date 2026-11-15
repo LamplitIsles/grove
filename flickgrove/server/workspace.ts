@@ -944,7 +944,11 @@ export class Workspace {
       this.save();
       return;
     } else if (event.type === "working") {
-      if (a.turnId === event.turnId) return;
+      if (
+        a.turnId === event.turnId &&
+        (a.backend !== "pi" || a.state === "working" || a.state === "stopping")
+      )
+        return;
       a.piMemberTerminalVerified = undefined;
       if (!event.replayed) this.activity(a);
       if (a.ownerId) this.cancelHandoff(a.ownerId);
@@ -952,7 +956,7 @@ export class Workspace {
       this.publishedHandoffs.delete(a.id);
       this.finalFailures.delete(a.id);
       this.completedItems.delete(a.id);
-      if (a.turnId) {
+      if (a.turnId && a.turnId !== event.turnId) {
         this.completedTurns.add(`${a.id}/${a.turnId}`);
       }
       a.execution = undefined;
@@ -1394,6 +1398,7 @@ export class Workspace {
       lastInterrupted: interrupted ? true : undefined,
       workUnconfirmed:
         a.turnEnded === false ||
+        (a.state === "error" && a.turnEnded === undefined) ||
         a.stop?.status === "pending" ||
         a.stop?.status === "unknown" ||
         (a.backend === "pi" &&
@@ -2264,6 +2269,8 @@ export class Workspace {
           "Original execution target binding is unavailable for this remote history",
         );
       const restore = async () => {
+        if (existing && this.closingTrees.has(existing.ownerId ?? existing.id))
+          throw new Error("Tree is closing");
         if (existing && !existing.closed) {
           if (
             existing.orcPromptSnapshot === undefined &&
@@ -2273,6 +2280,8 @@ export class Workspace {
           return this.publicAgent(existing);
         }
         const session = await this.historySession(alias, threadId);
+        if (existing && this.closingTrees.has(existing.id))
+          throw new Error("Tree is closing");
         if (session.role !== "orc" && session.role !== "session")
           throw new Error("Continue this owned agent through its original Orc");
         await this.assertProject(project, existing?.backend ?? session.backend);
@@ -2297,8 +2306,12 @@ export class Workspace {
         };
         if (existing) this.store.track(agent);
         agent.restoreArchived = archived;
+        const initialEvents =
+          agent.backend === "pi" ? ([] as RuntimeEvent[]) : undefined;
+        let handle: RuntimeHandle | undefined;
+        let activationStarted = false;
         try {
-          const handle = await this.handle(agent);
+          handle = await this.handle(agent, true, initialEvents);
           if (!existing) this.store.track(agent, true);
           agent.title = handle.threadName ?? session.title;
           if (!existing) {
@@ -2309,12 +2322,37 @@ export class Workspace {
           }
           if (!this.state.agents.includes(agent)) this.state.agents.push(agent);
           agent.closed = false;
-          agent.state = "idle";
-          agent.error = undefined;
-          agent.turnEnded = true;
+          if (!existing || agent.turnEnded === true) {
+            agent.state = "idle";
+            agent.error = undefined;
+            agent.turnEnded = true;
+          }
           delete agent.inheritSettings;
           this.save();
+          if (initialEvents) {
+            for (const event of initialEvents) this.event(agent, event);
+            activationStarted = true;
+            handle.activate?.();
+          }
           return this.publicAgent(agent);
+        } catch (error) {
+          if (handle && initialEvents && !activationStarted) {
+            this.handles.delete(agent.id);
+            await handle.close();
+          } else if (handle && initialEvents && activationStarted) {
+            // Activation may have reached Durable even if it threw. Do not
+            // interrupt or claim a terminal outcome on that uncertainty.
+            agent.state = "error";
+            agent.turnEnded = false;
+            agent.error =
+              "Pi recovery outcome is unknown. Inspect the session before continuing.";
+            try {
+              this.save();
+            } catch {
+              /* Storage failure remains authoritative. */
+            }
+          }
+          throw error;
         } finally {
           delete agent.restoreArchived;
         }
@@ -2383,6 +2421,13 @@ export class Workspace {
           // Captured once, at creation: later file changes affect only new Orcs.
           roleDivisionSnapshot: await this.options.roleDivision?.(),
           state: "idle",
+          // A newly created local Codex session has not admitted a turn. Record
+          // that known boundary now; old sessions with unknown outcomes must
+          // never acquire it merely because their visible history is empty.
+          ...((captured.orc.backend ?? "codex") === "codex" &&
+          environmentId(project) === "local"
+            ? { turnEnded: true }
+            : {}),
           closed: false,
           questions: [],
           messages: [],
@@ -2410,7 +2455,11 @@ export class Workspace {
       this.creating--;
     }
   }
-  private async handle(a: RuntimeAgent, refreshTitle = true) {
+  private async handle(
+    a: RuntimeAgent,
+    refreshTitle = true,
+    initialEvents?: RuntimeEvent[],
+  ) {
     await this.assertProject(a.project, a.backend);
     let handle = this.handles.get(a.id);
     if (!handle) {
@@ -2432,7 +2481,8 @@ export class Workspace {
         opening = this.options.runtime
           .open(a, (event) => {
             if (disconnected) return;
-            this.event(a, event);
+            if (initialEvents && a.closed) initialEvents.push(event);
+            else this.event(a, event);
             if (event.type === "disconnected") disconnected = true;
           })
           .then(async (handle) => {
@@ -2466,6 +2516,10 @@ export class Workspace {
         )
           this.refreshCurrentExecution(a);
       } catch (error) {
+        if (initialEvents && handle) {
+          this.handles.delete(a.id);
+          await handle.close();
+        }
         if (localCodex(a) && a.threadId && !this.disposed) {
           this.connections.set(a.id, {
             state: "failed",
@@ -4157,6 +4211,7 @@ export class Workspace {
       a.role !== "orc" ||
       !["idle", "error"].includes(a.state) ||
       a.turnId ||
+      a.stop?.status === "pending" ||
       this.opening.has(a.id) ||
       this.treeActions.has(a.id) ||
       this.state.agents.some((w) => w.ownerId === a.id && !w.closed) ||
@@ -4182,8 +4237,13 @@ export class Workspace {
       throw new Error("No unconfirmed user submissions to abandon");
     return ids;
   }
-  async closeTree(id: string, abandonUnknownOperationIds?: string[]) {
+  async closeTree(
+    id: string,
+    abandonUnknownOperationIds?: string[],
+    confirmRisks = false,
+  ) {
     this.assertInstanceAvailable();
+    if (confirmRisks) return this.closeConfirmedTree(id);
     if (abandonUnknownOperationIds !== undefined)
       return this.closeAbandoningUnknown(id, abandonUnknownOperationIds);
     const a = this.agent(id);
@@ -4230,29 +4290,131 @@ export class Workspace {
     try {
       for (const member of [...members, a]) {
         validate();
+        let released: Awaited<ReturnType<Workspace["release"]>>;
         try {
-          await this.release(member, validate);
+          released = await this.release(member, validate);
+          if (released?.hasRetainedNativeWork)
+            throw new Error("Pi has retained native work");
+          if (this.disposed)
+            throw new Error("Workspace stopped during native release");
+          this.handles.delete(member.id);
+          if (member === a) validate();
+          else {
+            const reason = this.childCloseReason(member);
+            if (reason) throw new Error(`${member.title}: ${reason}`);
+          }
+          this.failedChildCloses.delete(member.id);
+          member.closed = true;
+          this.save();
         } catch (error) {
           throw new Error(
             `${member.title}: Native thread release failed: ${String(error)}. Retry Close tree after inspecting the outcome.`,
           );
+        } finally {
+          await released?.unlock();
         }
-        if (this.disposed)
-          throw new Error("Workspace stopped during native release");
-        this.handles.delete(member.id);
-        if (member === a) validate();
-        else {
-          const reason = this.childCloseReason(member);
-          if (reason) throw new Error(`${member.title}: ${reason}`);
-        }
-        this.failedChildCloses.delete(member.id);
-        member.closed = true;
-        this.save();
       }
       return { closed: true as const, id };
     } finally {
       this.closingTrees.delete(id);
     }
+  }
+  private async closeConfirmedTree(id: string) {
+    const root = this.agent(id);
+    if (root.role !== "orc")
+      throw new RequestRefused("Only an Orc tree can be closed");
+    if (this.closingTrees.has(id)) throw new RequestRefused("Tree is closing");
+    const members = this.state.agents.filter(
+      (a) => a.ownerId === id && !a.closed,
+    );
+    const tree = [root, ...members];
+    const risk = (a: RuntimeAgent) =>
+      JSON.stringify({
+        deliveries: a.deliveries.map((d) => [d.id, d.status, d.mode]),
+        questions: a.questions.map((q) => [q.id, q.state]),
+        stop: a.stop,
+      });
+    const risks = new Map(tree.map((a) => [a.id, risk(a)]));
+    const validate = () => {
+      if (this.writeFailure) throw this.writeFailure;
+      if (this.disposed) throw new Error("Workspace is stopped");
+      if (this.treeActions.has(id))
+        throw new Error("Tree settings are being saved");
+      const currentMembers = this.state.agents.filter(
+        (a) => a.ownerId === id && !a.closed,
+      );
+      if (currentMembers.some((a) => !members.includes(a)))
+        throw new Error("Tree membership changed");
+      for (const a of tree.filter((a) => !a.closed)) {
+        if (
+          a.state === "working" ||
+          a.state === "stopping" ||
+          a.stop?.status === "pending" ||
+          this.currentExecutions.get(a.id)?.view.state === "working"
+        )
+          throw new Error(`${a.title} has current work`);
+        if (
+          this.queues.has(a.id) ||
+          this.opening.has(a.id) ||
+          this.closingChildren.has(a.id)
+        )
+          throw new Error(`${a.title} has an in-flight operation`);
+        if (!a.threadId)
+          throw new Error(`${a.title}: Native thread startup is unconfirmed`);
+        if (risk(a) !== risks.get(a.id))
+          throw new Error(`${a.title} changed during closure`);
+      }
+    };
+    try {
+      validate();
+    } catch (error) {
+      throw new RequestRefused(
+        error instanceof Error ? error.message : "Close refused",
+      );
+    }
+    this.closingTrees.add(id);
+    try {
+      // Retain the queue and prevent it from running after restore, including Pi.
+      for (const a of tree) {
+        if (
+          a.backend === "pi" ||
+          a.deliveries.some(
+            (d) => d.mode === "follow_up" && d.status === "waiting",
+          )
+        )
+          a.followUpPaused = true;
+      }
+      this.save();
+      for (const a of [...members, root]) {
+        validate();
+        let released: Awaited<ReturnType<Workspace["release"]>>;
+        try {
+          released = await this.release(a, validate);
+          this.handles.delete(a.id);
+          validate();
+          a.closed = true;
+          this.save();
+        } catch (error) {
+          throw new Error(
+            `${a.title}: Native thread release failed: ${String(error)}. Inspect before retrying.`,
+          );
+        } finally {
+          await released?.unlock();
+        }
+      }
+      return { closed: true as const, id };
+    } finally {
+      this.closingTrees.delete(id);
+    }
+  }
+  closeStatus(id: string) {
+    if (this.disposed || this.writeFailure)
+      return { status: "unknown" as const };
+    if (this.closingTrees.has(id)) return { status: "unknown" as const };
+    const a =
+      this.state.agents.find((item) => item.id === id) ?? this.store.byId(id);
+    if (!a || a.role !== "orc") return { status: "unknown" as const };
+    return { status: a.closed ? ("closed" as const) : ("open" as const) };
   }
   private closeAbandoningUnknown(id: string, operationIds: string[]) {
     if (this.closingTrees.has(id))
@@ -4277,13 +4439,17 @@ export class Workspace {
           error instanceof Error ? error.message : "Close refused",
         );
       }
-      // Keep explicit abandonment scoped to the root and its cached handle.
-      await this.handles.get(id)?.close();
-      this.handles.delete(id);
-      validate();
-      a.closed = true;
-      this.save();
-      return { closed: true as const, id };
+      let released: Awaited<ReturnType<Workspace["release"]>>;
+      try {
+        released = await this.release(a, validate);
+        this.handles.delete(id);
+        validate();
+        a.closed = true;
+        this.save();
+        return { closed: true as const, id };
+      } finally {
+        await released?.unlock();
+      }
     });
     // Guard new reservations from the time this close is queued, including
     // while earlier session work is still finishing.
@@ -4951,6 +5117,13 @@ export class Workspace {
     return reason;
   }
   private async release(a: RuntimeAgent, validate: () => void) {
+    if (!this.handles.has(a.id) && a.backend === "pi") {
+      if (!this.options.runtime.releaseColdPi)
+        throw new Error("Passive Pi release unavailable");
+      await this.assertProject(a.project, a.backend);
+      validate();
+      return this.options.runtime.releaseColdPi(a);
+    }
     if (
       !this.handles.has(a.id) &&
       a.threadId &&
@@ -4965,7 +5138,17 @@ export class Workspace {
         ? await this.handle(a, false)
         : this.handles.get(a.id);
       validate(); // Acquisition may reveal work or a disconnect.
-      await handle?.close();
+      if (a.backend === "pi" && handle) {
+        if (!handle.closeQuiescent)
+          throw new Error("Non-interrupting Pi release unavailable");
+        await handle.closeQuiescent();
+      } else await handle?.close();
+      if (a.backend === "pi") {
+        this.handles.delete(a.id);
+        if (!this.options.runtime.releaseColdPi)
+          throw new Error("Passive Pi release unavailable");
+        return this.options.runtime.releaseColdPi(a);
+      }
     }
   }
   private async advanceChildCloses() {
@@ -4996,21 +5179,29 @@ export class Workspace {
       this.closingChildren.add(w.id);
       releases.push(
         (async () => {
+          let released: Awaited<ReturnType<Workspace["release"]>>;
           try {
-            await this.release(w, () => {
+            released = await this.release(w, () => {
               const reason = this.childCloseReason(w);
               if (reason) throw new Error(reason);
             });
+            if (released?.hasRetainedNativeWork)
+              throw new Error("Pi has retained native work");
             if (this.disposed) return;
             this.handles.delete(w.id);
             w.closed = true;
+            this.save();
           } catch (error) {
             if (this.disposed) return;
             this.failedChildCloses.add(w.id);
             w.closeRequest!.reason = `Native thread release failed: ${String(error)}. Retry ${w.role} close.`;
           } finally {
-            this.closingChildren.delete(w.id);
-            this.save();
+            try {
+              await released?.unlock();
+            } finally {
+              this.closingChildren.delete(w.id);
+              this.save();
+            }
           }
         })(),
       );

@@ -66,6 +66,9 @@ test("closing a middle visible session selects its next neighbor and collapsing 
     page.getByRole("button", { name: "Session settings", exact: true }),
   ).toBeEnabled();
   await page.keyboard.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(title(page)).toHaveText("Additional task 2");
   await page.locator(".session-open").first().click();
   await page.getByRole("button", { name: "Expand Workers" }).first().click();

@@ -86,6 +86,9 @@ for (const viewport of [
       page.getByText("Workers are closed.", { exact: true }),
     ).toBeVisible();
     await page.keyboard.press("Alt+x");
+    await page
+      .getByRole("button", { name: "Close session", exact: true })
+      .click();
     await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
   });
 }

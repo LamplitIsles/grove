@@ -42,12 +42,19 @@ test("ordinary close stays blocked; explicit original IDs close without resume o
   f.runtime.open = async () => {
     throw new Error("Must not resume to close");
   };
+  const released: string[] = [];
+  Object.assign(f.runtime, {
+    releaseThread: async (id: string) => {
+      released.push(id);
+    },
+  });
   await expect(f.app.closeTree(f.target.id)).rejects.toThrow("unconfirmed");
   expect(await f.app.abandonCloseCandidate(f.target.id)).toEqual({
     closed: false,
     unknownOperationIds: ["original-unknown"],
   });
   await f.app.closeTree(f.target.id, ["original-unknown"]);
+  expect(released).toEqual([f.target.threadId!]);
   expect(f.app.snapshot().agents.map((a) => a.id)).toEqual([f.other.id]);
   expect(f.app.lookup(f.target.id, "original-unknown")).toBeNull();
   const stored = f.stored().agents.find((a) => a.id === f.target.id)!;

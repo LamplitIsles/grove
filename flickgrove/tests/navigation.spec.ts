@@ -218,6 +218,9 @@ test("a closed mobile historical target stays closed on Forward", async ({
     page.getByRole("button", { name: "Add images", exact: true }),
   ).toBeEnabled();
   await page.keyboard.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
   await expect(page.locator(".agent-detail h1")).not.toHaveText(
     "Streaming voice input",

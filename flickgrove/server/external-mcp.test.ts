@@ -211,6 +211,54 @@ test("external MCP authenticates each SDK request and uses isolated workspace se
     ).not.toBe(200);
     const client = await connect(alice);
     const other = await connect(bob);
+    // A single authenticated close call carries confirmation. Status is read
+    // by qualified identity and never inferred from list absence.
+    const closeFixture = await app.createOrc("alpha");
+    const closeId = `${service.identity.id}:${closeFixture.id}`;
+    expect(
+      await call(client, "close_session_status", { session_id: closeId }),
+    ).toEqual({ status: "open" });
+    expect(
+      await call(client, "close_session_status", {
+        session_id: `other:${closeFixture.id}`,
+      }),
+    ).toEqual({ status: "unknown" });
+    runtime.emit(closeFixture.id, { type: "working", turnId: "known-active" });
+    expect(
+      await outcome("close_session", { session_id: closeId }, client),
+    ).toMatchObject({ status: "failed" });
+    runtime.emit(closeFixture.id, {
+      type: "completed",
+      turnId: "known-active",
+      status: "completed",
+    });
+    expect(
+      await call(client, "close_session", { session_id: closeId }),
+    ).toEqual({ status: "closed" });
+    expect(
+      await call(client, "close_session_status", { session_id: closeId }),
+    ).toEqual({ status: "closed" });
+    const memberOwner = await app.createOrc("alpha");
+    const ownerToken = runtime.agents.get(memberOwner.id)!.token;
+    const closeMember = (await app.tool(ownerToken, "worker_start", {
+      project: "alpha",
+      title: "fixture",
+      spec: "fixture",
+      message: "work",
+    })) as { id: string };
+    const memberId = `${service.identity.id}:${closeMember.id}`;
+    expect(
+      await outcome("close_session", { session_id: memberId }, client),
+    ).toMatchObject({ status: "failed" });
+    expect(
+      await call(client, "close_session_status", { session_id: memberId }),
+    ).toEqual({ status: "unknown" });
+    runtime.emit(closeMember.id, {
+      type: "completed",
+      turnId: app.detail(closeMember.id).turnId!,
+      status: "completed",
+    });
+    await app.closeTree(memberOwner.id, undefined, true);
     const unknownTool = await client.callTool({
       name: `missing-${alice}`,
       arguments: {},
@@ -2003,6 +2051,42 @@ test("external MCP authenticates each SDK request and uses isolated workspace se
     expect(
       runtime.inputs.filter((item) => item.text === "lost-response"),
     ).toHaveLength(1);
+    const closeLost = await app.createOrc("alpha");
+    const closeLostId = `${service.identity.id}:${closeLost.id}`;
+    const releasesBefore = runtime.inputs.length;
+    let closeDropped = false;
+    const closeClient = new Client({ name: "close-drop-test", version: "1" });
+    await closeClient.connect(
+      new StreamableHTTPClientTransport(new URL(origin + "/external-mcp"), {
+        requestInit: { headers: { Authorization: `Bearer ${bob}` } },
+        fetch: async (input, init) => {
+          const response = await fetch(input, init);
+          if (
+            !closeDropped &&
+            typeof init?.body === "string" &&
+            init.body.includes("close_session") &&
+            init.body.includes(closeLostId)
+          ) {
+            closeDropped = true;
+            await response.text();
+            throw new Error("fixture dropped close response");
+          }
+          return response;
+        },
+      }),
+    );
+    clients.push(closeClient);
+    await expect(
+      closeClient.callTool({
+        name: "close_session",
+        arguments: { session_id: closeLostId },
+      }),
+    ).rejects.toThrow();
+    expect(closeDropped).toBe(true);
+    expect(
+      await call(other, "close_session_status", { session_id: closeLostId }),
+    ).toEqual({ status: "closed" });
+    expect(runtime.inputs).toHaveLength(releasesBefore);
     const rotated = (
       (await (await browser("POST", "alice")).json()) as { token: string }
     ).token;

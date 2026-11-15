@@ -101,6 +101,9 @@ for (const failure of ["QuotaExceededError", "SecurityError"]) {
         writer.locator(".session-open [aria-label='Needs input']"),
       ).toHaveCount(0);
       await writerInput.press("Alt+x");
+      await writer
+        .getByRole("button", { name: "Close session", exact: true })
+        .click();
       await expect(
         writer.getByText("Tree closed.", { exact: true }),
       ).toBeVisible();
@@ -168,6 +171,9 @@ test("a quota failure while caching the snapshot does not disconnect the convers
     .toBe(true);
   await input.fill("Keep my draft after closing");
   await input.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
   await expect
     .poll(() =>

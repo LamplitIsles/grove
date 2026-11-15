@@ -37,12 +37,14 @@ import {
 import { PiMetadata } from "./pi-documents";
 import { piAnswerKinds, piToolProgress } from "./message-kind";
 import { inspectPiFollowUp } from "./pi-inspection";
-import { readPiStorage } from "./pi-storage";
+import { acquirePiWriter, readPiStorage } from "./pi-storage";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   ROOT_CONVERSATION_ID,
   createSession,
   AgentDoc,
+  LiveDoc,
+  InboxDoc,
   type EntryRecord,
 } from "@earendil-works/pi-durable";
 
@@ -50,6 +52,72 @@ export class PiRuntime implements Runtime {
   private readonly handles = new Set<RuntimeHandle>();
   private get sessionDir() {
     return join(this.options.agentDir, "grove-durable");
+  }
+  async releaseColdPi(agent: RuntimeAgent) {
+    if (!agent.threadId) throw new Error("Original Pi session unavailable");
+    const path = this.path(agent.threadId);
+    // The writer lease establishes that no Pi harness owns this native file.
+    // It never opens a harness or resumes the durable scheduler.
+    const release = acquirePiWriter(path);
+    try {
+      const storage = await readPiStorage(path);
+      const session = createSession(storage);
+      let hasRetainedNativeWork = true;
+      try {
+        const metadata = await session.snapshot(PiMetadata, BACKGROUND_CONTEXT);
+        if (
+          !metadata ||
+          metadata.id !== agent.threadId ||
+          metadata.agentId !== agent.id ||
+          metadata.role !== agent.role ||
+          metadata.ownerId !== (agent.ownerId ?? "") ||
+          resolve(metadata.cwd) !== resolve(agent.project.path)
+        )
+          throw new Error("Original Pi session identity unavailable");
+        // The exclusive writer lease and one readonly SQLite snapshot bind all
+        // native work checks to the same released session. Check every task
+        // scope, not only visible messages or the root generation.
+        const live = await session.snapshot(
+          LiveDoc,
+          ROOT_CONVERSATION_ID,
+          BACKGROUND_CONTEXT,
+        );
+        const inbox = await session.snapshot(
+          InboxDoc,
+          ROOT_CONVERSATION_ID,
+          BACKGROUND_CONTEXT,
+        );
+        const tasks = await Promise.all(
+          (["pending", "running", "waiting", "completing"] as const).map(
+            (status) =>
+              storage.scanTasks({ status }, 1, undefined, BACKGROUND_CONTEXT),
+          ),
+        );
+        const submissions = await Promise.all(
+          (["queued", "placed"] as const).map((status) =>
+            storage.scanSubmissions(
+              { status },
+              1,
+              undefined,
+              BACKGROUND_CONTEXT,
+            ),
+          ),
+        );
+        hasRetainedNativeWork =
+          !live ||
+          !inbox ||
+          !!live.run ||
+          inbox.items.length > 0 ||
+          tasks.some((page) => page.items.length > 0) ||
+          submissions.some((page) => page.items.length > 0);
+      } finally {
+        await session.close(BACKGROUND_CONTEXT);
+      }
+      return { unlock: release, hasRetainedNativeWork };
+    } catch (error) {
+      await release();
+      throw error;
+    }
   }
   inspectFollowUp(agent: RuntimeAgent, operationId: string) {
     if (!agent.threadId) throw new Error("Original Pi session unavailable");
@@ -476,22 +544,41 @@ export class PiRuntime implements Runtime {
     notify: (event: RuntimeEvent) => void,
   ): Promise<RuntimeHandle> {
     if (!agent.provider) throw new Error("Select a Pi provider");
-    const handle = await openPiSession(agent, notify, {
-      ...this.options,
-      sessionDir: this.sessionDir,
-      sessionPath: agent.threadId ? this.path(agent.threadId) : undefined,
-      selection: {
-        provider: agent.provider,
-        model: agent.model,
-        effort: agent.effort,
-      },
-    });
+    let held: Awaited<ReturnType<PiRuntime["releaseColdPi"]>> | undefined;
+    let handle: RuntimeHandle;
+    try {
+      // Validate the native identity and hand the same writer lease to the
+      // restored harness, which resumes already accepted Durable work.
+      if (agent.closed && agent.threadId) {
+        held = await this.releaseColdPi(agent);
+      }
+      handle = await openPiSession(agent, notify, {
+        ...this.options,
+        sessionDir: this.sessionDir,
+        sessionPath: agent.threadId ? this.path(agent.threadId) : undefined,
+        preAcquiredWriter: held?.unlock,
+        selection: {
+          provider: agent.provider,
+          model: agent.model,
+          effort: agent.effort,
+        },
+      });
+    } catch (error) {
+      await held?.unlock();
+      throw error;
+    }
     this.handles.add(handle);
     const close = handle.close;
+    const closeQuiescent = handle.closeQuiescent;
     handle.close = async () => {
       await close();
       this.handles.delete(handle);
     };
+    if (closeQuiescent)
+      handle.closeQuiescent = async () => {
+        await closeQuiescent();
+        this.handles.delete(handle);
+      };
     return handle;
   }
   async close() {

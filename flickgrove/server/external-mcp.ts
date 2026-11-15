@@ -281,6 +281,29 @@ export async function externalMcp(
     },
   );
   register(
+    "close_session",
+    "Close one Orc tree; this call accepts pending and unknown outcomes, including work that may still run. Known working or stopping sessions cannot close. A lost response is unknown; inspect status before any further action.",
+    { session_id: id },
+    async ({ session_id }) => {
+      orc(session_id);
+      await service.closeTree(session_id, undefined, true);
+      return { status: "closed" };
+    },
+    true,
+  );
+  register(
+    "close_session_status",
+    "Read the durable closed, open, or unknown state on the original Peer; closed does not attribute closure to a particular request.",
+    { session_id: id },
+    async ({ session_id }) => {
+      try {
+        return service.closeStatus(session_id);
+      } catch {
+        return { status: "unknown" };
+      }
+    },
+  );
+  register(
     "list_projects",
     "List execution environments and a page of registered projects in the selected environment (default local).",
     { environment: id.optional(), cursor },

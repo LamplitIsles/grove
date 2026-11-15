@@ -150,9 +150,15 @@ export async function invoke(
     }
     case "abandonCloseCandidate":
       return await app.abandonCloseCandidate(parse(member).id);
+    case "closeStatus":
+      return app.closeStatus(parse(member).id);
     case "closeTree": {
       const p = parse(member);
-      return await app.closeTree(p.id, p.abandonUnknownOperationIds);
+      return await app.closeTree(
+        p.id,
+        p.abandonUnknownOperationIds,
+        p.confirmRisks,
+      );
     }
     default:
       throw new Error("Invalid method");

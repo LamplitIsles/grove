@@ -76,6 +76,9 @@ for (const mobile of [false, true]) {
       "history-reader-assistant",
     ]);
     await page.keyboard.press("Alt+x");
+    await page
+      .getByRole("button", { name: "Close session", exact: true })
+      .click();
     await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
   });
 }
@@ -148,6 +151,9 @@ test("restored Grove history includes external turns once and hides confirmed Wo
     data: { id: activeId },
   });
   await page.keyboard.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
   await newSession(page);
   await page.getByRole("option", { name: "Alpha", exact: true }).click();
@@ -207,6 +213,9 @@ test("restored Grove history includes external turns once and hides confirmed Wo
       .filter({ hasText: "Continue after restoration" }),
   ).toHaveCount(1);
   await page.keyboard.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
 });
 

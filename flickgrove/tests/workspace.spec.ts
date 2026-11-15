@@ -35,6 +35,9 @@ test("confirmed Worker reports stay out of the Orc transcript", async ({
   ).toBeVisible();
   await expect(page.locator(".worker-report")).toHaveCount(0);
   await page.keyboard.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
 });
 
@@ -75,6 +78,9 @@ test("create, delegate, read a Worker, insert a skill and close an idle tree", a
     .locator('.session-open[aria-current="true"]')
     .getAttribute("data-agent-id");
   await page.keyboard.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
   await expect(
     page.locator(`.session-open[data-agent-id="${closedId}"]`),
@@ -299,6 +305,9 @@ test("Tab completes without moving focus, skill search preserves drafts, and clo
     page.getByRole("textbox", { name: "Message Orc" }),
   ).toBeVisible();
   await page.keyboard.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
   await page.mouse.move(0, 0); // Sonner pauses its duration while hovered.
   await expect(page.getByText("Tree closed.", { exact: true })).toHaveCount(0, {
@@ -352,6 +361,9 @@ test("Orc closure of a running Worker shows Closing and automatically removes it
     .filter({ hasText: "Long Worker final report" });
   await expect(report).toHaveCount(0);
   await page.keyboard.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
 });
 
@@ -445,6 +457,9 @@ test("Orc titles edit in place, cancel safely, retain failed drafts and persist 
     page.getByText("Workers are closed.", { exact: true }),
   ).toBeVisible();
   await page.keyboard.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
 });
 
@@ -463,9 +478,13 @@ test("ordinary tree Close preflights a running child and releases an open idle c
     page.getByText("Long Worker started.", { exact: true }),
   ).toBeVisible();
   await page.keyboard.press("Alt+x");
+  await expect(page.getByRole("dialog")).toContainText(
+    "Wait for work to finish or stop it before closing.",
+  );
   await expect(
-    page.getByText(/Worker “Long Reader”: Waiting for current work/),
-  ).toBeVisible();
+    page.getByRole("button", { name: "Close session", exact: true }),
+  ).toBeDisabled();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
   const before = await (await request.get("/fixture/snapshot")).json();
   const rootId = await page.evaluate(() =>
     history.state?.grove?.details.at(-1),
@@ -495,6 +514,9 @@ test("ordinary tree Close preflights a running child and releases an open idle c
     path: "../.scratch/close-quiescent-tree/browser-idle-open.png",
   });
   await page.keyboard.press("Alt+x");
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
   await expect
     .poll(async () => {

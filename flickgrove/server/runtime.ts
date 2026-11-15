@@ -124,6 +124,10 @@ export interface RuntimeHandle {
   ): Promise<string>;
   interrupt(turnId: string): Promise<void>;
   title(input: string): Promise<string | undefined>;
+  // A reopened Pi stays paused until its Workspace state and initial events are saved.
+  activate?(): void;
+  // Pi must prove the harness has no live work before a non-interrupting close.
+  closeQuiescent?(): Promise<void>;
   close(): Promise<void>;
 }
 export type WindowRead =
@@ -138,6 +142,11 @@ export interface Runtime {
   ): Promise<NativeFollowUpInspection>;
   // Codex can confirm an unloaded thread without acquiring a writer handle.
   releaseThread?(threadId: string): Promise<void>;
+  // Release a cold Pi identity without opening or resuming its harness.
+  releaseColdPi?(agent: RuntimeAgent): Promise<{
+    unlock: () => Promise<void>;
+    hasRetainedNativeWork: boolean;
+  }>;
   history(
     cwd: string,
     cursor?: string,

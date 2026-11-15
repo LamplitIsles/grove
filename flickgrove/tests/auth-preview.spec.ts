@@ -453,7 +453,8 @@ test("new user updates identities and revocation hides cached conversations", as
   await row.click({ button: "right" });
   await page.getByRole("menuitem", { name: "Close this tree" }).click();
   await expect(row).toBeVisible();
-  await expect(page.locator(".detail-close-error")).toBeVisible();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.request.post("/fixture/cold-reading", { data: { empty: true } });
   const idle = page.getByRole("button", {
     name: "Open Cold reading Orc",
@@ -462,6 +463,9 @@ test("new user updates identities and revocation hides cached conversations", as
   await expect(idle).toBeVisible();
   await idle.click({ button: "right" });
   await page.getByRole("menuitem", { name: "Close this tree" }).click();
+  await page
+    .getByRole("button", { name: "Close session", exact: true })
+    .click();
   await expect(idle).toHaveCount(0);
   const signout = await page.request.post("/api/auth/sign-out", {
     headers: { origin: "http://localhost:14320" },

@@ -169,10 +169,20 @@ export const inputs = {
     .strict(),
   rename: z.object({ id, title: z.string().max(1000) }),
   abandonCloseCandidate: z.object({ id }).strict(),
+  closeStatus: z.object({ id }).strict(),
   closeTree: z
-    .object({ id, abandonUnknownOperationIds: z.array(id).min(1).optional() })
+    .object({
+      id,
+      abandonUnknownOperationIds: z.array(id).min(1).optional(),
+      confirmRisks: z.literal(true).optional(),
+    })
     .strict(),
 };
+// "open" describes the current state; it is not a receipt for an earlier close.
+export const closeStatusSchema = z
+  .object({ status: z.enum(["closed", "open", "unknown"]) })
+  .strict();
+export type CloseStatus = z.infer<typeof closeStatusSchema>;
 export const abandonCloseSchema = z.discriminatedUnion("closed", [
   z.object({
     closed: z.literal(true),
@@ -476,7 +486,7 @@ export function routeCall(
   };
   let route = simple[url.pathname];
   const match =
-    /^\/agents\/([^/]+)(?:\/(messages|lookup|answers|skills|stop|title|close|abandon-close-candidate|settings|tree-fast))?$/.exec(
+    /^\/agents\/([^/]+)(?:\/(messages|lookup|answers|skills|stop|title|close|close-status|abandon-close-candidate|settings|tree-fast))?$/.exec(
       url.pathname,
     );
   if (match) {
@@ -491,6 +501,7 @@ export function routeCall(
       settings: "updateSettings",
       "tree-fast": "updateTreeFast",
       close: "closeTree",
+      "close-status": "closeStatus",
       "abandon-close-candidate": "abandonCloseCandidate",
     } as const;
     const member = match[2]

@@ -9,10 +9,15 @@ let f = await abandonFixture();
 let closeFailure = false,
   closeDelay = 0,
   closeCalls = 0,
-  candidateDelay = 0;
+  candidateDelay = 0,
+  ordinaryCloseError = false,
+  ordinaryCloseDelay = 0,
+  ordinaryCloseFinished = false;
 function service() {
   const candidate = f.app.abandonCloseCandidate.bind(f.app);
   f.app.abandonCloseCandidate = async (id) => {
+    if (ordinaryCloseError)
+      throw new Error("No unconfirmed user submissions to abandon");
     const state = await candidate(id);
     if (candidateDelay) await Bun.sleep(candidateDelay);
     return state;
@@ -20,6 +25,13 @@ function service() {
   const originalClose = f.app.closeTree.bind(f.app);
   f.app.closeTree = async (...args) => {
     closeCalls++;
+    if (ordinaryCloseError) {
+      if (ordinaryCloseDelay) await Bun.sleep(ordinaryCloseDelay);
+      ordinaryCloseFinished = true;
+      throw new Error(
+        "New session is still working or has an unconfirmed delivery",
+      );
+    }
     const result = await originalClose(...args);
     return result;
   };
@@ -50,6 +62,9 @@ const server = Bun.serve({
       closeDelay = 0;
       closeCalls = 0;
       candidateDelay = 0;
+      ordinaryCloseError = false;
+      ordinaryCloseDelay = 0;
+      ordinaryCloseFinished = false;
       owner = service();
       return Response.json({
         target: `${owner.identity.id}:${f.target.id}`,
@@ -61,12 +76,31 @@ const server = Bun.serve({
       closeFailure = body.closeFailure ?? closeFailure;
       closeDelay = body.closeDelay ?? closeDelay;
       candidateDelay = body.candidateDelay ?? candidateDelay;
+      ordinaryCloseError = body.ordinaryCloseError ?? ordinaryCloseError;
+      ordinaryCloseDelay = body.ordinaryCloseDelay ?? ordinaryCloseDelay;
+      if (body.piTarget) {
+        f.reload((target) => {
+          target.backend = "pi";
+        });
+        owner = service();
+      }
+      if (body.clearServerUnknown) {
+        f.target = f.other;
+        const history = f.runtime.historySessions.get(f.target.threadId!);
+        if (history) history.title = "Local recovery target";
+      }
       if (body.newUnknown)
         await f.app.send(f.target.id, "New unconfirmed input", "new-unknown");
       if (body.active)
         f.runtime.emit(f.target.id, {
           type: "working",
           turnId: "active-fixture",
+        });
+      if (body.finishActive)
+        f.runtime.emit(f.target.id, {
+          type: "completed",
+          turnId: "active-fixture",
+          status: "completed",
         });
       return Response.json({ ok: true });
     }
@@ -76,9 +110,12 @@ const server = Bun.serve({
         lookup: f.app.lookup(f.target.id, "original-unknown"),
         original: f.stored().agents.find((a) => a.id === f.target.id)!
           .deliveries[0],
+        deliveries: f.stored().agents.find((a) => a.id === f.target.id)!
+          .deliveries,
         active: owner.snapshot().agents.map((a) => a.id),
         inputs: f.runtime.inputs.length,
         closeCalls,
+        ordinaryCloseFinished,
       });
     const options = {
       service: owner,

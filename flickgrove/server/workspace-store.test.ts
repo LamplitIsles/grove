@@ -65,6 +65,39 @@ function store(path: string) {
   cleanup.push(() => value.close());
   return value;
 }
+test("persists confirmed close and follow-up pause atomically", () => {
+  const { path } = fixture();
+  const db = store(path);
+  const closed = db.track(
+    agent("closed", { backend: "pi", followUpPaused: false, turnEnded: false }),
+    true,
+  );
+  db.track(agent("legacy", { backend: "pi", followUpPaused: true }), true);
+  db.flush();
+  closed.followUpPaused = true;
+  closed.closed = true;
+  // Before flush neither change is visible to a new reader.
+  expect(store(path).byId("closed")).toMatchObject({
+    closed: false,
+    followUpPaused: false,
+  });
+  db.sqlite.exec(
+    "CREATE TRIGGER fail_confirmed_close BEFORE UPDATE ON sessions WHEN new.id='closed' AND new.closed=1 BEGIN SELECT RAISE(ABORT,'fixture close write failure'); END",
+  );
+  expect(() => db.flush()).toThrow("fixture close write failure");
+  const failed = store(path).byId("closed")!;
+  expect(failed.closed).toBe(false);
+  expect(failed.followUpPaused).toBe(false);
+  db.sqlite.exec("DROP TRIGGER fail_confirmed_close");
+  db.flush();
+  const reopened = store(path);
+  expect(reopened.byId("closed")).toMatchObject({
+    closed: true,
+    followUpPaused: true,
+    turnEnded: false,
+  });
+  expect(reopened.byId("legacy")!.followUpPaused).toBe(true);
+});
 test("persists steer evidence per original delivery without changing its receipt", () => {
   const { path } = fixture();
   const db = store(path);

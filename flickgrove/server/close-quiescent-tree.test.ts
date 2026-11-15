@@ -742,3 +742,181 @@ test("an unknown answer only stops holding closure once its questions are answer
     expect(app.snapshot().agents).toEqual([]);
   }
 });
+
+test("confirmed Close preserves unknown outcomes, questions and queued follow-ups until explicit Continue", async () => {
+  const { app, runtime, owner, children, releases, agents } = await fixture();
+  const root = agents.get(owner.id)!;
+  root.state = "error";
+  root.turnEnded = false;
+  root.questions.push({
+    id: "q",
+    itemId: "q",
+    index: 0,
+    at: 1,
+    text: "Choose?",
+    title: "Choose",
+    state: "unanswered",
+    options: [],
+  });
+  root.deliveries.push({
+    id: "unknown",
+    source: "user",
+    status: "uncertain",
+    text: "Earlier",
+    questionIds: [],
+    at: 1,
+  });
+  root.deliveries.push({
+    id: "waiting",
+    source: "user",
+    mode: "follow_up",
+    status: "waiting",
+    text: "Later",
+    questionIds: [],
+    at: 2,
+  });
+  root.deliveries.push({
+    id: "member-report",
+    source: "worker",
+    reportingWorkerId: children[0]!.id,
+    status: "uncertain",
+    text: "Report",
+    questionIds: [],
+    at: 3,
+  });
+  children[0]!.questions.push({
+    id: "delegated",
+    itemId: "delegated",
+    index: 0,
+    at: 1,
+    text: "Decision?",
+    title: "Decision",
+    state: "delegated",
+    options: [],
+  });
+  children[0]!.state = "error";
+  children[0]!.turnEnded = false;
+  const inputs = runtime.inputs.length;
+  await app.closeTree(owner.id, undefined, true);
+  expect(releases).toEqual([...children.map((c) => c.id), owner.id]);
+  const stored = app.store.byId(owner.id)!;
+  expect(stored).toMatchObject({
+    state: "error",
+    turnEnded: false,
+    followUpPaused: true,
+  });
+  expect(stored.questions[0]!.state).toBe("unanswered");
+  expect(stored.deliveries.map((d) => [d.id, d.status])).toEqual([
+    ["unknown", "uncertain"],
+    ["waiting", "waiting"],
+    ["member-report", "uncertain"],
+  ]);
+  expect(app.store.byId(children[0]!.id)?.questions[0]?.state).toBe(
+    "delegated",
+  );
+  await app.resumeHistory("alpha", owner.threadId!, false);
+  expect(app.detail(owner.id).workUnconfirmed).toBe(true);
+  expect(app.detail(owner.id).followUpPaused).toBe(true);
+  await Bun.sleep(20);
+  expect(runtime.inputs).toHaveLength(inputs);
+  await expect(app.resumeFollowUps(owner.id)).rejects.toThrow();
+  expect(runtime.interruptions).toHaveLength(0);
+});
+
+for (const role of ["orc", "worker", "reviewer", "researcher"] as const) {
+  for (const state of ["working", "stopping"] as const) {
+    test(`confirmed Close refuses ${state} ${role} before release`, async () => {
+      const { app, owner, children, releases, agents } = await fixture();
+      const a =
+        role === "orc"
+          ? agents.get(owner.id)!
+          : children.find((c) => c.role === role)!;
+      a.state = state;
+      await expect(app.closeTree(owner.id, undefined, true)).rejects.toThrow(
+        "current work",
+      );
+      expect(releases).toEqual([]);
+    });
+  }
+}
+
+test("confirmed Close pauses a waiting queue across restore until Continue", async () => {
+  const { app, runtime, owner, agents } = await fixture();
+  const root = agents.get(owner.id)!;
+  root.deliveries.push({
+    id: "waiting",
+    source: "user",
+    mode: "follow_up",
+    status: "waiting",
+    text: "Later",
+    questionIds: [],
+    at: 1,
+  });
+  const count = runtime.inputs.length;
+  await app.closeTree(owner.id, undefined, true);
+  await app.resumeHistory("alpha", owner.threadId!, false);
+  await Bun.sleep(20);
+  expect(runtime.inputs).toHaveLength(count);
+  expect(app.detail(owner.id).followUpPaused).toBe(true);
+  await app.resumeFollowUps(owner.id);
+  for (let i = 0; i < 100 && runtime.inputs.length === count; i++)
+    await Bun.sleep(5);
+  expect(runtime.inputs.slice(count).map((input) => input.clientId)).toEqual([
+    "waiting",
+  ]);
+});
+
+test("confirmed Close fences concurrent actions and stops when work arrives during release", async () => {
+  const { app, runtime, owner, children, releases } = await fixture();
+  const gate = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  runtime.closeOverride = async (id) => {
+    releases.push(id);
+    entered.resolve();
+    await gate.promise;
+  };
+  const closing = app.closeTree(owner.id, undefined, true);
+  await entered.promise;
+  await expect(app.send(owner.id, "Late", "late")).rejects.toThrow("closing");
+  await expect(
+    app.resumeHistory("alpha", owner.threadId!, false),
+  ).rejects.toThrow("closing");
+  runtime.emit(children[1]!.id, { type: "working", turnId: "late" });
+  gate.resolve();
+  await expect(closing).rejects.toThrow("current work");
+  expect(releases).toEqual([children[0]!.id]);
+  expect(app.snapshot().agents.some((a) => a.id === owner.id)).toBe(true);
+});
+
+test("confirmed Close reports partial release and stops on new risk", async () => {
+  const { app, runtime, owner, children, releases } = await fixture();
+  const gate = Promise.withResolvers<void>();
+  const entered = Promise.withResolvers<void>();
+  runtime.closeOverride = async (id) => {
+    releases.push(id);
+    if (id === children[1]!.id) {
+      entered.resolve();
+      await gate.promise;
+    }
+  };
+  const closing = app.closeTree(owner.id, undefined, true);
+  await entered.promise;
+  expect(app.closeStatus(owner.id)).toEqual({ status: "unknown" });
+  runtime.emit(owner.id, {
+    type: "item",
+    turnId: "late",
+    item: {
+      id: "late-q",
+      type: "agentMessage",
+      delivery: "async",
+      questions: [{ question: "Late question?" }],
+    },
+  });
+  gate.resolve();
+  await expect(closing).rejects.toThrow("changed during closure");
+  expect(releases).toEqual([children[0]!.id, children[1]!.id]);
+  expect(app.store.byId(children[0]!.id)?.closed).toBe(true);
+  expect(app.store.byId(children[1]!.id)?.closed).toBe(false);
+  expect(app.closeStatus(owner.id)).toEqual({ status: "open" });
+  expect(app.detail(owner.id).questions[0]?.state).toBe("unanswered");
+});

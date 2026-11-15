@@ -72,6 +72,7 @@ export interface PiSessionOptions {
   agentDir: string;
   sessionDir: string;
   sessionPath?: string;
+  preAcquiredWriter?: () => Promise<void>;
   selection: PiSelection;
   tool: (token: string, name: string, args: unknown) => Promise<unknown>;
 }
@@ -147,7 +148,7 @@ export async function openPiSession(
     path = options.sessionPath ?? piSessionPath(options.sessionDir, id);
   if (agent.threadId) await access(path);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-  const release = acquirePiWriter(path);
+  const release = options.preAcquiredWriter ?? acquirePiWriter(path);
   let storage: Awaited<ReturnType<typeof openPiStorage>> | undefined,
     harness: Harness | undefined,
     mcp: Awaited<ReturnType<typeof openPiMcp>> | undefined;
@@ -735,7 +736,7 @@ export async function openPiSession(
         }
       })
       .catch(() => {});
-    harness.resume();
+    if (!agent.closed) harness.resume();
     const serialize = <T>(work: () => Promise<T>) => {
       const result = sending.then(work, work);
       sending = result.catch(() => {});
@@ -745,6 +746,7 @@ export async function openPiSession(
       threadId: id,
       threadName: metadata.title === "New session" ? null : metadata.title,
       ...current,
+      ...(agent.closed ? { activate: () => harness!.resume() } : {}),
       async reloadMcp() {
         return serialize(async () => {
           if (closed) throw new Error("Pi session is closed");
@@ -1125,6 +1127,21 @@ export async function openPiSession(
           clearTimeout(timeout);
           if (titleGeneration === controller) titleGeneration = undefined;
         }
+      },
+      async closeQuiescent() {
+        if (closed) throw new Error("Pi session is closed");
+        await sending;
+        await projecting;
+        const inspection = await harness!.inspect(ctx);
+        if (
+          inspection.tasks.length ||
+          inspection.submissions.length ||
+          titleGeneration
+        )
+          throw new Error("Pi has live native work; inspect before closing");
+        // No native invocation or admitted submission remains. Grove's tree
+        // fence bars new calls; cleanup seals the harness before releasing it.
+        await cleanup();
       },
       close: cleanup,
     };

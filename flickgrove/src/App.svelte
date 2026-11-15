@@ -10,7 +10,7 @@
   import { passkeyClient } from "@better-auth/passkey/client";
   import { Button } from "$lib/components/ui/button/index.js";
   import { navigation, initializeNavigation, resumeFilePreview, openConversation, setSurface, back, validateNavigation, removeSidebarDrawer } from "./navigation.svelte";
-  import { readingCache, reading } from "./api";
+  import { readingCache, reading, storagePrefix } from "./api";
   import { retainReading } from "./reading-cache";
   import { retainTranscriptPositions } from "./transcript-state";
   import { LocalConnection, preferences, readPreference, writePreference } from "./connection";
@@ -24,11 +24,11 @@
   import type { Answer, Agent, Detail, HistorySession, Human, InstanceReloadResult, InstanceRestartResult, InstanceStatus, Model, Project, Settings, Skill, Snapshot } from "./contracts";
   import { api, editable, setClient } from "./api";
   import { RequestRejected, RequestTimeout } from "./chord-client";
-  import { lookupSchema, inspectRetrySchema, abandonCloseSchema, deliverySchema, type Receipt } from "./chord-contract";
+  import { lookupSchema, inspectRetrySchema, closeStatusSchema, deliverySchema, type Receipt } from "./chord-contract";
   import { addOutgoing, observeRetry, observeRetryLink, observeOutgoing, outgoing, withOutgoing, acceptReceipt, unknownOutgoing, submissionResult, dismissedAnswerOperations } from "./outgoing.svelte";
   import { imageSchema } from "./chord-contract";
   import { loadImages, saveImages, operationKey, type ImageDraft } from "./image-drafts";
-  import { receiptAlreadyAccepted, setOutgoingImages, clearClosedPending, closeRecovery, rememberCloseRecovery, forgetCloseRecovery } from "./outgoing.svelte";
+  import { receiptAlreadyAccepted, setOutgoingImages, closeRecovery, rememberCloseRecovery, forgetCloseRecovery } from "./outgoing.svelte";
   import { observeQuestions, questionPanels, setQuestionPanel } from "./question-state.svelte";
   import ModelFields from "./ModelFields.svelte";
   import Weekly from "./Weekly.svelte";
@@ -639,25 +639,51 @@
   let abandonError = $state("");
   let closeRecoveryErrors = $state<Record<string, string>>({});
   let checkingCloses = $state<string[]>([]);
+  let localCloseRevision = $state(0);
+  const closeAgents = $derived(abandon ? snapshot.agents.filter(a => a.id === abandon!.id || a.ownerId === abandon!.id) : []);
+  const closeWorking = $derived(closeAgents.filter(a => a.state === "working" || a.state === "stopping" || a.stop?.status === "pending" || a.currentExecution?.state === "working"));
+  function localQueuePending(id: string) {
+    const prefix = `${storagePrefix}/follow-up/${encodeURIComponent(id)}/`;
+    try {
+      return Object.keys(localStorage).some(key => {
+        if (!key.startsWith(prefix)) return false;
+        try { const item = JSON.parse(localStorage.getItem(key) ?? "null"); return typeof item?.id === "string" && key === prefix + encodeURIComponent(item.id) && !item.error; }
+        catch { return false; }
+      });
+    } catch { return false; }
+  }
+  function localOutgoingPending(id: string) {
+    const prefix = `${storagePrefix}/outgoing/${encodeURIComponent(id)}/`;
+    try {
+      return Object.keys(localStorage).some(key => {
+        if (!key.startsWith(prefix)) return false;
+        try { const item = JSON.parse(localStorage.getItem(key) ?? "null"); return item?.agentId === id && typeof item.id === "string" && key === prefix + encodeURIComponent(item.id) && ["sending", "uncertain"].includes(item.status) && !receiptAlreadyAccepted(id, item.id); }
+        catch { return false; }
+      });
+    } catch { return false; }
+  }
+  const closeHasLocalQueue = $derived.by(() => { void localCloseRevision; return closeAgents.some(a => localQueuePending(a.id)); });
+  const closeHasUnknown = $derived.by(() => { void localCloseRevision; return closeAgents.some(a => a.workUnconfirmed || a.stop?.status === "unknown" || (a.recoveryCount ?? 0) > 0 || outgoing.entries.some(o => o.agentId === a.id && o.status === "pending" && !receiptAlreadyAccepted(a.id, o.id)) || localOutgoingPending(a.id)) || closeHasLocalQueue; });
+  const closeHasQuestions = $derived(closeAgents.some(a => a.questions.some(q => q.state !== "answered") || (a.unansweredCount ?? 0) > 0));
+  const closeHasQueue = $derived(closeHasLocalQueue || closeAgents.some(a => (a.followUpCount ?? 0) > 0));
   async function checkPendingClose(id: string, showConfirmation = false) {
     if (closingId === id || checkingCloses.includes(id) || !hosts.some(h => id.startsWith(h.id + ":") && h.connected)) return;
     checkingCloses = [...checkingCloses, id];
     const visit = selectedId; const device = instanceId; const generation = sequence;
     try {
-      const state = await readAbandon(id);
-      if (state.closed) await finishAbandon(id);
+      const state = await readCloseStatus(id);
+      if (state.status === "closed") await finishAbandon(id);
       else if (showConfirmation && selectedId === visit && instanceId === device && sequence === generation && !navigation.surfaces.length) {
-        abandon = { id, title: snapshot.agents.find(a => a.id === id)?.title ?? "Orc", unknownOperationIds: state.unknownOperationIds };
-        closeUnknown = false; abandonError = ""; setSurface("abandon-close", true);
+        abandon = { id, title: snapshot.agents.find(a => a.id === id)?.title ?? "Orc", unknownOperationIds: [] };
+        closeUnknown = state.status !== "open"; abandonError = state.status === "open" ? "The session is open; the previous close result remains unknown. You can confirm another attempt." : "The close result is still unknown."; setSurface("abandon-close", true);
       }
     } catch(e) { closeRecoveryErrors = { ...closeRecoveryErrors, [id]: e instanceof Error ? e.message : m.load_failure() }; }
     finally { checkingCloses = checkingCloses.filter(target => target !== id); }
   }
-  async function readAbandon(id: string) {
-    return abandonCloseSchema.parse(await api(`/agents/${id}/abandon-close-candidate`, {}));
+  async function readCloseStatus(id: string) {
+    return closeStatusSchema.parse(await api(`/agents/${id}/close-status`, {}));
   }
   async function finishAbandon(id: string) {
-    clearClosedPending(id);
     forgetCloseRecovery(id);
     const errors = { ...closeRecoveryErrors }; delete errors[id]; closeRecoveryErrors = errors;
     if (modal === "abandon-close" && abandon?.id === id) await closeModal();
@@ -668,56 +694,61 @@
   }
   async function confirmAbandon() {
     if (!abandon || closingId) return;
+    // A journal may appear between rendering and confirmation. Show its
+    // warning before accepting a new close confirmation.
+    const queuedNow = closeAgents.some(a => localQueuePending(a.id));
+    if ((!closeHasQueue && queuedNow) || (!closeHasUnknown && (queuedNow || closeAgents.some(a => localOutgoingPending(a.id))))) { localCloseRevision++; return; }
     const target = $state.snapshot(abandon);
+    const visit = selectedId; const device = instanceId; const generation = sequence;
     closingId = target.id; abandonError = "";
     try {
       if (closeUnknown) {
-        const state = await readAbandon(target.id);
-        if (state.closed) await finishAbandon(target.id);
-        else { abandon = { ...target, unknownOperationIds: state.unknownOperationIds }; closeUnknown = false; }
+        const state = await readCloseStatus(target.id);
+        if (state.status === "closed") await finishAbandon(target.id);
+        else {
+          closeUnknown = state.status !== "open";
+          abandonError = state.status === "open" ? "The session is open; the previous close result remains unknown. You can confirm another attempt." : "The close result is still unknown.";
+        }
         return;
       }
       // Remember an unknown close until a read confirms its result; never blindly replay.
       rememberCloseRecovery(target.id, target.unknownOperationIds);
       closeUnknown = true;
-      await api(`/agents/${target.id}/close`, { abandonUnknownOperationIds: target.unknownOperationIds });
+      await api(`/agents/${target.id}/close`, { confirmRisks: true });
       await finishAbandon(target.id);
     } catch(e) {
-      abandonError = e instanceof Error ? e.message : m.load_failure();
+      const reason = e instanceof Error ? e.message : m.load_failure();
       try {
-        const state = await readAbandon(target.id);
-        if (state.closed) await finishAbandon(target.id);
+        const state = await readCloseStatus(target.id);
+        if (state.status === "closed") { await finishAbandon(target.id); return; }
         else if (e instanceof RequestRejected) {
-          abandon = { ...target, unknownOperationIds: state.unknownOperationIds }; closeUnknown = false;
+          forgetCloseRecovery(target.id); closeUnknown = false;
         }
       } catch(readError) {
-        closeRecoveryErrors = { ...closeRecoveryErrors, [target.id]: readError instanceof Error ? readError.message : abandonError };
+        closeRecoveryErrors = { ...closeRecoveryErrors, [target.id]: readError instanceof Error ? readError.message : reason };
       }
-    } finally { closingId = null; }
+      closeError = { id: target.id, reason };
+      if (modal === "abandon-close" && abandon?.id === target.id && selectedId === visit && instanceId === device && sequence === generation) await closeModal();
+      if (selectedId === visit && instanceId === device && sequence === generation && navigation.surfaces.every(surface => surface === "sidebar")) {
+        preview(null);
+        void openConversation(target.id, false, snapshot.agents.find(a => a.id === target.id)?.ownerId);
+      }
+    } finally {
+      closingId = null;
+      if (closeRecovery.entries.some(i => i.agentId === target.id)) void checkPendingClose(target.id);
+    }
   }
   async function closeTree(id: string) {
     if (closingId) return;
     closeError = null;
-    if (!connected || hosts.find(h => h.id === snapshot.agents.find(a => a.id === id)?.hostId)?.connected === false) { closeError = { id, reason: m.host_offline() }; return; }
-    closingId = id;
     const visit = selectedId; const device = instanceId; const generation = sequence;
-    try {
-      await api(`/agents/${id}/close`, {});
-      toast.success(m.tree_closed(), { duration: 3000 });
-      adopt(await api<Snapshot>("/snapshot"));
-    } catch(e) {
-      closeError = { id, reason: e instanceof Error ? e.message : m.load_failure() };
-      try {
-        const state = await readAbandon(id);
-        if (!state.closed && selectedId === visit && instanceId === device && sequence === generation && navigation.surfaces.every(surface => surface === "sidebar")) {
-          if (navigation.surfaces.at(-1) === "sidebar") await back();
-          if (selectedId !== visit || instanceId !== device || sequence !== generation || navigation.surfaces.length) return;
-          abandon = { id, title: snapshot.agents.find(a => a.id === id)?.title ?? "Orc", unknownOperationIds: state.unknownOperationIds };
-          closeUnknown = false; abandonError = ""; setSurface("abandon-close", true);
-        }
-      } catch { /* Ordinary close errors retain their existing inline feedback. */ }
-    }
-    finally { closingId = null; }
+    if (navigation.surfaces.some(surface => surface !== "sidebar")) return;
+    if (navigation.surfaces.at(-1) === "sidebar") await back();
+    if (selectedId !== visit || instanceId !== device || sequence !== generation || navigation.surfaces.length) return;
+    preview(null);
+    const existing = closeRecovery.entries.find(i => i.agentId === id);
+    abandon = { id, title: snapshot.agents.find(a => a.id === id)?.title ?? "Orc", unknownOperationIds: existing?.unknownOperationIds ?? [] };
+    closeUnknown = !!existing; abandonError = ""; setSurface("abandon-close", true);
   }
   async function rename(title: string) {
     if (!selectedId || !hostConnected) return m.host_offline();
@@ -823,6 +854,10 @@
     void client.start().then(()=>{connectionReady=true;return load();}).catch(e=>{loading=false;projectsLoading=false;error=e.message;});
     const compositionStart = () => composing = true;
     const compositionEnd = () => composing = false;
+    const closeStorageChanged = (event: StorageEvent) => {
+      if (event.storageArea === localStorage && (!event.key || ["outgoing/", "follow-up/", "accepted/"].some(prefix => event.key!.startsWith(`${storagePrefix}/${prefix}`)))) localCloseRevision++;
+    };
+    window.addEventListener("storage", closeStorageChanged);
     window.addEventListener("compositionstart", compositionStart);
     window.addEventListener("compositionend", compositionEnd);
     const timer = setInterval(() => { now = Date.now(); if (connected && now % 5000 < 1000) { void reconcilePending(); if (modal === "settings" && settingsPage === "grove") void refreshInstance(); } }, 1000);
@@ -831,7 +866,7 @@
     window.addEventListener("keydown", reserveTab, true);
     const installer = (e: Event) => { e.preventDefault(); install = e as Event & { prompt: () => Promise<void> }; };
     window.addEventListener("pointerdown", permission, { once: true }); window.addEventListener("keydown", permission, { once: true }); window.addEventListener("keydown", keydown); window.addEventListener("beforeinstallprompt", installer);
-    return () => { ++hoverSequence; clearInterval(hoverPoll); clearTimeout(hoverDelay); window.removeEventListener("compositionstart", compositionStart); window.removeEventListener("compositionend", compositionEnd); media.removeEventListener("change", resize); cleanupNavigation(); window.removeEventListener("keydown", reserveTab, true); disposed = true; client?.close(); setClient(undefined); clearInterval(timer);window.removeEventListener("pointerdown", permission); window.removeEventListener("keydown", permission); window.removeEventListener("keydown", keydown); window.removeEventListener("beforeinstallprompt", installer); };
+    return () => { ++hoverSequence; clearInterval(hoverPoll); clearTimeout(hoverDelay); window.removeEventListener("storage", closeStorageChanged); window.removeEventListener("compositionstart", compositionStart); window.removeEventListener("compositionend", compositionEnd); media.removeEventListener("change", resize); cleanupNavigation(); window.removeEventListener("keydown", reserveTab, true); disposed = true; client?.close(); setClient(undefined); clearInterval(timer);window.removeEventListener("pointerdown", permission); window.removeEventListener("keydown", permission); window.removeEventListener("keydown", keydown); window.removeEventListener("beforeinstallprompt", installer); };
   });
 </script>
 
@@ -843,7 +878,7 @@
 <div class="workbench" class:close-recovery-layout={closeRecovery.entries.some(i => modal !== "abandon-close" || abandon?.id !== i.agentId)}>
 <main>
   <Sidebar.Root>
-  <SessionList bind:this={sessionList} user={currentUser} version={instance?.version ?? null} {showAuthors} onsettings={() => show("settings")} onlogout={() => show("sign-out")} agents={visibleAgents} {projects} {projectsLoading} {instanceId} {activityWindow} onactivitywindow={value => activityWindow = value} {now} {hosts} {selectedId} {loading} {connected} {closingId} closeError={selectedId === closeError?.id && navigation.surfaces.at(-1) !== "sidebar" ? null : closeError} onclosetree={closeTree} onopen={open} onpreview={preview} onnew={() => show("new")}>
+  <SessionList bind:this={sessionList} user={currentUser} version={instance?.version ?? null} {showAuthors} onsettings={() => show("settings")} onlogout={() => show("sign-out")} agents={visibleAgents} {projects} {projectsLoading} {instanceId} {activityWindow} onactivitywindow={value => activityWindow = value} {now} {hosts} {selectedId} {loading} {connected} {closingId} onclosetree={closeTree} onopen={open} onpreview={preview} onnew={() => show("new")}>
     {#if !connected && !loading}<div class="connection-banner" role="status"><strong>{m.reconnecting()}</strong><span>{m.offline_help()}</span><Button variant="ghost" size="sm" onclick={load}>{m.retry()}</Button></div>{/if}
   </SessionList>
   </Sidebar.Root>
@@ -862,18 +897,24 @@
 {/if}
 </div>
 <Dialog.Root open={modalOpen} onOpenChange={value => { if (!value && modal) void closeModal(); }}>
-  <Dialog.Content onEscapeKeydown={event=>{event.preventDefault();event.stopPropagation();void back();}} showCloseButton={false} class={`grove-dialog ${modal === "new" ? "new-modal" : modal === "settings" ? "settings-modal" : modal === "sign-out" ? "signout-dialog" : ""}`} onOpenAutoFocus={e => { e.preventDefault(); if (modal === "new") projectSearch?.focus(); }}><Button class="modal-close" variant="ghost" size="icon-sm" aria-label={m.close()} onclick={closeModal}><X /></Button>
+  <Dialog.Content onEscapeKeydown={event=>{event.preventDefault();event.stopPropagation();void back();}} showCloseButton={false} class={`grove-dialog ${modal === "new" ? "new-modal" : modal === "settings" ? "settings-modal" : modal === "sign-out" || modal === "abandon-close" ? "signout-dialog" : ""}`} onOpenAutoFocus={e => { e.preventDefault(); if (modal === "new") projectSearch?.focus(); }}><Button class="modal-close" variant="ghost" size="icon-sm" aria-label={m.close()} onclick={closeModal}><X /></Button>
     {#if modal === "sign-out"}
       <Dialog.Header><Dialog.Title>{m.sign_out_confirm()}</Dialog.Title><Dialog.Description>{m.sign_out_help()}</Dialog.Description></Dialog.Header>
       {#if logoutError}<p class="inline-error" role="alert">{logoutError}</p>{/if}
       <Dialog.Footer class="signout-actions"><Button variant="ghost" size="sm" disabled={logoutBusy} onclick={closeModal}>{m.cancel()}</Button><Button variant="default" size="sm" disabled={logoutBusy} onclick={logout}>{logoutBusy ? m.signing_out() : m.sign_out()}</Button></Dialog.Footer>
     {:else if modal === "abandon-close" && abandon}
-      <Dialog.Title>{m.abandon_close_title()}</Dialog.Title>
-      <Dialog.Description>{m.abandon_close_help()}</Dialog.Description>
-      <p class="break-words font-medium">{abandon.title}</p>
-      <details open><summary>{m.abandon_close_submissions({ count: abandon.unknownOperationIds.length })}</summary><ul class="max-h-32 overflow-y-auto text-xs break-all">{#each abandon.unknownOperationIds as id}<li>{id}</li>{/each}</ul></details>
-      {#if abandonError}<p class="inline-error" role="alert">{abandonError}</p>{/if}
-      <div class="flex flex-wrap justify-end gap-2"><Button variant="ghost" size="sm" disabled={!!closingId} onclick={closeModal}>{m.cancel()}</Button><Button variant="destructive" size="sm" disabled={!!closingId || !hosts.find(h => abandon?.id.startsWith(h.id + ":"))?.connected} onclick={confirmAbandon}>{closingId ? m.sending() : closeUnknown ? m.abandon_close_check() : m.abandon_close_title()}</Button></div>
+      <Dialog.Title>Close this session?</Dialog.Title>
+      <Dialog.Description class="mt-2">Close this Orc and its members. Their history is kept.</Dialog.Description>
+      <div class="mt-4 space-y-2 text-sm">
+        <p class="break-words font-medium">{abandon.title}</p>
+        {#if closeWorking.length}<p role="status">Working or stopping: {closeWorking.map(a => a.title).join(", ")}. Wait for work to finish or stop it before closing.</p>{/if}
+        {#if closeHasUnknown}<p>Some work or deliveries need attention. Unconfirmed work may still be running.</p>{/if}
+        {#if closeHasQuestions}<p>Unanswered questions will remain in the history.</p>{/if}
+        {#if closeHasQueue}<p>Queued messages will stay paused when this session is reopened.</p>{/if}
+        {#if closeAgents.find(a => a.id === abandon!.id)?.backend === "pi"}<p>Reopening this Pi session may resume unfinished Pi work.</p>{/if}
+        {#if abandonError}<p class="inline-error" role="alert">{abandonError}</p>{/if}
+      </div>
+      <div class="mt-6 flex flex-wrap justify-end gap-2"><Button variant="ghost" size="sm" disabled={!!closingId} onclick={closeModal}>{m.cancel()}</Button><Button variant="destructive" size="sm" disabled={!!closingId || (!closeUnknown && closeWorking.length > 0) || !hosts.find(h => abandon?.id.startsWith(h.id + ":"))?.connected} onclick={confirmAbandon}>{closingId ? m.sending() : closeUnknown ? m.abandon_close_check() : "Close session"}</Button></div>
     {:else if modal === "new"}
       <Dialog.Title>{navigation.surfaces.includes("history") ? m.open_session() : m.new_session()}</Dialog.Title>
       {#if navigation.surfaces.includes("history") && projects.find(p => projectReference(p) === projectId)}

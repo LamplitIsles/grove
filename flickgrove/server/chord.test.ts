@@ -4,7 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
 import { DeliveryRejected } from "./runtime";
-import { lookupSchema, receiptSchema } from "../src/chord-contract";
+import {
+  closeStatusSchema,
+  lookupSchema,
+  receiptSchema,
+  routeCall,
+} from "../src/chord-contract";
 import { Workspace } from "./workspace";
 import { HostService, qualify } from "./hosts";
 import {
@@ -21,7 +26,7 @@ import {
   RequestTimeout,
 } from "../src/chord-client";
 import type { Detail } from "../src/contracts";
-import type { Receipt, View } from "../src/chord-contract";
+import type { CloseStatus, Receipt, View } from "../src/chord-contract";
 const cleanups: (() => void)[] = [];
 afterEach(() => {
   for (const close of cleanups.splice(0).reverse()) close();
@@ -1504,4 +1509,88 @@ test("reservation and retry relations cannot cross the owning Peer", async () =>
   ]);
   expect(right.runtime.inputs).toHaveLength(0);
   expect(await left.service.lookup(agentId, operationId)).toBeNull();
+});
+
+test("close status follows the original Peer across a timed out close and restart", async () => {
+  const f = fixture("ordered");
+  const other = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  const client = await f.client(
+    () => {},
+    () => {},
+    100,
+  );
+  const wrongPeer = await other.client();
+  const status = () => client.call<CloseStatus>("closeStatus", { id });
+  const gate = Promise.withResolvers<void>();
+  let releases = 0;
+  f.runtime.closeOverride = async () => {
+    releases++;
+    await gate.promise;
+  };
+  try {
+    expect(routeCall(`/agents/${encodeURIComponent(id)}/close-status`)).toEqual(
+      {
+        member: "closeStatus",
+        input: { id },
+      },
+    );
+    expect(closeStatusSchema.parse(await status())).toEqual({ status: "open" });
+    expect(
+      await client.call<CloseStatus>("closeStatus", {
+        id: qualify(f.service.identity.id, "missing"),
+      }),
+    ).toEqual({ status: "unknown" });
+    await expect(wrongPeer.call("closeStatus", { id })).rejects.toThrow(
+      "another Peer",
+    );
+    await expect(
+      client.call("closeStatus", { id: agent.id }),
+    ).rejects.toThrow();
+    const closing = client
+      .call("closeTree", { id, confirmRisks: true })
+      .catch((error) => error);
+    await until(() => releases === 1);
+    expect(await status()).toEqual({ status: "unknown" });
+    expect(await closing).toBeInstanceOf(RequestTimeout);
+    expect(await status()).toEqual({ status: "unknown" });
+    gate.resolve();
+    await until(() => f.app.closeStatus(agent.id).status === "closed");
+    expect(await status()).toEqual({ status: "closed" });
+    expect(releases).toBe(1);
+    expect(f.runtime.inputs).toHaveLength(0);
+    client.close();
+    await expect(status()).rejects.toThrow("offline");
+    f.restart();
+    const reconnected = await f.client();
+    expect(await reconnected.call<CloseStatus>("closeStatus", { id })).toEqual({
+      status: "closed",
+    });
+  } finally {
+    gate.resolve();
+  }
+});
+
+test("close status reports open after failed release without retrying it", async () => {
+  const f = fixture("ordered");
+  const agent = await f.app.createOrc("alpha");
+  const id = qualify(f.service.identity.id, agent.id);
+  const client = await f.client();
+  let releases = 0;
+  f.runtime.closeOverride = async () => {
+    releases++;
+    throw new Error("release outcome unavailable");
+  };
+  await expect(
+    client.call("closeTree", { id, confirmRisks: true }),
+  ).rejects.toThrow("release outcome unavailable");
+  expect(await client.call<CloseStatus>("closeStatus", { id })).toEqual({
+    status: "open",
+  });
+  expect(await client.call<CloseStatus>("closeStatus", { id })).toEqual({
+    status: "open",
+  });
+  expect(releases).toBe(1);
+  expect(f.runtime.inputs).toHaveLength(0);
 });

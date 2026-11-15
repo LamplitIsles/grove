@@ -488,8 +488,19 @@ export class HostService {
   abandonCloseCandidate(id: string) {
     return this.workspace.abandonCloseCandidate(this.raw(id));
   }
-  closeTree(id: string, abandonUnknownOperationIds?: string[]) {
-    return this.workspace.closeTree(this.raw(id), abandonUnknownOperationIds);
+  closeTree(
+    id: string,
+    abandonUnknownOperationIds?: string[],
+    confirmRisks = false,
+  ) {
+    return this.workspace.closeTree(
+      this.raw(id),
+      abandonUnknownOperationIds,
+      confirmRisks,
+    );
+  }
+  closeStatus(id: string) {
+    return this.workspace.closeStatus(this.raw(id));
   }
   async answerBatch(
     id: string,

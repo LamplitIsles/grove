@@ -1292,11 +1292,6 @@ pre {
   padding: 8px 24px;
   border-bottom: 1px solid var(--border);
 }
-.tree-close-error {
-  color: #fca5a5;
-  font-size: 12px;
-  padding: 4px 8px 12px;
-}
 .tree-close-action {
   display: none;
 }
