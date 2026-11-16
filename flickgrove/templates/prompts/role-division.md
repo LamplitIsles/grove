@@ -8,6 +8,6 @@ Orc also handles database schemas and migrations as important long-lived data co
 
 Worker handles other implementation, including reusable Blender and engineering tools, plugin internals and backend code. Each owner handles its work's tests and fixes. Mixed work proceeds serially in the shared checkout.
 
-Before implementing a user-facing, client-facing, cross-system or developer collaboration contract, Orc shows the user a concrete format, key semantics and consequences for confirmation. Worker obtains that confirmation through Orc. Do not ask again if already confirmed; confirmation does not authorize deployment or external changes.
+Follow the managed Orc confirmation guidance for user-facing and cross-system choices. Worker routes such decisions through Orc. Confirmation does not authorize deployment or external changes.
 
 This division is a default. Follow the user's explicit assignment for the current task. It does not grant permission to use tools or change state.

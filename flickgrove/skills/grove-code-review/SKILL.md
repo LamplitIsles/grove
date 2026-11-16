@@ -3,7 +3,7 @@ name: grove-code-review
 description: Review a branch or work-in-progress diff against the repository's default branch, or an explicit fixed point, along separate Standards and Spec axes; then assess how far it is from merge.
 ---
 
-For a task primarily changing frontend user experience, Orc starts this skill and independent Reviewers only after the user explicitly requests review. Until then, continue implementation and own verification, present the result and await UX feedback or a review request. Independent PR review remains required before merge.
+Start independent Reviewers when the user explicitly requests review. Implementation includes Orc self-review whether or not independent review is requested.
 
 Review the diff between `HEAD` and the repository's default branch, unless the user supplies another fixed point:
 
@@ -126,15 +126,9 @@ My assessment
 - Estimated effort: <one focused iteration / several focused iterations / substantial work>
 - Path to merge: <what to fix and the exact repository checks/builds to rerun before PR or merge>
 
-Approximately <range>% complete.
 ```
 
-Keep blockers separate from recommended reinforcement. Name repository-specific verification commands when they are discoverable, rather than writing a generic “run tests.” Use a narrow percentage range, normally five points, as a directional completion estimate rather than false precision. Calibrate it from remaining risk and work:
-
-- **95–100%** — ready or only final verification remains.
-- **85–95%** — a focused iteration of small fixes or representative tests remains.
-- **70–85%** — several bounded changes remain.
-- **Below 70%** — core behaviour or substantial correctness, security, data, or design work remains.
+Keep blockers separate from recommended reinforcement. Name repository-specific verification commands when they are discoverable, rather than writing a generic “run tests.”
 
 A judgement-call smell is not automatically a blocker; place it under recommended reinforcement unless it materially affects safe or correct merging.
 

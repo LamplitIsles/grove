@@ -109,10 +109,10 @@ test("installed native discovers version-owned grove skills across projects with
         "grove-grill-with-docs",
         "grove-grilling",
         "grove-orc-impl",
+        "grove-prepare-impl",
         "grove-research",
         "grove-review-again",
         "grove-spec-self-review",
-        "grove-to-orc-impl",
         "grove-to-spec",
         "grove-to-tickets",
       ]);
@@ -127,6 +127,22 @@ test("installed native discovers version-owned grove skills across projects with
         ),
       );
     }
+    for (const name of ["grove-orc-impl", "grove-code-review"]) {
+      const skill = response.data[0]!.skills.find((s) => s.name === name)!;
+      const instructions = await readFile(skill.path, "utf8");
+      expect(instructions).toMatch(
+        /Start independent [Rr]eview(?:ers)? (?:only )?when the user explicitly requests/,
+      );
+      expect(instructions).not.toContain(
+        "Independent PR review remains required",
+      );
+    }
+    const diagnose = response.data[0]!.skills.find(
+      (s) => s.name === "grove-diagnosing-bugs",
+    )!;
+    expect(await readFile(diagnose.path, "utf8")).toContain(
+      "Simple problems can be located and fixed directly without invoking it",
+    );
   } finally {
     await client.close();
     await rm(root, { recursive: true, force: true });

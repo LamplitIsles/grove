@@ -61,7 +61,7 @@ The shipped collaboration pattern provides a default task division, captured whe
 | Reviewer   | Independently examines the specified change and existing evidence against Standards or Spec, including a high-risk Spec profile. Reviewers report findings to the Orc; they do not run verification. |
 | Researcher | Investigates a bounded question and reports evidence and uncertainty. The Orc synthesizes the result and decides what to recommend.                                                                  |
 
-The task division is editable in the instance's `prompts/role-division.md`; changes affect new Orcs, while existing sessions keep their prior division. The implementation workflow calls for Orc self-review and independent whole-PR review before merge, with user approval where applicable. Codex Orc and Worker threads run with full access in their selected environment; Codex Reviewers and Researchers use a native read-only sandbox. The shipped workflow is guidance for agents, not a guarantee that an external forge or service is configured.
+The task division is editable in the instance's `prompts/role-division.md`; changes affect new Orcs, while existing sessions keep their prior division. The implementation workflow calls for Orc self-review; independent whole-PR review starts when the user requests it, with user approval where applicable. Codex Orc and Worker threads run with full access in their selected environment; Codex Reviewers and Researchers use a native read-only sandbox. The shipped workflow is guidance for agents, not a guarantee that an external forge or service is configured.
 
 ### Workflow skills
 

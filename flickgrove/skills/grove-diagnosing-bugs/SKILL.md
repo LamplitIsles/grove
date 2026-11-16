@@ -1,19 +1,23 @@
 ---
 name: grove-diagnosing-bugs
-description: Diagnose bugs and performance regressions through a symptom-matching red loop, ranked hypotheses, causal repair and independent Grove review.
+description: Investigate unclear or difficult bugs and performance regressions through a symptom-matching red loop, ranked hypotheses and causal repair.
 ---
 
 # Diagnose and repair
 
-Use all six phases in order. Record an evidence-based justification for any skipped phase. Completing one phase means continuing to the next authorized step, not declaring the assignment complete.
+Use this skill for bugs or regressions that need structured diagnosis. Simple problems can be located and fixed directly without invoking it. When invoked, use all six phases in order and record an evidence-based justification for any skipped phase. After initial localization, follow the discussion-before-repair gate below.
 
 ## Prepare the Grove assignment
 
 Orc establishes the user's exact symptom, expected result, repository/runtime and known good/bad states with the minimum necessary questions. Read repository/host instructions, `CONTEXT.md` and relevant ADRs; inspect environment facts read-only within authorization. Resolve the registered project alias, pin starting HEAD and preserve pre-existing/concurrent edits.
 
-Read `grove-to-orc-impl` and `grove-orc-impl` completely and reuse their spec/self-review, dispatch, delivery recovery, review and approval lifecycle. A self-reviewed diagnostic spec is ready with **root cause unknown** when symptom, scope and these evidence gates are clear; it need not prescribe a guessed patch. Orc first investigates and makes the decisions available from current evidence. Assign irreducible unknowns to the appropriate category owner as bounded questions with goals, evidence and limits. When Worker work is needed, carry this skill's content and diagnostic acceptance into its bootstrap. Follow the captured task division and the user’s explicit assignments. Each owner builds and runs its relevant loops, tests, probes and fixes. Mixed work is serial on one branch and PR; preserve each other's work.
+Read `grove-prepare-impl` and `grove-orc-impl` completely and reuse their spec/self-review, dispatch, delivery recovery, review and approval lifecycle. A self-reviewed diagnostic spec is ready with **root cause unknown** when symptom, scope and these evidence gates are clear; it need not prescribe a guessed patch. Orc first investigates and makes the decisions available from current evidence. Assign irreducible unknowns to the appropriate category owner as bounded questions with goals, evidence and limits. When Worker work is needed, carry this skill's content and diagnostic acceptance into its bootstrap. Follow the captured task division and the user’s explicit assignments. Each owner builds and runs its relevant loops, tests, probes and fixes. Mixed work is serial on one branch and PR; preserve each other's work.
 
 Common lifecycle stays in those workflows. Diagnosis adds the ordered gates below before implementation conclusions, and the no-change outcome below overrides their usual PR requirement. Use actual Grove MCP schemas discovered on the execution host; model/effort are application configuration. Only owning Orc manages agents. Inspect unknown admissions with list/read before deciding recovery, without automatic replay; questions route through Orc with explicit question IDs. Native collaboration is not an alternative.
+
+## Discuss before repair
+
+After initial localization, Orc presents the observed evidence, likely cause, uncertainty and a proposed solution. Follow `grove-grill-with-docs` in discussion-only mode and wait for the user's direction before changing product behavior or starting Phase 5. If evidence is incomplete or a red loop cannot be built, explain what is known and missing without presenting a hypothesis as proven. Authorized evidence gathering may continue; the user's choice does not replace causal evidence or regression verification.
 
 ## Evidence and authorization
 
@@ -42,7 +46,7 @@ Tighten setup/runtime, assert the exact symptom rather than absence of crashes, 
 
 **Gate:** name one red-capable command already executed at least once and show sanitized invocation/output. It reaches the actual bug path and asserts the user's exact symptom, runs in seconds where practical, is deterministic or has a measured useful reproduction rate, and is agent-runnable except the explicit structured HITL dependency. A passing synthetic fixture alone does not establish reproduction.
 
-If no such loop is possible, stop hypothesis/fix progression. Report attempted approaches and precisely missing redacted artifact/access/observation through Orc. Ask only for that dependency; continue independent evidence work. Never manufacture green evidence or a PR.
+If no such loop is possible, stop hypothesis/fix progression. Report attempted approaches and precisely missing redacted artifact/access/observation through Orc, and discuss the initial findings and missing evidence with the user. Continue independent evidence work. Never manufacture green evidence or a PR.
 
 ## Phase 2 — Reproduce and minimize
 
@@ -54,11 +58,11 @@ Remove inputs, callers, configuration, data and steps one variable at a time, re
 
 ## Phase 3 — Rank falsifiable hypotheses
 
-Before probing, produce 3–5 ranked candidate causes. Each includes evidence for/against, grounded confidence and a prediction: “If X causes this, changing Y removes the symptom / changing Z worsens it.” Sharpen or discard candidates without a falsifiable prediction. Use measured probabilities only when data supports them; otherwise use qualitative confidence and ranking.
+Before probing, identify the evidence-supported candidate causes needed to explain the symptom; rank them when more than one is plausible. Each includes evidence for/against, grounded confidence and a prediction: “If X causes this, changing Y removes the symptom / changing Z worsens it.” Sharpen or discard candidates without a falsifiable prediction. Use measured probabilities only when data supports them; otherwise use qualitative confidence and ranking.
 
-The owner reports the ranking and verification directions before probing, then immediately continues authorized testing. Worker reports through `worker_report`; Orc publishes the causes, evidence/confidence and directions as a progress update without waiting for acknowledgment. Async corrections steer ongoing work. Missing necessary evidence, a material scope/product decision or required authorization gates only dependent work; a candidate list is not a handoff gate.
+Before probing, the owner reports the candidates and verification directions: Worker uses `worker_report`; Orc shares the evidence and uncertainty. After initial localization, follow the discussion-before-repair gate. Async corrections steer ongoing work; missing evidence, decisions or authorization gate only dependent work.
 
-**Gate:** ranked list and predictions are reported before the first probe; no routine “shall I continue?” pause.
+**Gate:** candidates and predictions are reported before the first probe; no routine “shall I continue?” pause.
 
 ## Phase 4 — Probe predictions
 
@@ -80,7 +84,7 @@ If no correct seam exists, document that architectural finding and the available
 
 Re-run the original loop; confirm regression success or documented seam absence. Remove tagged debug instrumentation (search its prefix) and delete throwaway prototypes or retain them only in a clearly marked local debug location. Explain the proven cause and causal boundary in the commit/PR. Record concrete architectural prevention observations in `.scratch/defered/` after repair; execute only the authorized fix scope.
 
-For a code repair, follow `grove-orc-impl` delivery: verify the whole assignment and commit/push one PR with exact sanitized red/green evidence. A Worker reports `IMPL_COMPLETE` with current HEAD, PR URL and absolute report path for its assignment. Orc substantively self-reviews the complete diff, spec and evidence before independent whole-PR Standards + Spec review (`high_risk_spec` by actual risk); use `grove-code-review` according to the frontend UX exception in `grove-orc-impl`. Reviewers inspect code/spec/existing evidence only. Missing verification and deterministic repairs go to the category owner on the same PR. Read `grove-review-again` completely for original-reviewer re-review bound to explicit new HEAD. Merge approval remains governed; deployment is separately scoped.
+For a code repair, follow `grove-orc-impl` for delivery and include the exact sanitized red/green evidence from this diagnosis.
 
 For environment-only/no-code-change findings, report the actionable cause, evidence, limitations and authorized next step without inventing a commit/PR or code-repair `IMPL_COMPLETE`. A Worker reports through `worker_report`; Orc resolves the outcome and owns lifecycle closure after evidence/questions settle. A blocked Worker reports `IMPL_BLOCKED` with missing evidence/decision and attempted approaches.
 

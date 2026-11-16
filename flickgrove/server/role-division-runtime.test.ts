@@ -22,7 +22,8 @@ const preset = {
   spec: choice,
   high_risk_spec: choice,
 };
-const captured = "DIVISION-ALPHA-CAPTURED";
+const captured =
+  "DIVISION-ALPHA-CAPTURED\nBefore any user-facing change, seek confirmation.";
 const edited = "DIVISION-BETA-LATER";
 
 test("the captured task division reaches new and resumed Codex sessions and never the legacy ones", async () => {
@@ -90,6 +91,17 @@ test("the captured task division reaches new and resumed Codex sessions and neve
     // Both new sessions carry the captured text at their real thread start.
     const starts = await instructions("thread/start");
     expect(starts).toHaveLength(2);
+    expect(starts[0]).toContain(
+      "Start independent review only when the user explicitly requests it",
+    );
+    expect(starts[0]).toContain("Orc substantively self-reviews");
+    expect(starts[0]).toContain("Orc creates the PR");
+    expect(starts[0]).toContain("minor unspecified visual details");
+    expect(starts[0]).toContain("may affect existing clients");
+    expect(starts[0]).toContain("workflow or user-interaction approaches");
+    expect(starts[0]).toContain("supersedes conflicting guidance");
+    expect(starts[1]).toContain("Commit and report scoped work to Orc");
+    expect(starts[1]).toContain("Orc creates and updates PRs");
     for (const text of starts) expect(text).toContain(captured);
     const orcThread = app.detail(orc.id).threadId!;
     const workerThread = app.detail(worker.id).threadId!;
@@ -116,7 +128,9 @@ test("the captured task division reaches new and resumed Codex sessions and neve
       -1,
     )!;
     expect(orcResume).toContain(captured);
+    expect(orcResume).toContain("supersedes conflicting guidance");
     expect(workerResume).toContain(captured);
+    expect(workerResume).toContain("Orc creates and updates PRs");
     expect(orcResume).not.toContain(edited);
     expect(workerResume).not.toContain(edited);
     // A Worker added by the restarted Orc inherits the stored text, not the file.

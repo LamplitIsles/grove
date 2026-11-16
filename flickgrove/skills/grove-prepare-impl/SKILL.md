@@ -1,11 +1,11 @@
 ---
-name: grove-to-orc-impl
-description: Turn an agreed discussion into a self-reviewed spec, then coordinate category-owned implementation and one PR.
+name: grove-prepare-impl
+description: Turn an agreed discussion into an implementation-ready spec, then hand it to grove-orc-impl for implementation and one PR.
 ---
 
 Run only after product decisions are settled; do not restart discovery.
 
-1. Read `grove-to-spec` completely, create the FlickNote spec, and run `grove-spec-self-review` to readiness. Record documentation and agent guidance acceptance in the spec.
+1. Read and follow `grove-to-spec` completely to create an implementation-ready FlickNote spec, including documentation and agent guidance acceptance.
 2. Read existing tickets when present. Create tickets through `grove-to-tickets` only when the user explicitly requests them. A spec without tickets is a complete assignment.
 3. Read `grove-orc-impl` completely. Follow the captured task division and the user’s explicit assignments; one Worker handles its assigned implementation. Each owner handles its tests and fixes. Use one branch and one PR per repository, serially coordinating mixed work.
 

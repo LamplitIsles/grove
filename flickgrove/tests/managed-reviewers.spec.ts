@@ -74,13 +74,13 @@ for (const width of [1440, 390])
       (el as HTMLTextAreaElement).setSelectionRange(7, 14),
     );
     await tools.getByRole("button", { name: "Implement", exact: true }).click();
-    await expect(input).toHaveValue("before $grove-to-orc-impl after");
+    await expect(input).toHaveValue("before $grove-prepare-impl after");
     await input.evaluate((el) =>
       (el as HTMLTextAreaElement).setSelectionRange(0, 0),
     );
     await tools.getByRole("button", { name: "Review", exact: true }).click();
     await expect(input).toHaveValue(
-      "$grove-code-review before $grove-to-orc-impl after",
+      "$grove-code-review before $grove-prepare-impl after",
     );
     await input.evaluate((el) =>
       (el as HTMLTextAreaElement).setSelectionRange(
@@ -90,7 +90,7 @@ for (const width of [1440, 390])
     );
     await tools.getByRole("button", { name: "Re-review", exact: true }).click();
     await expect(input).toHaveValue(
-      "$grove-code-review before $grove-to-orc-impl after $grove-review-again ",
+      "$grove-code-review before $grove-prepare-impl after $grove-review-again ",
     );
     const draft = await input.inputValue();
     await input.dispatchEvent("compositionstart");
