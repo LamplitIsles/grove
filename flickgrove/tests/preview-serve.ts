@@ -16,6 +16,7 @@ import {
 } from "../server/testing";
 import { GroveAuth } from "../server/auth";
 import { InstanceControls } from "../server/instance-controls";
+import { OrganizationReviewStore } from "../server/organization-review";
 import { fixtureAuth } from "./fixture-auth";
 const directory = await mkdtemp(join(tmpdir(), "grove-file-browser-"));
 const assets = resolve(
@@ -331,6 +332,7 @@ async function unit(name: string, color: string, origin: () => string) {
   const auth = process.env.PREVIEW_AUTH
     ? new GroveAuth(app.store, join(cwd, "state"), origin())
     : undefined;
+  let organizationRemoteUnavailable = false;
   const handler = createHandler(app, {
     service,
     assets,
@@ -345,6 +347,26 @@ async function unit(name: string, color: string, origin: () => string) {
     voice: process.env.PREVIEW_VOICE
       ? { configPath: join(cwd, "config.toml") }
       : undefined,
+    organizationReview: process.env.PREVIEW_ORGANIZATIONS
+      ? {
+          store: new OrganizationReviewStore(join(cwd, "state")),
+          environments: async () => [
+            { id: "local", name: "Local" },
+            { id: "remote", name: "Remote" },
+          ],
+          projects: async (id) => {
+            if (id === "remote") {
+              if (organizationRemoteUnavailable)
+                throw new Error("Fixture environment unavailable");
+              return [];
+            }
+            return [
+              { ...project, owner: "guionai" },
+              { ...workerProject, owner: "lamplitisles" },
+            ];
+          },
+        }
+      : undefined,
   });
   return {
     app,
@@ -358,6 +380,9 @@ async function unit(name: string, color: string, origin: () => string) {
     turn,
     history,
     patch,
+    setOrganizationRemoteUnavailable: (value: boolean) => {
+      organizationRemoteUnavailable = value;
+    },
     setLargeHover: (value: { id: string; deliveryId: string }) => {
       largeHover = value;
     },
@@ -412,6 +437,17 @@ const server = Bun.serve({
     );
     if (upgraded) return upgraded === true ? undefined : upgraded;
     const url = new URL(request.url);
+    if (
+      url.pathname === "/fixture/organizations-remote" &&
+      request.method === "POST" &&
+      process.env.PREVIEW_ORGANIZATIONS
+    ) {
+      const { unavailable } = (await request.json()) as {
+        unavailable: boolean;
+      };
+      local.setOrganizationRemoteUnavailable(unavailable);
+      return Response.json({ ok: true });
+    }
     if (url.pathname === "/fixture/member-gap" && request.method === "POST") {
       const { older } = (await request.json()) as { older: boolean };
       const agent = await local.app.createOrc("fixture", defaults);

@@ -130,9 +130,7 @@ test("installed native discovers version-owned grove skills across projects with
     for (const name of ["grove-orc-impl", "grove-code-review"]) {
       const skill = response.data[0]!.skills.find((s) => s.name === name)!;
       const instructions = await readFile(skill.path, "utf8");
-      expect(instructions).toMatch(
-        /Start independent [Rr]eview(?:ers)? (?:only )?when the user explicitly requests/,
-      );
+      expect(instructions).toContain("Orc's captured review policy");
       expect(instructions).not.toContain(
         "Independent PR review remains required",
       );

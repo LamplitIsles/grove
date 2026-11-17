@@ -260,6 +260,7 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
   const { FakeRuntime, fixtureProjects } = await import("./testing");
   const { HostService } = await import("./hosts");
   const { servePeer } = await import("./http");
+  const { OrganizationReviewStore } = await import("./organization-review");
   const { socketWithHeaders } = await import("./socket-testing");
   const { openGrove } = await import("../src/chord-client");
   const { fakeVoiceProvider } = await import("../tests/voice-fixture");
@@ -279,6 +280,18 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
     origin: () => origin,
     hostname: "127.0.0.1",
     port: 0,
+    organizationReview: {
+      store: new OrganizationReviewStore(dir),
+      environments: async () => [{ id: "local", name: "Local" }],
+      projects: async () => [
+        {
+          alias: "alpha",
+          name: "Alpha",
+          path: "/fixture/alpha",
+          owner: "acme",
+        },
+      ],
+    },
   };
   const provider = fakeVoiceProvider();
   const configDir = join(dir, "voice-config");
@@ -315,6 +328,7 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
       "/api/voice/stream",
       "/api/voice/settings",
       "/api/web/settings",
+      "/api/organization-review-settings",
     ])
       expect((await call(path)).status).toBe(401);
     expect((await call("/preview/random/test.html")).status).toBe(410);
@@ -343,6 +357,33 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
     );
     expect(result.status).toBe(200);
     const session = cookie(result, "better-auth.session_token");
+    const reviewSettings = (
+      method: string,
+      userSession: string,
+      body?: unknown,
+    ) =>
+      fetch(
+        origin.replace("localhost", "127.0.0.1") +
+          "/api/organization-review-settings",
+        {
+          method,
+          headers: {
+            host: `localhost:${server.port}`,
+            origin,
+            cookie: userSession,
+            "x-grove-peer": service.identity.id,
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        },
+      );
+    expect(
+      await (
+        await reviewSettings("PUT", session, {
+          organization: "acme",
+          enabled: true,
+        })
+      ).json(),
+    ).toEqual({ organization: "acme", enabled: true });
     const webSettings = (
       method: string,
       key?: string,
@@ -454,6 +495,22 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
     );
     expect(bobRegistration.status).toBe(200);
     const bobSession = cookie(bobRegistration, "better-auth.session_token");
+    expect(await (await reviewSettings("GET", bobSession)).json()).toEqual({
+      organizations: [{ organization: "acme", enabled: true }],
+      unavailableEnvironments: [],
+    });
+    expect(
+      await (
+        await reviewSettings("PUT", bobSession, {
+          organization: "acme",
+          enabled: false,
+        })
+      ).json(),
+    ).toEqual({ organization: "acme", enabled: false });
+    expect(await (await reviewSettings("GET", session)).json()).toEqual({
+      organizations: [{ organization: "acme", enabled: false }],
+      unavailableEnvironments: [],
+    });
     const bobSocket = socketWithHeaders(
       `ws://127.0.0.1:${server.port}/api/socket`,
       { Host: `localhost:${server.port}`, Origin: origin, Cookie: bobSession },

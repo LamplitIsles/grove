@@ -3,7 +3,7 @@ name: grove-code-review
 description: Review a branch or work-in-progress diff against the repository's default branch, or an explicit fixed point, along separate Standards and Spec axes; then assess how far it is from merge.
 ---
 
-Start independent Reviewers when the user explicitly requests review. Implementation includes Orc self-review whether or not independent review is requested.
+Implementation includes Orc self-review whether or not independent review is needed. Follow the Orc's captured review policy and the user's task-specific direction.
 
 Review the diff between `HEAD` and the repository's default branch, unless the user supplies another fixed point:
 

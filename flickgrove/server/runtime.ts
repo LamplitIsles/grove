@@ -75,6 +75,8 @@ export interface RuntimeAgent extends Detail {
   orcPromptSnapshot?: string;
   /** Captured default division of work; absent for pre-feature sessions. */
   roleDivisionSnapshot?: string;
+  /** Organization policy captured when an Orc is created. */
+  autoReviewSnapshot?: { organization: string | null; enabled: boolean };
   researcherSnapshot?: import("./reviewer-config").ReviewerSnapshot;
   reviewerSnapshot?: import("./reviewer-config").ReviewerSnapshot;
   inheritSettings?: boolean;

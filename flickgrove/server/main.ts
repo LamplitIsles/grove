@@ -27,6 +27,7 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { instanceVersion } from "./instance-version";
 import { instanceManager } from "./instance-manager";
 import { InstanceControls } from "./instance-controls";
+import { OrganizationReviewStore } from "./organization-review";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),
@@ -78,6 +79,7 @@ await initializeReviewerConfig(configPath);
 const presetsDirectory = memberPresetsDirectory(configPath);
 await initializeMemberPresets(presetsDirectory);
 const environments = new ProjectEnvironments(configPath);
+const organizationReviewStore = new OrganizationReviewStore(directory);
 const codexRuntime = new CodexRuntime({
   environments,
   projectForThread: (id) => app.projectForThread(id),
@@ -104,6 +106,8 @@ const app: Workspace = new Workspace({
   environments,
   orcPrompt: () => orcPrompt(configPath),
   roleDivision: () => roleDivision(configPath),
+  readOrganizationReviewEnabled: (owner) =>
+    organizationReviewStore.readEnabled(owner),
   researcherSnapshot: () => researcherSnapshot(configPath),
   reviewerSnapshot: (profile) => reviewerSnapshot(configPath, profile),
   memberPresets: { directory: presetsDirectory },
@@ -122,6 +126,11 @@ const service = new HostService(app, {
 });
 const httpOptions = {
   auth,
+  organizationReview: {
+    store: organizationReviewStore,
+    environments: () => environments.list(),
+    projects: (id: string) => environments.projects(id),
+  },
   instance: new InstanceControls(
     app,
     instanceVersion(

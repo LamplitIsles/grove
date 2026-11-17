@@ -28,6 +28,7 @@ export type CapturedConfig = Pick<
   RuntimeAgent,
   | "orcPromptSnapshot"
   | "roleDivisionSnapshot"
+  | "autoReviewSnapshot"
   | "reviewerSnapshot"
   | "researcherSnapshot"
 >;

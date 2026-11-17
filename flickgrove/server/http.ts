@@ -4,6 +4,10 @@ import { readingHttp } from "./reading-http";
 import { filePreview } from "./file-preview";
 import { voiceHttp } from "./voice-http";
 import { webSettingsHttp } from "./web-settings-http";
+import {
+  organizationReviewHttp,
+  type OrganizationReviewOptions,
+} from "./organization-review-http";
 import { memberPresetsHttp } from "./member-presets-http";
 import { configFilesHttp } from "./config-files-http";
 import type { VoiceOptions } from "./voice";
@@ -26,6 +30,7 @@ type Options = {
   assets?: string;
   service: HostService;
   auth?: GroveAuth;
+  organizationReview?: OrganizationReviewOptions;
 };
 export function createUpgrade(workspace: Workspace, options: Options) {
   return (
@@ -146,6 +151,14 @@ export function createHandler(workspace: Workspace, options: Options) {
       !!options.auth && !!human,
     );
     if (webSettings) return webSettings;
+    const organizationReview = await organizationReviewHttp(
+      request,
+      options.service,
+      origins,
+      options.organizationReview,
+      !!options.auth && !!human,
+    );
+    if (organizationReview) return organizationReview;
     if (file) return file;
     const reading = await readingHttp(request, options.service, origins);
     if (reading) return reading;

@@ -137,6 +137,7 @@ test("Pi delivers each session's captured task division on creation and resume",
   };
   try {
     const orc = member("orc", "orc", orcDivision);
+    orc.autoReviewSnapshot = { organization: "fixture", enabled: true };
     const first = await turn(orc, "Start", "first");
     const threadId = first.threadId;
     await first.close();
@@ -152,17 +153,39 @@ test("Pi delivers each session's captured task division on creation and resume",
     );
     await worker.close();
     await turn(member("legacy", "worker"), "Legacy", "fourth");
+    const manual = await turn(member("manual", "orc"), "Manual", "fifth");
+    await manual.close();
 
-    expect(messages).toHaveLength(4);
+    expect(messages).toHaveLength(5);
     // Creation and resume both carry the Orc's captured text.
     expect(messages[0]).toContain(orcDivision);
     expect(messages[1]).toContain(orcDivision);
+    for (const message of messages.slice(0, 2)) {
+      expect(message).toContain(
+        "automatically start independent Standards and Spec Reviewers",
+      );
+      expect(message).toContain("explicitly asks to skip independent review");
+      expect(message).toContain("After PR self-review");
+      expect(message).toContain(
+        "Start non-PR review when the user explicitly requests it",
+      );
+      expect(message).toContain("configurable prompts or repository guidance");
+    }
     // The Worker carries only its own captured text.
     expect(messages[2]).toContain(workerDivision);
     expect(messages[2]).not.toContain(orcDivision);
     // A session without captured text picks up neither another member's text nor a file.
     expect(messages[3]).not.toContain(orcDivision);
     expect(messages[3]).not.toContain(workerDivision);
+    expect(messages[4]).toContain(
+      "Start independent review only when the user explicitly requests it",
+    );
+    expect(messages[4]).toContain(
+      "configurable prompts or repository guidance",
+    );
+    expect(messages[4]).not.toContain(
+      "automatically start independent Standards",
+    );
     console.log(
       `pi division requests ${JSON.stringify({ requests: messages.length, threadId })}
 `,

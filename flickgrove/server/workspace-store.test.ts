@@ -65,6 +65,34 @@ function store(path: string) {
   cleanup.push(() => value.close());
   return value;
 }
+test("persists each Orc's captured organization review policy", () => {
+  const { path } = fixture();
+  const db = store(path);
+  db.track(
+    agent("automatic", {
+      autoReviewSnapshot: { organization: "example", enabled: true },
+    }),
+    true,
+  );
+  db.track(
+    agent("manual", {
+      autoReviewSnapshot: { organization: "other", enabled: false },
+    }),
+    true,
+  );
+  db.track(agent("legacy"), true);
+  db.flush();
+  const reopened = store(path);
+  expect(reopened.byId("automatic")!.autoReviewSnapshot).toEqual({
+    organization: "example",
+    enabled: true,
+  });
+  expect(reopened.byId("manual")!.autoReviewSnapshot).toEqual({
+    organization: "other",
+    enabled: false,
+  });
+  expect(reopened.byId("legacy")!.autoReviewSnapshot).toBeUndefined();
+});
 test("persists confirmed close and follow-up pause atomically", () => {
   const { path } = fixture();
   const db = store(path);

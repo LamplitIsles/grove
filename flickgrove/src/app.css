@@ -2388,6 +2388,31 @@ button.question-option {
   font-size: 17px;
   font-weight: 600;
 }
+.organization-review {
+  margin-top: 20px;
+}
+.organization-review h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.organization-review-list {
+  margin: 16px 0;
+  border-top: 1px solid var(--border);
+}
+.organization-review-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  border-bottom: 1px solid var(--border);
+  padding: 8px 16px 8px 4px;
+}
+.organization-review-name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .settings-heading {
   display: flex;
   align-items: center;

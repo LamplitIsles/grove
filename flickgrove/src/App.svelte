@@ -38,6 +38,7 @@
   import AccountSettings from "./AccountSettings.svelte";
   import VoiceSettings from "./VoiceSettings.svelte";
   import WebSettings from "./WebSettings.svelte";
+  import OrganizationSettings from "./OrganizationSettings.svelte";
   import MemberPresets from "./MemberPresets.svelte";
   import ConfigFiles from "./ConfigFiles.svelte";
   import InstanceBlockers from "./InstanceBlockers.svelte";
@@ -51,7 +52,7 @@
   let users = $state<Human[] | undefined>();
   const showAuthors = $derived((users?.length ?? 0) > 1);
   const currentUser = $derived(users?.find(person => person.id === user.id) ?? user);
-  let settingsPage = $state<"account" | "users" | "models" | "voice" | "web" | "grove">("account");
+  let settingsPage = $state<"account" | "users" | "models" | "voice" | "web" | "organizations" | "grove">("account");
   let instance = $state<InstanceStatus | null>(null), instanceError = $state(""), instanceNotice = $state(""), instanceStatusError = $state(""), instanceAction = $state(false);
   let instanceBusyError = false;
   let maintenanceAction = $state<"reload" | "restart">("restart"), confirmationInstance = $state<string | null>(null);
@@ -956,6 +957,7 @@
           <button class:active={settingsPage === "models"} aria-current={settingsPage === "models" ? "page" : undefined} onclick={() => settingsPage = "models"}>{m.models()}</button>
           <button class:active={settingsPage === "voice"} aria-current={settingsPage === "voice" ? "page" : undefined} onclick={() => settingsPage = "voice"}>{m.voice_settings()}</button>
           <button class:active={settingsPage === "web"} aria-current={settingsPage === "web" ? "page" : undefined} onclick={() => settingsPage = "web"}>{m.web_settings()}</button>
+          <button class:active={settingsPage === "organizations"} aria-label={m.organization_settings()} aria-current={settingsPage === "organizations" ? "page" : undefined} onclick={() => settingsPage = "organizations"}>{m.organization_navigation()}</button>
           <button class:active={settingsPage === "grove"} aria-current={settingsPage === "grove" ? "page" : undefined} onclick={() => { settingsPage = "grove"; void refreshInstance(); }}>{m.grove_settings()}</button>
         </nav>
         <div class="settings-content">
@@ -967,6 +969,8 @@
             <VoiceSettings peerId={snapshot.entryId ?? ""} {connected} />
           {:else if settingsPage === "web"}
             <WebSettings peerId={snapshot.entryId ?? ""} {connected} />
+          {:else if settingsPage === "organizations"}
+            <OrganizationSettings peerId={snapshot.entryId ?? ""} {connected} />
           {:else if settingsPage === "grove"}
             <section class="settings-section instance-settings"><h2>{m.grove_settings()}</h2>
               <div class="instance-actions"><Button variant="outline" size="sm" disabled={!connected || !instance || !!instanceStatusError || (instance.busy && !instance.canConfirmBusy) || instanceAction || !!restartPending} onclick={() => beginMaintenance("reload")}>{instanceAction && !restartPending ? m.reloading_mcp() : m.reload_mcp()}</Button><Button variant="outline" size="sm" disabled={!connected || !instance || !!instanceStatusError || (instance.busy && !instance.canConfirmBusy) || !instance.restartAvailable || instanceAction || !!restartPending} onclick={() => beginMaintenance("restart")}>{m.restart_grove()}</Button></div>

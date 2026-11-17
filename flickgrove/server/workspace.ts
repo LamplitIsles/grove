@@ -577,6 +577,7 @@ export class Workspace {
       environments?: ProjectEnvironments;
       orcPrompt?: () => Promise<string>;
       roleDivision?: () => Promise<string>;
+      readOrganizationReviewEnabled?: (owner: string) => Promise<boolean>;
       researcherSnapshot?: () => Promise<
         import("./reviewer-config").ReviewerSnapshot
       >;
@@ -1363,6 +1364,7 @@ export class Workspace {
       reviewerSnapshot: _reviewerSnapshot,
       researcherSnapshot: _researcherSnapshot,
       orcPromptSnapshot: _orcPromptSnapshot,
+      autoReviewSnapshot: _autoReviewSnapshot,
       inheritSettings: _inheritSettings,
       restoreArchived: _restoreArchived,
       turnEnded: _turnEnded,
@@ -2470,6 +2472,15 @@ export class Workspace {
         if (settings) await this.assertProject(project, settings.orc.backend);
         const captured = await this.executionSettings(settings);
         await this.assertProject(project, captured.orc.backend);
+        const organization = project.owner ?? null;
+        const autoReviewSnapshot = {
+          organization,
+          enabled: organization
+            ? ((await this.options.readOrganizationReviewEnabled?.(
+                organization,
+              )) ?? false)
+            : false,
+        };
         a = {
           id: crypto.randomUUID(),
           token: crypto.randomUUID(),
@@ -2481,6 +2492,7 @@ export class Workspace {
           orcPromptSnapshot: await this.options.orcPrompt?.(),
           // Captured once, at creation: later file changes affect only new Orcs.
           roleDivisionSnapshot: await this.options.roleDivision?.(),
+          autoReviewSnapshot,
           state: "idle",
           // A newly created local Codex session has not admitted a turn. Record
           // that known boundary now; old sessions with unknown outcomes must

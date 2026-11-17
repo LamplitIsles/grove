@@ -48,11 +48,15 @@ test("the captured task division reaches new and resumed Codex sessions and neve
       },
     });
   let runtime = makeRuntime();
+  let automaticReview = true;
   const makeWorkspace = (division = true) =>
     new Workspace({
       directory: root,
       runtime,
-      projects: async () => [{ alias: "alpha", name: "Alpha", path: root }],
+      projects: async () => [
+        { alias: "alpha", name: "Alpha", path: root, owner: "example" },
+      ],
+      readOrganizationReviewEnabled: async () => automaticReview,
       memberPresets,
       ...(division ? { roleDivision: () => roleDivision(configPath) } : {}),
     });
@@ -92,8 +96,14 @@ test("the captured task division reaches new and resumed Codex sessions and neve
     const starts = await instructions("thread/start");
     expect(starts).toHaveLength(2);
     expect(starts[0]).toContain(
-      "Start independent review only when the user explicitly requests it",
+      "automatically start independent Standards and Spec Reviewers",
     );
+    expect(starts[0]).toContain("explicitly asks to skip independent review");
+    expect(starts[0]).toContain("After PR self-review");
+    expect(starts[0]).toContain(
+      "Start non-PR review when the user explicitly requests it",
+    );
+    expect(starts[0]).toContain("configurable prompts or repository guidance");
     expect(starts[0]).toContain("Orc substantively self-reviews");
     expect(starts[0]).toContain("Orc creates the PR");
     expect(starts[0]).toContain("minor unspecified visual details");
@@ -106,6 +116,15 @@ test("the captured task division reaches new and resumed Codex sessions and neve
     const orcThread = app.detail(orc.id).threadId!;
     const workerThread = app.detail(worker.id).threadId!;
     expect(orcThread).not.toBe(workerThread);
+
+    // A later switch change affects new sessions, not this Orc's snapshot.
+    automaticReview = false;
+    await app.createOrc("alpha");
+    const manual = (await instructions("thread/start")).at(-1)!;
+    expect(manual).toContain(
+      "Start independent review only when the user explicitly requests it",
+    );
+    expect(manual).toContain("configurable prompts or repository guidance");
 
     // Editing the file does not change the captured text after a restart.
     await writeFile(file, edited);
@@ -128,6 +147,9 @@ test("the captured task division reaches new and resumed Codex sessions and neve
       -1,
     )!;
     expect(orcResume).toContain(captured);
+    expect(orcResume).toContain(
+      "automatically start independent Standards and Spec Reviewers",
+    );
     expect(orcResume).toContain("supersedes conflicting guidance");
     expect(workerResume).toContain(captured);
     expect(workerResume).toContain("Orc creates and updates PRs");

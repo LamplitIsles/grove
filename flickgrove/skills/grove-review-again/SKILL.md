@@ -16,7 +16,7 @@ Identify:
 - the original Standards and Spec reviewer targets and relevant visual evidence;
 - the findings or conclusions affected by the delta.
 
-Use a recorded commit or reliable turn history for the reviewed HEAD. Start this workflow or dispatch independent Reviewers when the user explicitly requests review or re-review. If no completed review exists, route to an initial `$grove-code-review`. If the prior reviewer targets are unavailable, retain the reviewed HEAD and replace only the missing reviewer when review work is actually needed.
+Use a recorded commit or reliable turn history for the reviewed HEAD. Follow the Orc's captured review policy and the user's task-specific direction. If no completed review exists, route to an initial `$grove-code-review`. If the prior reviewer targets are unavailable, retain the reviewed HEAD and replace only the missing reviewer when review work is actually needed.
 
 This step is complete when the post-review delta and every prior conclusion it could affect are named.
 
