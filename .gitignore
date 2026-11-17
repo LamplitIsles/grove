@@ -1,1 +1,8 @@
 node_modules/
+.scratch/
+dist/
+src/paraglide/
+playwright-report/
+test-results/
+
+.env

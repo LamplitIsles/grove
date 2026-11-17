@@ -1,6 +1,0 @@
-dist/
-src/paraglide/
-playwright-report/
-test-results/
-
-.env

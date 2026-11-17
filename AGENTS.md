@@ -1,0 +1,32 @@
+# FlickGrove implementation rules
+
+## Product interface
+
+- Prioritize mouse and touch flows. Keyboard additions solely for accessibility have the lowest priority: keep primitive defaults minimal and expand only when explicitly requested, without adding visible controls, custom navigation or dedicated test matrices.
+- Reserve Tab and Shift+Tab for application actions, not focus traversal. Never propose, require, implement, test for, or flag the absence of Tab-based navigation in Grove specifications, designs, implementation or reviews. Preserve existing explicit Tab actions and browser/system shortcuts; an explicit future user instruction is needed to change this rule.
+
+- Show information that helps the user make a decision or complete a task. Keep low-value implementation and background-maintenance details out of ordinary product flows unless the user explicitly requests them.
+- For ordinary settings, follow existing save, error and refresh patterns; describe unconfirmed writes accurately, and treat refresh as a current value, not proof that an earlier write finished. Add persistent locks, extra confirmation or durable operation tracking only when the consequences warrant the complexity or the user requests it.
+- Weekly quota displays the latest successfully retrieved value. Refresh requests a new value; if it fails, retain the previous value. Show unknown only when no value has been obtained. Do not add cached/stale badges, freshness timestamps, or background-refresh status copy.
+- Apply the same restraint to model-list caching. Preserve available choices across refresh failures without adding cache-state labels. Keep errors actionable when they prevent the user's requested operation.
+- Keep instance connectivity and message delivery status visible where they affect available actions or require the user's attention.
+- Read [DESIGN.md](DESIGN.md) before changing rendered UI or interaction behavior.
+- Use the project-owned Select for short choices and Command/Popover for searchable model choices. New-session project search stays an embedded Command: Enter chooses the highlighted alias; creating a session remains explicit. Preserve provider/model identity and let the primitives own selection keys and focus. Verify popup Escape/Back separately from the containing dialog.
+
+## Managed collaboration
+
+- Worker, Reviewer, and Researcher are owned working agents; Reviewer and Researcher are conceptually specialized workers. Apply shared member behavior consistently unless the task or a role-specific contract says otherwise. Keep their distinct identities, tools, responsibilities, review/research restrictions, and lifecycle guards; this conceptual relationship does not grant implementation permissions or turn a Reviewer or Researcher into an implementation Worker.
+- Orc investigates and decides the scope and approach before dispatch. Apply the captured task division as a default and follow the user’s explicit assignment; one Worker handles its assigned implementation. Each owner handles its tests and review fixes. Mixed work uses one PR and serial work in the shared checkout, preserving others' changes. Orc substantively self-reviews the whole diff, spec, evidence and complexity. Follow the Orc's captured independent-review policy and the user's task-specific direction. One-off ops without a PR receives Orc self-review; its execution still requires authorization. Reviewer reads code/spec/existing evidence and does not edit reviewed files or run tests, builds or browsers; missing evidence goes to its owner.
+- Use the shipped `grove-` workflows and Grove Reviewer lifecycle. Keep original reviewers and target-bound conclusions for focused re-review. Model/effort and axis prompt defaults live in local instance configuration; global skill/config files stay untouched.
+- Reviewer runtime, native discovery and browser checks must use test-owned configuration, homes and state. Do not use credentials or paid turns to validate discovery, roles or UI.
+
+- Research directly by default with `grove-research`; delegate 2–4 independent decision-relevant questions through owned Researchers only when that plan exists. Researcher gathers evidence without developing code, writing repository/FlickNote state, creating agents or making the final recommendation. Orc owns synthesis and FlickNote archival; these are role duties, not hard tool permissions.
+- Researcher configuration comes from the local instance and is captured privately at creation. Restore keeps original owner/question/thread/snapshot and never replays uncertain work. Only missing Researcher config/default prompt is initialized; preserve customization. All managed roles disable native collaboration through supported per-thread configuration while Grove MCP stays available. Native probes use test-owned HOME/CODEX_HOME/env and no paid turns.
+
+## Workspace persistence
+
+For schema or persistence changes, read [Workspace storage](docs/operations.md#workspace-storage). Define tables in `server/schema.ts`, generate reviewed migrations with `bunx drizzle-kit generate`, and use the Drizzle builder for business queries. Keep growing ledgers as entity rows and commit changed entities at the existing admission/confirmation transaction boundaries. Observe any new mutable durable field in `WorkspaceStore`; cold reads never join the active aggregate until explicit restoration.
+
+## Pi runtime changes
+
+Read [Codex and Pi sessions](docs/operations.md#codex-and-pi-sessions) before changing Pi admission, recovery, MCP or history. Reconcile unknown operations through their original native submission identity. Verify runtime work with owned fake providers and MCP servers; passive reads keep their zero-spawn/zero-mutation contract. Treat service shutdown, observed-run Stop and guarded business Close as separate lifecycle boundaries.
