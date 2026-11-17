@@ -59,10 +59,10 @@ for (const width of [1440, 390])
     await panel(page).locator("textarea").fill("frozen answer");
     await change(request, { sendMode: "held" });
     await panel(page).locator("textarea").press("Enter");
-    await page.keyboard.press("Enter");
-    await expect(panel(page).locator(".answer-batch")).toContainText(
-      "frozen answer",
-    );
+    await expect(panel(page)).not.toBeVisible();
+    await expect(
+      page.locator(".user-message").filter({ hasText: "frozen answer" }),
+    ).toHaveCount(1);
     await page
       .getByRole("button", { name: "Session settings", exact: true })
       .click();
@@ -158,26 +158,24 @@ test("unadmitted answer retains exact identity after reload and null lookup neve
     .inputs.length;
   await panel(page).locator("textarea").press("Enter");
   await expect.poll(() => intercepted).toBeDefined();
-  await expect(panel(page).locator(".answer-batch")).toHaveAttribute(
-    "data-operation-id",
-    intercepted.operationId,
-  );
+  await expect(
+    page.locator(".user-message").filter({ hasText: "original envelope" }),
+  ).toHaveCount(1);
   await change(request, {
     question: true,
     questionId: "new",
     questionOptions: false,
   });
   await page.reload();
-  await expect(panel(page).locator(".answer-batch")).toHaveAttribute(
-    "data-operation-id",
-    intercepted.operationId,
-  );
-  await expect(panel(page).locator(".answer-batch")).toContainText(
-    "original envelope",
-  );
-  await expect(panel(page).getByRole("button", { name: "Retry" })).toHaveCount(
-    0,
-  );
+  await expect(
+    page.locator(".user-message").filter({ hasText: "original envelope" }),
+  ).toHaveCount(1);
+  await expect(
+    page
+      .locator(".user-message")
+      .filter({ hasText: "original envelope" })
+      .getByRole("button", { name: "Retry" }),
+  ).toHaveCount(0);
   expect(
     (await (await request.get(origin + "/fixture/info")).json()).inputs.length,
   ).toBe(before);

@@ -8,6 +8,7 @@
   import type { Delivery, HistoryMessages, Message, MessageWindow } from "./contracts";
   import { reading, readingCache } from "./api";
   import { historyCache, type LoadedHistory } from "./history-cache";
+  import { observeNativeMessages, outgoing } from "./outgoing.svelte";
   import { transcriptPositions, saveTranscriptPosition } from "./transcript-state";
   import * as m from "./paraglide/messages";
   let { syncRevision = 0, agentId, boundary, live, deliveries, ready, connected, detailError = "", renderMessage, header, footer, onfollow, onanchor = () => {}, reports, closedReports, pinned }: {
@@ -56,7 +57,7 @@
     // Limit correction to a few frames; any deliberate reading cancels it.
     for(let attempt=0;attempt<6;attempt++) {
       if(!active || generation!==locationGeneration || !transcript?.isConnected) return false;
-      const index=rows.findIndex(row=>row.type === "message" && row.id===target)+1;
+      const index=rows.findIndex(row=>row.type === "message" && row.message.id===target)+1;
       if(index<1) return false;
       const item=$virtualizer.getVirtualItems().find(item=>item.index===index);
       const tall=!!item && item.size>transcript.clientHeight;
@@ -90,6 +91,65 @@
   // window. Check the first page before presenting those as pending rows.
   const readingSettled = $derived(!boundary || historyLoaded || !!error || !connected);
   const initialLoading = $derived(connected && !detailError && !live.length && !historical.length && !retained.length && (!ready || !readingSettled));
+  $effect(() => {
+    const page = historical;
+    if (page.length) untrack(() => observeNativeMessages(id, page));
+  });
+  const acceptedOperations = $derived(JSON.stringify(outgoing.entries.filter(o => o.agentId === id && o.status === "accepted").map(o => ({id:o.id, question:!!o.answers}))));
+  $effect(() => {
+    const operations: {id:string; question:boolean}[] = JSON.parse(acceptedOperations), entry = history, start = cursor, readingWindow = windowState;
+    if (!operations.length || !ready || !connected || (!historyLoaded && !error) || !entry) return;
+    const controller = new AbortController();
+    const pause = (milliseconds:number) => new Promise<void>(resolve => {
+      if (controller.signal.aborted) { resolve(); return; }
+      const timer = setTimeout(done, milliseconds);
+      function done() { clearTimeout(timer); controller.signal.removeEventListener("abort", done); resolve(); }
+      controller.signal.addEventListener("abort", done, {once:true});
+    });
+    void (async () => {
+      const remaining = new Set(operations.map(operation => operation.id));
+      let firstPass = true, retryDelay = 2000;
+      // Normal live confirmation usually arrives immediately. When it does
+      // not, retry missing or failed reads with capped backoff until settled.
+      await pause(500);
+      while (!controller.signal.aborted && remaining.size) {
+        let cursor: string | undefined = firstPass && !readingWindow ? start ?? undefined : undefined;
+        firstPass = false;
+        try {
+          // The operation-window endpoint locates ordinary inputs, not answers.
+          for (const operation of operations) if (!operation.question && remaining.has(operation.id)) {
+            try {
+              const params = new URLSearchParams({agent: id, operation: operation.id});
+              const page = await reading<MessageWindow>(`/window?${params}`, id, controller.signal);
+              if (controller.signal.aborted) return;
+              if (page.messages.some(message => message.role === "user" && !message.provisional && (message.clientId === operation.id || (!message.clientId && message.id === operation.id)))) {
+                remaining.delete(operation.id);
+                untrack(() => observeNativeMessages(id, page.messages));
+              }
+            } catch { /* Fall back to the existing paged history read. */ }
+          }
+          if (!remaining.size || controller.signal.aborted) return;
+          do {
+            const params = new URLSearchParams({agent: id});
+            if (cursor) params.set("cursor", cursor);
+            const page = await reading<HistoryMessages>(`/messages?${params}`, id, controller.signal);
+            if (controller.signal.aborted) return;
+            for (const message of page.messages) if (message.role === "user" && !message.provisional) remaining.delete(message.clientId ?? message.id);
+            untrack(() => observeNativeMessages(id, page.messages));
+            const next = page.nextCursor ?? undefined;
+            if (next && next === cursor) break;
+            cursor = next;
+            if (remaining.size && cursor) await pause(250);
+          } while (!controller.signal.aborted && remaining.size && cursor);
+        } catch { /* Missing history and read failures never retire a journal. */ }
+        if (!controller.signal.aborted && remaining.size) {
+          await pause(retryDelay);
+          retryDelay = Math.min(retryDelay * 2, 30_000);
+        }
+      }
+    })();
+    return () => controller.abort();
+  });
   $effect.pre(() => {
     const current = live, revision = syncRevision;
     untrack(() => {
@@ -110,23 +170,14 @@
     const rows = windowState && !windowState.joined ? historical : [...prefix, ...historical, ...retained, ...live];
     const clients = new Set(rows.filter(m => !m.provisional && m.clientId).map(m => m.clientId));
     const visible = [...new Map(rows.filter(m => (!m.provisional || !clients.has(m.clientId)) && (readingSettled || !m.provisional || !m.delivery?.recoveryRef || m.delivery.status === "sent")).map(m => [m.id, m])).values()];
-    const confirmed = new Set(visible.filter(m => m.role === "user" && !m.provisional && m.clientId).map(m => m.clientId));
     const byId = new Map(deliveries.map(d => [d.id, d]));
     const visibleIds = new Set(visible.map(m => m.clientId ?? m.id));
-    function hasConfirmedSuccessor(delivery: Delivery) {
-      const seen = new Set([delivery.id]);
-      let next = delivery.supersededBy;
-      while (next && !seen.has(next)) {
-        if (confirmed.has(next)) return true;
-        seen.add(next);
-        const successor = visibleIds.has(next) ? byId.get(next) : undefined;
-        next = successor?.source === "user" && successor.status === "failed" ? successor.supersededBy : undefined;
-      }
-      return false;
+    function hasVisibleSuccessor(delivery: Delivery) {
+      return !!delivery.supersededBy && delivery.supersededBy !== delivery.id && visibleIds.has(delivery.supersededBy);
     }
     return visible.filter(m => {
       const delivery = byId.get(m.clientId ?? m.id) ?? m.delivery;
-      return !(m.provisional && delivery?.source === "user" && delivery.status === "failed" && hasConfirmedSuccessor(delivery));
+      return !(m.provisional && (delivery?.source === "user" || delivery?.source === "question") && hasVisibleSuccessor(delivery));
     });
   });
   const rows = $derived(projectConversation(messages, deliveries));
@@ -143,10 +194,11 @@
   // handled by dynamic measurement and explicit prepend anchoring.
   function initialOffset() {
     if (!saved) return initialMessages.length * estimate;
-    const index = initialMessages.findIndex(row => row.id === saved.anchor?.id || (row.type === "group" && row.messages.some(message => message.id === saved.anchor?.id)));
+    const index = initialMessages.findIndex(row => row.id === saved.anchor?.id || (row.type === "message" && row.message.id === saved.anchor?.id) || (row.type === "group" && row.messages.some(message => message.id === saved.anchor?.id)));
     if (index < 0) return saved.scroll;
     const sizes = new Map(saved.measurements.map(item => [item.key, item.size]));
-    const offset = initialMessages[index].id === saved.anchor?.id ? saved.anchor.offset : 0;
+    const anchorRow = initialMessages[index];
+    const offset = anchorRow.id === saved.anchor?.id || (anchorRow.type === "message" && anchorRow.message.id === saved.anchor?.id) ? saved.anchor.offset : 0;
     return (sizes.get(headerKey) ?? saved.headerHeight) + 24 + initialMessages.slice(0, index).reduce((sum, message) => sum + (sizes.get(message.id) ?? estimate), 0) + offset;
   }
   // Published core 3.17.11 takeSnapshot contains only actually measured items.
@@ -265,7 +317,7 @@
             if (!active || generation !== locationGeneration || !transcript?.isConnected) return;
             const index = rows.findIndex(row => row.id === key);
             if (index < 0) return;
-            const node = [...transcript.querySelectorAll<HTMLElement>("[data-message-id]")].find(item => item.dataset.messageId === key);
+            const node = [...transcript.querySelectorAll<HTMLElement>("[data-row-key]")].find(item => item.dataset.rowKey === key);
             if (!node) { $virtualizer.scrollToIndex(index + 1, { align: "start" }); continue; }
             const delta = node.getBoundingClientRect().top - transcript.getBoundingClientRect().top - offset;
             if (Math.abs(delta) > 0.5) transcript.scrollTop += delta;
@@ -287,7 +339,7 @@
         count: current.length + 1, getItemKey: index => index === 0 ? headerKey : current[index - 1].id,
         getScrollElement: () => element ?? null, paddingEnd: Math.max(end, footerHeight + 24 + sendSpace),
         rangeExtractor: range => {
-          const indexes = defaultRangeExtractor(range), messageIndex = current.findIndex(row => row.id === pin || (row.type === "group" && row.messages.some(message => message.id === pin)));
+          const indexes = defaultRangeExtractor(range), messageIndex = current.findIndex(row => row.id === pin || (row.type === "message" && row.message.id === pin) || (row.type === "group" && row.messages.some(message => message.id === pin)));
           const index = messageIndex < 0 ? -1 : messageIndex + 1;
           return index < 0 || indexes.includes(index) ? indexes : [...indexes, index].sort((a, b) => a - b);
         },
@@ -441,7 +493,7 @@
         if (!active || generation !== locationGeneration || !transcript?.isConnected) return;
         const index = rows.findIndex(row => row.type === "message" && (row.message.clientId === operation || row.message.id === operation));
         if (index < 0) return;
-        const row = transcript.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(rows[index].id)}"]`);
+        const row = transcript.querySelector<HTMLElement>(`[data-row-key="${CSS.escape(rows[index].id)}"]`);
         if (row) {
           const delta = row.getBoundingClientRect().top - transcript.getBoundingClientRect().top - 24;
           if (Math.abs(delta) > 0.5) transcript.scrollTop += delta;
@@ -509,7 +561,7 @@
       </div>{/if}
     </div>
     {#each $virtualizer.getVirtualItems() as row (row.key)}
-      {#if row.index > 0}{@const entry = rows[row.index - 1]}<div class="timeline-message" data-index={row.index} data-message-id={row.key} style:transform={`translateY(${row.start}px)`} use:measure>
+      {#if row.index > 0}{@const entry = rows[row.index - 1]}<div class="timeline-message" data-index={row.index} data-message-id={entry.type === "message" ? entry.message.id : row.key} data-row-key={row.key} style:transform={`translateY(${row.start}px)`} use:measure>
         {#if entry.type === "message"}{@render renderMessage(entry.message)}
         {:else}<MessageGroup messages={entry.messages} {renderMessage} initiallyExpanded={expandedGroups.has(entry.id)} folding={foldingGroups.get(entry.id)} onfolding={() => { const next = new Map(foldingGroups); next.delete(entry.id); foldingGroups = next; }} onexpanded={value => { if (value) expandedGroups.add(entry.id); else expandedGroups.delete(entry.id); }} />{/if}
       </div>{/if}

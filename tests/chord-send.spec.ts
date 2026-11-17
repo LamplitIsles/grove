@@ -36,6 +36,10 @@ for (const [name, viewport] of [
       ).toHaveCount(1);
     }
     await expect(page.locator(".user-message [role=status]")).toHaveCount(0);
+    const originalKey = await page
+      .locator(".timeline-message")
+      .filter({ hasText: "First instruction" })
+      .getAttribute("data-row-key");
     await expect(page.locator(".detail-status")).toContainText("Working");
     await input.fill("A newer editable draft");
     await expect
@@ -69,6 +73,11 @@ for (const [name, viewport] of [
       "Second instruction",
       "Third instruction",
     ]);
+    await expect(
+      page
+        .locator(".timeline-message")
+        .filter({ hasText: "First instruction" }),
+    ).toHaveAttribute("data-row-key", originalKey!);
     expect(info.inputs[0].turnId).toBeUndefined();
     expect(info.inputs[1].turnId).toBeTruthy();
     expect(info.inputs[2].turnId).toBe(info.inputs[1].turnId);
@@ -144,7 +153,7 @@ for (const [name, viewport] of [
     await expect(retry).toBeVisible();
     await expect(input).toHaveValue("New draft");
     await retry.click();
-    await expect(failed).toHaveCount(2);
+    await expect(failed).toHaveCount(1);
     await expect(failed.last().getByRole("status")).toContainText(
       "Synthetic rejection",
     );
@@ -160,8 +169,8 @@ for (const [name, viewport] of [
       (el as HTMLButtonElement).click();
       (el as HTMLButtonElement).click();
     });
-    // Failed predecessors remain visible until a native successor is visible.
-    await expect(failed).toHaveCount(3);
+    // Only the latest attempt is visible while the retry is in flight.
+    await expect(failed).toHaveCount(1);
     await expect(failed.last().getByRole("status")).toHaveCount(0);
     await expect(page.locator(".detail-status")).toContainText("Working");
     await expect(input).toHaveValue("New draft");

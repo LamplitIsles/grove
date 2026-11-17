@@ -768,16 +768,19 @@
     try { const result = await api<Detail>(`/agents/${id}/stop`, { turnId }); if (selectedId === id) detail = result; return true; }
     catch(e) { error = e instanceof Error ? e.message : m.load_failure(); return false; }
   }
-  async function answerBatch(answers: Answer[], operationId: string, preparedText?: string, retry?:{of:string;predecessor:RetryEnvelope;claimToken:string}) {
+  function answerBatch(answers: Answer[], operationId: string, preparedText?: string, retry?:{of:string;predecessor:RetryEnvelope;claimToken:string}): Promise<void> {
     if (!selectedId || !hostConnected || !client || !detail) throw new Error("Connect to send your answer.");
     const id = selectedId;
     const text = preparedText ?? outgoing.entries.find(o => o.agentId === id && o.id === operationId)?.text ?? answers.map(answer => `Question: ${detail!.questions.find(q => q.id === answer.questionId)?.text}\nAnswer: ${answer.answer}`).join("\n\n");
     addOutgoing(id, text, operationId, answers, undefined, undefined, retry);
-    try {
-      const result = await client.call<Detail>("answerBatch", { id, answers, operationId, ...(retry ? {predecessor:retry.predecessor,claimToken:retry.claimToken} : {}) });
-      observeOutgoing(result);
-    } catch (e) { unknownOutgoing(id, operationId, e instanceof Error ? e.message : m.load_failure()); }
-    void lookup(id, operationId);
+    const connection = client;
+    return (async () => {
+      try {
+        const result = await connection.call<Detail>("answerBatch", { id, answers, operationId, ...(retry ? {predecessor:retry.predecessor,claimToken:retry.claimToken} : {}) });
+        observeOutgoing(result);
+      } catch (e) { unknownOutgoing(id, operationId, e instanceof Error ? e.message : m.load_failure()); }
+      void lookup(id, operationId);
+    })();
   }
   function keydown(event: KeyboardEvent) {
     if (event.defaultPrevented || composing || event.isComposing || event.keyCode === 229) return;

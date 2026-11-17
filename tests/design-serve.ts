@@ -72,6 +72,10 @@ let sendReply: ReturnType<typeof Promise.withResolvers<void>> | undefined;
 let sendReplyArmed = false;
 let sendReplyWaiting = false;
 let sendReplyError = false;
+let holdNativeInput = false;
+let heldNativeInputs: Array<(publish: boolean) => void> = [];
+let reservationGate: ReturnType<typeof Promise.withResolvers<void>> | undefined;
+let reservationWaiting = false;
 let queueRejection: ReturnType<typeof Promise.withResolvers<void>> | undefined;
 let queueRejectionWaiting = false;
 let queueAck: ReturnType<typeof Promise.withResolvers<void>> | undefined;
@@ -155,6 +159,27 @@ function unit(
     }
   }
   const runtime = new FakeRuntime();
+  const openRuntime = runtime.open.bind(runtime);
+  runtime.open = (agent, notify) =>
+    openRuntime(agent, (event) => {
+      if (
+        holdNativeInput &&
+        event.type === "item" &&
+        event.item.type === "userMessage"
+      ) {
+        const thread =
+          runtime.agents.get(agent.id)?.threadId ?? `thread-${agent.id}`;
+        const items = runtime.historyItems.get(thread) ?? [];
+        const index = items.findIndex((item) => item.id === event.item.id);
+        const [message] = index < 0 ? [] : items.splice(index, 1);
+        heldNativeInputs.push((publish) => {
+          if (message) items.push(message);
+          if (publish) notify(event);
+        });
+        return;
+      }
+      notify(event);
+    });
   for (const a of agents) {
     const threadId = a.threadId ?? `thread-${a.id}`;
     runtime.names.set(threadId, a.title);
@@ -311,6 +336,16 @@ function unit(
     // Browser startup can contend with compilation on the host; keep synthetic
     // peer admission within the browser test budget without treating it as an outage.
   });
+  const reserveSubmission = service.reserveSubmission.bind(service);
+  service.reserveSubmission = async (...args) => {
+    const result = await reserveSubmission(...args);
+    if (reservationGate) {
+      reservationWaiting = true;
+      await reservationGate.promise;
+      reservationWaiting = false;
+    }
+    return result;
+  };
   const originalSend = service.send.bind(service);
   service.send = async (...args) => {
     const result = await originalSend(...args);
@@ -504,6 +539,11 @@ async function reset(mode = "working") {
   stopGate.resolve();
   stopGate = Promise.withResolvers<void>();
   sendMode = "accepted";
+  holdNativeInput = false;
+  heldNativeInputs = [];
+  reservationGate?.resolve();
+  reservationGate = undefined;
+  reservationWaiting = false;
   sendReply?.resolve();
   sendReply = undefined;
   sendReplyArmed = false;
@@ -817,6 +857,8 @@ const server = Bun.serve({
     }
     if (url.pathname === "/fixture/info")
       return Response.json({
+        heldNativeInputs: heldNativeInputs.length,
+        reservationWaiting,
         sendReplyWaiting,
         queueRejectionWaiting,
         queueAckWaiting,
@@ -864,6 +906,8 @@ const server = Bun.serve({
     }
     if (url.pathname === "/fixture/change" && request.method === "POST") {
       const body = (await request.json()) as {
+        nativeInput?: "hold" | "defer" | "release" | "history-only";
+        reservation?: "hold" | "release";
         projectsDelay?: number;
         projectsFailure?: boolean;
         detailDelay?: number;
@@ -912,6 +956,22 @@ const server = Bun.serve({
         closedAgent?: string;
         append?: { agentId: string; text: string };
       };
+      if (body.nativeInput === "hold") holdNativeInput = true;
+      if (body.nativeInput === "defer") holdNativeInput = false;
+      if (body.reservation === "hold")
+        reservationGate = Promise.withResolvers<void>();
+      if (body.reservation === "release") {
+        reservationGate?.resolve();
+        reservationGate = undefined;
+      }
+      if (
+        body.nativeInput === "release" ||
+        body.nativeInput === "history-only"
+      ) {
+        holdNativeInput = false;
+        for (const release of heldNativeInputs.splice(0))
+          release(body.nativeInput === "release");
+      }
       if (body.projectsDelay !== undefined) projectsDelay = body.projectsDelay;
       if (body.externalQuestionHistory) {
         const threadId = "external-question-history";

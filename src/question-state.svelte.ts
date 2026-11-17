@@ -1,5 +1,6 @@
 import type { Agent } from "./contracts";
 import { storagePrefix } from "./api";
+import { dismissedAnswerOperations, outgoing } from "./outgoing.svelte";
 
 // Disclosure belongs to this visit. Answer drafts remain in the existing
 // Peer-qualified question store. Text drafts take precedence over auto-opening.
@@ -47,13 +48,29 @@ export function observeQuestions(
     items = new Set();
   }
   if (!agent) return;
-  const pending = agent.questions.filter((q) => q.state === "unanswered");
+  const blocked = new Set([
+    ...dismissedAnswerOperations(agent.id).flatMap((o) => o.questionIds),
+    ...outgoing.entries
+      .filter((o) => o.agentId === agent.id && o.answers)
+      .flatMap((o) => o.answers!.map((a) => a.questionId)),
+  ]);
+  const pending = agent.questions.filter(
+    (q) => q.state === "unanswered" && !blocked.has(q.id),
+  );
   const next = new Set(pending.map((q) => q.itemId));
   const hasText = hasComposerText(agent.id);
   if (enteringVisit && hasText) setQuestionPanel(agent.id, false);
   else if (
     !hasText &&
-    ((enteringVisit && (agent.unansweredCount ?? pending.length) > 0) ||
+    ((enteringVisit &&
+      Math.max(
+        0,
+        (agent.unansweredCount ??
+          agent.questions.filter((q) => q.state === "unanswered").length) -
+          agent.questions.filter(
+            (q) => q.state === "unanswered" && blocked.has(q.id),
+          ).length,
+      ) > 0) ||
       [...next].some((id) => !items.has(id)))
   )
     setQuestionPanel(agent.id, true);

@@ -1,7 +1,7 @@
 import { readingCache } from "./api";
 import { saveImages, operationKey } from "./image-drafts";
 import { z } from "zod";
-import type { Detail, Answer } from "./contracts";
+import type { Detail, Answer, Message } from "./contracts";
 import {
   imageSchema,
   answerSchema,
@@ -139,12 +139,6 @@ function persist(o: Outgoing, required = false) {
   } catch {
     /* A malformed record supplies no receipt. */
   }
-  if (o.status === "accepted") {
-    localStorage.removeItem(key(o));
-    if (o.localImageIds?.length || o.images?.length)
-      void saveImages(operationKey(o.agentId, o.id), []).catch(() => {});
-    return;
-  }
   try {
     readingCache.writeDevice(
       key(o),
@@ -227,8 +221,7 @@ export function observeRetry(
       JSON.stringify(saved.predecessor) !== JSON.stringify(retry.predecessor)
     )
       throw new Error("Retry identity changed");
-    if (saved.status !== "sent")
-      outgoing.entries.push({ ...saved, status: submissionResult(saved) });
+    outgoing.entries.push({ ...saved, status: submissionResult(saved) });
     return;
   }
   addOutgoing(agentId, text, id, answers, undefined, undefined, retry);
@@ -246,30 +239,42 @@ function rememberAccepted(agentId: string, id: string) {
     /* The owner receipt is still authoritative in this page. */
   }
 }
+const matchesNative = (message: Message, operation: string) =>
+  message.role === "user" &&
+  !message.provisional &&
+  (message.clientId === operation ||
+    (!message.clientId && message.id === operation));
+
+// History pages, not only the current detail window, can prove native arrival.
+export function observeNativeMessages(agentId: string, messages: Message[]) {
+  if (
+    !outgoing.entries.some(
+      (o) =>
+        o.agentId === agentId && messages.some((m) => matchesNative(m, o.id)),
+    )
+  )
+    return;
+  outgoing.entries = outgoing.entries.filter((o) => {
+    if (o.agentId !== agentId || !messages.some((m) => matchesNative(m, o.id)))
+      return true;
+    rememberAccepted(o.agentId, o.id);
+    localStorage.removeItem(key(o));
+    if (o.localImageIds?.length || o.images?.length)
+      void saveImages(operationKey(o.agentId, o.id), []).catch(() => {});
+    return false;
+  });
+}
+
 export function observeOutgoing(detail: Detail) {
   for (const delivery of detail.deliveries)
     if (
       delivery.status === "sent" ||
-      detail.messages.some(
-        (m) =>
-          m.role === "user" &&
-          (m.id === delivery.id || m.clientId === delivery.id),
-      )
+      detail.messages.some((m) => matchesNative(m, delivery.id))
     )
       rememberAccepted(detail.id, delivery.id);
+  observeNativeMessages(detail.id, detail.messages);
   outgoing.entries = outgoing.entries.filter((o) => {
     if (o.agentId !== detail.id) return true;
-    if (
-      detail.messages.some(
-        (m) => m.role === "user" && (m.id === o.id || m.clientId === o.id),
-      )
-    ) {
-      rememberAccepted(o.agentId, o.id);
-      localStorage.removeItem(key(o));
-      if (o.localImageIds?.length || o.images?.length)
-        void saveImages(operationKey(o.agentId, o.id), []).catch(() => {});
-      return false;
-    }
     const d = detail.deliveries.find((d) => d.id === o.id);
     if (
       d &&
@@ -281,7 +286,7 @@ export function observeOutgoing(detail: Detail) {
       o.error = d.error;
       persist(o);
     }
-    return o.status !== "accepted";
+    return true;
   });
 }
 export function acceptReceipt(agentId: string, raw: Receipt | null) {
@@ -314,8 +319,6 @@ export function acceptReceipt(agentId: string, raw: Receipt | null) {
   o.status = receipt.state === "accepted" ? "accepted" : "rejected";
   o.error = receipt.error ?? undefined;
   persist(o);
-  if (o.status === "accepted")
-    outgoing.entries = outgoing.entries.filter((entry) => entry !== o);
 }
 export function unknownOutgoing(agentId: string, id: string, error: string) {
   const o = outgoing.entries.find((o) => o.agentId === agentId && o.id === id);
@@ -328,7 +331,6 @@ export function unknownOutgoing(agentId: string, id: string, error: string) {
 export function withOutgoing(detail: Detail): Detail {
   const local = outgoing.entries.filter(
     (o) =>
-      o.status !== "accepted" &&
       o.agentId === detail.id &&
       !isDismissedPending(detail.id, o.id, journalStatus(o.status)) &&
       !detail.messages.some((m) => m.id === o.id || m.clientId === o.id),

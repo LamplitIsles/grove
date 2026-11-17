@@ -73,12 +73,12 @@ for (const width of [1440, 390])
       data: { sendMode: "held" },
     });
     await panel.locator("textarea").press("Enter");
-    await expect(panel.locator(".answer-batch")).toContainText("First line");
-    await expect(panel.locator(".answer-batch")).toContainText("Second line");
-    await panel
-      .locator(".answer-batch")
-      .getByRole("link", { name: "local file" })
-      .click();
+    await expect(panel).not.toBeVisible();
+    const answer = page
+      .locator(".user-message")
+      .filter({ hasText: "First line" });
+    await expect(answer).toContainText("Second line");
+    await answer.getByRole("link", { name: "local file" }).click();
     await expect(
       drawer
         .frameLocator("iframe")
@@ -103,6 +103,7 @@ for (const width of [1440, 390])
     await page.goBack();
     await panel.getByRole("button", { name: "Close", exact: true }).click();
 
+    if (width === 390) await openSidebar(page);
     await newSession(page);
     await page
       .getByRole("option", { name: "Codex for Love", exact: true })

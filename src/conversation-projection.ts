@@ -26,6 +26,20 @@ export function projectConversation(
   messages: Message[],
   deliveries: Delivery[] = [],
 ): ConversationRow[] {
+  const counts = new Map<string, number>();
+  for (const message of messages) {
+    const candidate =
+      message.role === "user" ? (message.clientId ?? message.id) : message.id;
+    counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+  }
+  const nativeIds = new Set(messages.map((message) => message.id));
+  const rowId = (message: Message) =>
+    message.role === "user" &&
+    message.clientId &&
+    counts.get(message.clientId) === 1 &&
+    (message.clientId === message.id || !nativeIds.has(message.clientId))
+      ? message.clientId
+      : message.id;
   const byId = new Map(deliveries.map((delivery) => [delivery.id, delivery]));
   const rows: ConversationRow[] = [];
   let segment: { message: Message; eligible: boolean }[] = [];
@@ -56,7 +70,7 @@ export function projectConversation(
         else
           rows.push({
             type: "message",
-            id: entry.message.id,
+            id: rowId(entry.message),
             message: entry.message,
           });
       }
@@ -66,14 +80,14 @@ export function projectConversation(
           id: `group:${message.id}`,
           messages: pending,
         });
-      rows.push({ type: "message", id: message.id, message });
+      rows.push({ type: "message", id: rowId(message), message });
       segment = [];
     } else segment.push({ message, eligible });
   }
   for (const entry of segment)
     rows.push({
       type: "message",
-      id: entry.message.id,
+      id: rowId(entry.message),
       message: entry.message,
     });
   return rows;

@@ -105,7 +105,11 @@ for (const width of [1440, 390]) {
       data: { mode: "long" },
     });
     await page.goto(design);
-    if (width === 390) await page.locator(".session-open").first().click();
+    if (width === 390)
+      await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+    await page
+      .getByRole("button", { name: "Open Streaming voice input Orc" })
+      .click();
     await page.request.post(design + "/fixture/change", {
       data: { sendMode: "held" },
     });
@@ -144,7 +148,7 @@ for (const width of [1440, 390]) {
       .toBe(true);
     await expect(pending.locator(".message-image")).toBeVisible();
     const pendingId = await pending.evaluate((el) =>
-      el.closest("[data-message-id]")!.getAttribute("data-message-id"),
+      el.closest("[data-row-key]")!.getAttribute("data-row-key"),
     );
     const pendingTime = await pending.locator("time").getAttribute("datetime");
     await page.screenshot({
@@ -161,8 +165,37 @@ for (const width of [1440, 390]) {
       )
       .toBe(true);
     await expect(pending).toHaveCount(1);
-    await expect(page.locator(`[data-message-id="${pendingId}"]`)).toHaveCount(
-      1,
+    await expect(page.locator(`[data-row-key="${pendingId}"]`)).toHaveCount(1);
+    const agentId = await page.evaluate(() =>
+      history.state.grove.details.at(-1),
+    );
+    const nativeAt = await expect
+      .poll(async () => {
+        const detail = await (
+          await page.request.get(
+            design + "/fixture/agents/" + encodeURIComponent(agentId),
+          )
+        ).json();
+        return detail.messages.find(
+          (message: { clientId?: string; provisional?: boolean }) =>
+            message.clientId === pendingId && !message.provisional,
+        )?.at;
+      })
+      .toBeTruthy()
+      .then(async () => {
+        const detail = await (
+          await page.request.get(
+            design + "/fixture/agents/" + encodeURIComponent(agentId),
+          )
+        ).json();
+        return detail.messages.find(
+          (message: { clientId?: string; provisional?: boolean }) =>
+            message.clientId === pendingId && !message.provisional,
+        ).at;
+      });
+    await expect(pending.locator("time")).toHaveAttribute(
+      "datetime",
+      new Date(nativeAt).toISOString(),
     );
     const confirmedTime = await pending
       .locator("time")
@@ -171,11 +204,20 @@ for (const width of [1440, 390]) {
       Math.abs(Date.parse(confirmedTime!) - Date.parse(pendingTime!)),
     ).toBeLessThan(60000);
     await expect(pending.locator("time")).toHaveText(/^\d{2}:\d{2}$/);
+    const read = page.waitForResponse(
+      (response) =>
+        response.url().includes("/api/read/messages?") && response.ok(),
+    );
     await page.reload();
+    const history = await (await read).json();
+    const recorded = history.messages.find(
+      (message: { clientId?: string }) => message.clientId === pendingId,
+    );
+    expect(recorded?.at).toBeTruthy();
     await expect(pending).toHaveCount(1);
     await expect(pending.locator("time")).toHaveAttribute(
       "datetime",
-      confirmedTime!,
+      new Date(recorded.at).toISOString(),
     );
     await page.screenshot({
       path: testInfo.outputPath(`${width}-confirmed.png`),

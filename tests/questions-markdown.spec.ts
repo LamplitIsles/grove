@@ -69,7 +69,13 @@ for (const width of [1440, 390]) {
       data: { sendMode: "held" },
     });
     await panel.getByRole("button", { name: "Send all answers" }).click();
-    await expect(panel.locator(".answer-batch strong")).toHaveText("风险");
+    await expect(panel).not.toBeVisible();
+    await expect(
+      page
+        .locator(".user-message")
+        .filter({ hasText: "Recommended choice" })
+        .locator("strong"),
+    ).toHaveText("风险");
     await request.post(`${origin}/fixture/change`, {
       data: { sendMode: "accepted" },
     });

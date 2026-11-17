@@ -25,11 +25,11 @@
   import ConversationTimeline from "./ConversationTimeline.svelte";
   import Composer from "./Composer.svelte";
   import Questions from "./Questions.svelte";
-  import { isDismissedPending } from "./outgoing.svelte";
+  import { dismissedAnswerOperations, isDismissedPending, outgoing, receiptAlreadyAccepted } from "./outgoing.svelte";
   import QuestionRecord from "./QuestionRecord.svelte";
-  import LegacyPendingAction from "./LegacyPendingAction.svelte";
   import * as m from "./paraglide/messages";
-  let { globalActions, showAuthors, users, detail, ready = true, queueReady = false, onenqueue, oncheckqueue, onqueueaction, tree, owner, skills, now, connected, mediaConnected, workers, lastSeen, actionError, closeError, onrefresh, onstop, onupdate, onrename, onclose, onopen, onsend, onanswer, onretry, onretryuser, retryErrors = {}, dispatching = [], optimisticWorking = false }: { globalActions: Snippet; showAuthors: boolean; users?: import("./contracts").Human[]; detail: Detail; ready?: boolean; queueReady?: boolean; onenqueue: (id:string,text:string,operationId:string,images:ImageDraft[]) => Promise<{status:"accepted" | "rejected" | "unknown"; error?:string}>; oncheckqueue: (id:string,operationId:string) => Promise<Delivery | null>; onqueueaction: (id:string,member:"cancelFollowUp" | "resumeFollowUps",operationId?:string) => Promise<void>; tree?: Agent; owner?: Agent; skills: Skill[]; now: number; connected: boolean; mediaConnected: boolean; workers: Agent[]; lastSeen?: number; actionError: string; closeError?: string; onupdate: (value: Detail) => void; onrefresh: () => Promise<void>; onstop: () => Promise<boolean>; onrename: (title: string) => Promise<string | undefined>; onclose: () => void; onopen: (id: string) => void; onsend: (agentId: string, text: string, requestId: string, images?: ImageDraft[]) => Promise<boolean>; onanswer: (answers: Answer[], operationId: string, text?: string) => Promise<void>; onretry: (id: string) => Promise<void>; onretryuser: (agentId:string,operationId:string,delivery?:Delivery) => Promise<void>; retryErrors?: Record<string,string>; dispatching?: string[]; optimisticWorking?: boolean; } = $props();
+  let { globalActions, showAuthors, users, detail, ready = true, queueReady = false, onenqueue, oncheckqueue, onqueueaction, tree, owner, skills, now, connected, mediaConnected, workers, lastSeen, actionError, closeError, onrefresh, onstop, onupdate, onrename, onclose, onopen, onsend, onanswer, onretry, onretryuser, retryErrors = {}, dispatching = [], optimisticWorking = false }: { globalActions: Snippet; showAuthors: boolean; users?: import("./contracts").Human[]; detail: Detail; ready?: boolean; queueReady?: boolean; onenqueue: (id:string,text:string,operationId:string,images:ImageDraft[]) => Promise<{status:"accepted" | "rejected" | "unknown"; error?:string}>; oncheckqueue: (id:string,operationId:string) => Promise<Delivery | null>; onqueueaction: (id:string,member:"cancelFollowUp" | "resumeFollowUps",operationId?:string) => Promise<void>; tree?: Agent; owner?: Agent; skills: Skill[]; now: number; connected: boolean; mediaConnected: boolean; workers: Agent[]; lastSeen?: number; actionError: string; closeError?: string; onupdate: (value: Detail) => void; onrefresh: () => Promise<void>; onstop: () => Promise<boolean>; onrename: (title: string) => Promise<string | undefined>; onclose: () => void; onopen: (id: string) => void; onsend: (agentId: string, text: string, requestId: string, images?: ImageDraft[]) => Promise<boolean>; onanswer: (answers: Answer[], operationId: string, text?: string) => Promise<void>; onretry: (id: string, delivery?: Delivery) => Promise<void>; onretryuser: (agentId:string,operationId:string,delivery?:Delivery) => Promise<void>; retryErrors?: Record<string,string>; dispatching?: string[]; optimisticWorking?: boolean; } = $props();
+  let fullBatches = $state<Delivery[]>([]);
   let recoveryRecords = $state<Delivery[]>([]), recoveryCursor = $state<string | null | undefined>(undefined), recoveryError = $state("");
   async function loadRecoveries() {
     if (recoveryCursor === null) return;
@@ -39,8 +39,8 @@
       recoveryCursor = page.nextCursor; recoveryError = "";
     } catch(e) { recoveryError = (e as Error).message; }
   }
-  const recoveries = $derived([...new Map([...recoveryRecords, ...detail.deliveries].map(d => [d.id, d])).values()]);
-  const timelineMessages = $derived([...detail.messages, ...recoveryRecords.filter(d => d.source === "user" && d.status === "failed" && !detail.messages.some(m => m.id === d.id || m.clientId === d.id)).map(d => ({id:d.id, clientId:d.id, provisional:true, role:"user" as const, text:d.text, bodyRef:d.recoveryRef ? d.id : undefined, delivery:d, images:d.images, at:d.at}))]);
+  const recoveries = $derived([...new Map([...recoveryRecords, ...fullBatches, ...detail.deliveries].map(d => [d.id, d])).values()].map(d => (d.source === "user" || d.source === "question") && d.status !== "sent" && receiptAlreadyAccepted(detail.id, d.id) ? {...d,status:"sent" as const,error:undefined} : d));
+  const timelineMessages = $derived([...detail.messages, ...recoveries.filter(d => (d.source === "user" || d.source === "question") && d.status === "failed" && !detail.messages.some(m => m.id === d.id || m.clientId === d.id)).map(d => ({id:d.id, clientId:d.id, provisional:true, role:"user" as const, text:d.text, bodyRef:d.recoveryRef ? d.id : undefined, delivery:d, images:d.images, at:d.at}))]);
   const visibleState = $derived(executionStatus(detail));
   const displayWorking = $derived(visibleState === "working" || (visibleState !== "stopping" && optimisticWorking));
   const previousInterrupted = $derived(detail.currentExecution ? !!detail.currentExecution.lastInterrupted : !!detail.lastInterrupted);
@@ -128,6 +128,16 @@
     window.addEventListener("keydown", dismissRecord, true);
     return () => window.removeEventListener("keydown", dismissRecord, true);
   });
+  let questionRetryErrors = $state<Record<string,string>>({});
+  let retryingAnswers = $state<string[]>([]);
+  async function retryAnswer(delivery: Delivery) {
+    if (retryingAnswers.includes(delivery.id)) return;
+    retryingAnswers = [...retryingAnswers, delivery.id];
+    questionRetryErrors = {...questionRetryErrors, [delivery.id]: ""};
+    try { await onretry(delivery.id, delivery); } catch(e) { questionRetryErrors = {...questionRetryErrors, [delivery.id]: (e as Error).message}; }
+    finally { retryingAnswers = retryingAnswers.filter(id => id !== delivery.id); }
+  }
+  function answerSubmitted() { setQuestionPanel(detail.id, false); removeQuestionDrawer(); }
   let reasonOpen = $state(false);
   let reasonIdentity: string | undefined;
   let reasonCause: string | undefined;
@@ -141,7 +151,6 @@
   let fullQuestions = $state<import("./contracts").Question[]>([]);
   let questionError = $state("");
   let questionRevision = $state(0);
-  let fullBatches = $state<Delivery[]>([]);
   let questionLoading = $state(false);
   let batchLoading = $state(false), batchError = $state("");
   const questionReadKey = $derived(JSON.stringify([detail.id, detail.questions.map(q => [q.id, q.state]), detail.unansweredCount]));
@@ -177,12 +186,18 @@
       .finally(() => { if (!controller.signal.aborted) batchLoading = false; });
     return () => controller.abort();
   });
-  const shownQuestions = $derived(fullQuestions.filter(q => detail.questions.find(ref => ref.id === q.id)?.state !== "answered"));
+  const blockedQuestions = $derived(new Set([
+    ...dismissedAnswerOperations(detail.id).flatMap(operation => operation.questionIds),
+    ...outgoing.entries.filter(o => o.agentId === detail.id && o.answers).flatMap(o => o.answers!.map(a => a.questionId)),
+    ...detail.deliveries.filter(d => d.source === "question" && d.status !== "sent").flatMap(d => d.questionIds),
+    ...fullQuestions.filter(q => q.answerOperation && q.answerOperation.status !== "sent").map(q => q.id),
+  ]));
+  const shownQuestions = $derived(fullQuestions.filter(q => detail.questions.find(ref => ref.id === q.id)?.state !== "answered" && !blockedQuestions.has(q.id)));
   const shownBatches = $derived(fullBatches.filter(d => detail.deliveries.find(ref => ref.id === d.id)?.status !== "sent" && !isDismissedPending(detail.id, d.id, detail.deliveries.find(ref => ref.id === d.id)?.status ?? d.status)).map(d => ({...d,status: detail.deliveries.find(ref => ref.id === d.id)?.status ?? d.status})));
   const pending = $derived(detail.questions.filter(q => q.state !== "answered"));
-  const pendingCount = $derived(detail.role === "orc" ? detail.unansweredCount ?? pending.length : pending.length);
+  const pendingCount = $derived(detail.role === "orc" ? Math.max(0, (detail.unansweredCount ?? pending.length) - pending.filter(q => blockedQuestions.has(q.id)).length) : pending.length);
   $effect(() => {
-    if (!ready || !connected || !pendingOpen || pendingCount || questionLoading || questionError || shownQuestions.length) return;
+    if (!ready || !connected || !pendingOpen || pendingCount || questionLoading || questionError || batchLoading || batchError || shownQuestions.length) return;
     setQuestionPanel(detail.id, false);
     if (!record) removeQuestionDrawer();
   });
@@ -209,11 +224,13 @@
       {@const delivery = recoveries.find(d=>d.id===(message.clientId ?? message.id)) ?? message.delivery}
       {@const report = delivery && ["worker", "reviewer", "researcher"].includes(delivery.source) ? delivery : undefined}
       {#if report}<WorkerReport at={message.at} agentId={report.reportingResearcherId ?? report.reportingReviewerId ?? report.reportingWorkerId} kind={report.source === "researcher" ? "Researcher report" : report.source === "reviewer" ? "Reviewer report" : undefined} text={message.text} bodyRef={message.bodyRef} owningAgentId={detail.id} readPath={message.provisional ? `/recovery?${new URLSearchParams({agent: detail.id, operation: message.id})}` : undefined} sender={workers.find(w => w.id === (report.reportingResearcherId ?? report.reportingReviewerId ?? report.reportingWorkerId))?.title} initiallyExpanded={expandedReports.has(message.clientId ?? message.id) || (grouped && !closedReports.has(message.clientId ?? message.id))} onexpanded={value => { const id = message.clientId ?? message.id; if (value) { expandedReports.add(id); closedReports.delete(id); } else { expandedReports.delete(id); closedReports.add(id); } }} />
-      {:else}<div class:user-message={message.role === "user"} class:failed-user={message.role === "user" && delivery?.source === "user" && submissionResult(delivery) === "rejected" && !dispatching.includes(delivery.id)} class:assistant-message={message.role === "assistant"}>{#if message.role === "user" && delivery?.source === "user" && submissionResult(delivery) === "rejected" && !dispatching.includes(delivery.id)}<Button class="retry-user" variant="ghost" size="icon-sm" aria-label={m.retry()} title={delivery.error || m.retry()} disabled={!connected} onclick={() => onretryuser(detail.id,delivery.id,delivery)}><RotateCcw /></Button>{/if}<div class="message-role">{#if showAuthors && author}<span class="message-author" style:--author-color={author.color}><span>{author.name.slice(0,1).toUpperCase()}</span>{author.name}</span>{:else}{message.role === "assistant" ? detail.role === "orc" ? m.orc() : detail.role === "reviewer" ? "Reviewer" : detail.role === "researcher" ? "Researcher" : m.worker() : ""}{/if}</div><MessageBody text={message.text} bodyRef={message.bodyRef} agentId={detail.id} copyMessage at={message.at} readPath={message.provisional ? `/recovery?${new URLSearchParams({agent: detail.id, operation: message.id})}` : undefined}>
-      {#if message.questionItemId || message.delivery?.source === "question"}<Button class="question-record-entry" variant="secondary" size="sm" onclick={() => openRecord(message)}><MessageCircle />View questions and answers</Button>{/if}
+      {:else}<div class:user-message={message.role === "user"} class:failed-user={message.role === "user" && (delivery?.source === "user" || delivery?.source === "question") && submissionResult(delivery) === "rejected" && !dispatching.includes(delivery.id)} class:assistant-message={message.role === "assistant"}>{#if message.role === "user" && (delivery?.source === "user" || delivery?.source === "question") && submissionResult(delivery) === "rejected" && !dispatching.includes(delivery.id)}<Button class="retry-user" variant="ghost" size="icon-sm" aria-label={m.retry()} title={delivery.error || m.retry()} disabled={!connected || retryingAnswers.includes(delivery.id)} onclick={() => delivery.source === "question" ? retryAnswer(delivery) : onretryuser(detail.id,delivery.id,delivery)}><RotateCcw /></Button>{/if}<div class="message-role">{#if showAuthors && author}<span class="message-author" style:--author-color={author.color}><span>{author.name.slice(0,1).toUpperCase()}</span>{author.name}</span>{:else}{message.role === "assistant" ? detail.role === "orc" ? m.orc() : detail.role === "reviewer" ? "Reviewer" : detail.role === "researcher" ? "Researcher" : m.worker() : ""}{/if}</div><MessageBody text={message.text} bodyRef={message.bodyRef} agentId={detail.id} copyMessage at={message.at} readPath={message.provisional ? `/recovery?${new URLSearchParams({agent: detail.id, operation: message.id})}` : undefined}>
+      {#snippet actions()}
+        {#if message.role === "user" && !message.provisional && (message.questionItemId || message.delivery?.source === "question")}<Button class="question-record-entry" variant="ghost" size="icon-xs" aria-label="View questions and answers" title="View questions and answers" onclick={() => openRecord(message)}><MessageCircle /></Button>{/if}
+      {/snippet}
+      {#if message.role !== "user" && !message.provisional && (message.questionItemId || message.delivery?.source === "question")}<Button class="question-record-entry" variant="secondary" size="sm" onclick={() => openRecord(message)}><MessageCircle />View questions and answers</Button>{/if}
       {#if message.images?.length || message.localImageIds?.length}<MessageImages connected={mediaConnected} agentId={detail.id} operationId={message.id} images={message.images} localImageIds={message.localImageIds} onviewer={open => { if (open) pinnedImage = message.id; else if (pinnedImage === message.id) pinnedImage = undefined; }} />{/if}
-      {#if delivery && submissionResult(delivery) === 'rejected' && !(delivery.source === "user" && dispatching.includes(delivery.id))}<small class="failed" role="status">{m.failed()}{#if retryErrors[detail.id + "/" + delivery.id] || delivery.error}<span> · {retryErrors[detail.id + "/" + delivery.id] || delivery.error}</span>{/if}</small>{/if}
-      {#if message.role === "user" && delivery?.source === "user" && submissionResult(delivery) === "pending" && !dispatching.includes(delivery.id)}<LegacyPendingAction agentId={detail.id} operationId={delivery.id} />{/if}
+      {#if delivery && submissionResult(delivery) === 'rejected' && !(delivery.source === "user" && dispatching.includes(delivery.id))}<small class="failed" role="status">{m.failed()}{#if questionRetryErrors[delivery.id] || retryErrors[detail.id + "/" + delivery.id] || delivery.error}<span> · {questionRetryErrors[delivery.id] || retryErrors[detail.id + "/" + delivery.id] || delivery.error}</span>{/if}</small>{/if}
       {#if delivery?.status === "sent" && delivery.error}<small class="failed" role="status">{delivery.error}</small>{/if}
       </MessageBody></div>{/if}
     {/snippet}
@@ -234,7 +251,7 @@
       <div class:question-hidden={!!record} class="pending-content">
         {#if questionError || batchError}<div class="question-load"><p class="inline-error" role="alert">{questionError || batchError}</p><Button variant="secondary" size="sm" disabled={!connected} onclick={() => questionRevision++}>Retry</Button></div>{/if}
         {#if questionLoading && !shownQuestions.length}<p class="question-load" role="status">Loading questions…</p>{:else if !shownQuestions.length && !questionError}<p class="question-load" role="status">{!connected ? "Reconnect to load questions." : "No pending questions."}</p>{/if}
-        {#if detail.role === "orc"}<Questions agentId={detail.id} questions={shownQuestions} deliveries={shownBatches} selectedItem={pendingItem} recovering={batchLoading || !!batchError} connected={ready && connected && detail.state !== "stopping"} {onanswer} {onretry} onbeginSend={beginPosition} onpositionSent={positionAnswer} />
+        {#if detail.role === "orc"}<Questions agentId={detail.id} questions={shownQuestions} deliveries={shownBatches} selectedItem={pendingItem} recovering={batchLoading || !!batchError} connected={ready && connected && detail.state !== "stopping"} {onanswer} {onretry} onbeginSend={beginPosition} onpositionSent={positionAnswer} onsubmitted={answerSubmitted} />
         {:else}<div class="delegated-questions">{#each shownQuestions as q}<div><Markdown text={q.text} agentId={detail.id} /><span>{m.delegated()}</span></div>{/each}</div>{/if}
       </div>
     </section>{/if}

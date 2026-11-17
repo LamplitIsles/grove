@@ -1614,6 +1614,10 @@ button.question-option {
 .question-record-entry {
   margin-top: 8px;
 }
+.message-actions .question-record-entry {
+  margin-top: 0;
+  pointer-events: auto;
+}
 .answer-batch {
   padding: 16px;
   font-size: 13px;

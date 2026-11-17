@@ -6,7 +6,7 @@
   import Markdown from "./Markdown.svelte";
   import CopyButton from "./CopyButton.svelte";
   import MessageTime from "./MessageTime.svelte";
-  let { text, bodyRef, agentId, readPath, expand = false, fileAgentId = agentId, copyMessage = false, at, children }: { text: string; bodyRef?: string; agentId: string; readPath?: string; expand?: boolean; fileAgentId?: string; copyMessage?: boolean; at?: number; children?: Snippet } = $props();
+  let { text, bodyRef, agentId, readPath, expand = false, fileAgentId = agentId, copyMessage = false, at, actions, children }: { text: string; bodyRef?: string; agentId: string; readPath?: string; expand?: boolean; fileAgentId?: string; copyMessage?: boolean; at?: number; actions?: Snippet; children?: Snippet } = $props();
   let body = $state<string>();
   let loading = $state(false), error = $state("");
   const abort = new AbortController();
@@ -28,4 +28,4 @@
 {:else}<div class="message-body">{#if error}<p class="inline-error" role="alert">{error}</p>{/if}<Button variant="ghost" size="sm" disabled={loading} onclick={load}>{loading ? m.loading_message() : error ? m.retry() : m.read_full_message()}</Button></div>{/if}
 {@render children?.()}
 </div>
-{#if at !== undefined || copyMessage}<div class="message-actions">{#if at !== undefined}<MessageTime {at} />{/if}{#if copyMessage && (!bodyRef || body !== undefined) && (body ?? text)}<CopyButton text={body ?? text} label={m.copy_message()} size="icon-xs" class="copy-message" />{/if}</div>{/if}
+{#if at !== undefined || copyMessage || actions}<div class="message-actions">{#if at !== undefined}<MessageTime {at} />{/if}{#if copyMessage && (!bodyRef || body !== undefined) && (body ?? text)}<CopyButton text={body ?? text} label={m.copy_message()} size="icon-xs" class="copy-message" />{/if}{@render actions?.()}</div>{/if}

@@ -62,6 +62,7 @@ for (const width of [1440, 390]) {
       el.setSelectionRange(3, 8),
     );
     await question(request, "batch", 2);
+    await page.getByRole("button", { name: /pending question/ }).click();
     await expect(panel(page).getByRole("heading", { level: 3 })).toHaveText(
       "batch question 1",
     );
@@ -114,6 +115,7 @@ for (const width of [1440, 390]) {
     } else {
       await page.reload();
     }
+    await page.getByRole("button", { name: /pending question/ }).click();
     await expect(panel(page).locator("textarea")).toHaveValue(
       "Second answer\n",
     );
@@ -121,6 +123,8 @@ for (const width of [1440, 390]) {
     await panel(page)
       .getByRole("button", { name: "Send all answers", exact: true })
       .click();
+    await expect(panel(page)).not.toBeVisible();
+    await page.getByRole("button", { name: /pending question/ }).click();
     await expect(panel(page).getByRole("heading", { level: 3 })).toHaveText(
       "queued question 1",
     );
@@ -279,11 +283,13 @@ test("unknown frozen batch never replays, rejected batch retries once", async ({
   await panel(page).locator("textarea").fill("frozen");
   const before = (await inputs(request)).length;
   await panel(page).getByRole("button", { name: "Send all answers" }).click();
-  await expect(panel(page).locator(".answer-batch")).toContainText("Sending");
+  const frozen = page.locator(".user-message").filter({ hasText: "frozen" });
+  await expect(panel(page)).not.toBeVisible();
+  await expect(frozen).toHaveCount(1);
   await question(request, "arrival");
-  await expect(panel(page).locator(".answer-batch")).toContainText("frozen");
+  await expect(frozen).toHaveCount(1);
   await page.reload();
-  await expect(panel(page).locator(".answer-batch")).toContainText("frozen");
+  await expect(frozen).toHaveCount(1);
   expect((await inputs(request)).length).toBe(before + 1);
   await expect(panel(page).getByRole("button", { name: "Retry" })).toHaveCount(
     0,
@@ -293,11 +299,12 @@ test("unknown frozen batch never replays, rejected batch retries once", async ({
   await question(request, "failed", 1, { sendMode: "rejected" });
   await panel(page).locator("textarea").fill("retained");
   await panel(page).getByRole("button", { name: "Send all answers" }).click();
-  await expect(panel(page).locator(".answer-batch")).toContainText(
-    "Synthetic rejection",
-  );
+  const rejected = page
+    .locator(".user-message")
+    .filter({ hasText: "retained" });
+  await expect(rejected).toContainText("Synthetic rejection");
   await change(request, { sendMode: "accepted" });
-  await panel(page).getByRole("button", { name: "Retry", exact: true }).click();
+  await rejected.getByRole("button", { name: "Retry", exact: true }).click();
   await expect(panel(page)).not.toBeVisible();
   expect((await inputs(request)).at(-1).text).toContain("retained");
 });
@@ -405,28 +412,34 @@ test("a new browser freezes an unresolved answer outside the delivery window fro
   await question(request, "old-window", 1, { sendMode: "uncertain" });
   await panel(page).locator("textarea").fill("Original frozen outside window");
   await panel(page).locator("textarea").press("Enter");
-  await expect(panel(page).locator(".answer-batch")).toContainText(
-    "Original frozen outside window",
+  await expect(panel(page)).not.toBeVisible();
+  await expect(
+    page
+      .locator(".user-message")
+      .filter({ hasText: "Original frozen outside window" }),
+  ).toHaveCount(1);
+  const operation = await page.evaluate(
+    () =>
+      Object.keys(localStorage)
+        .filter((k) => k.includes("/outgoing/"))
+        .map((k) => JSON.parse(localStorage.getItem(k)!))
+        .find((item) => item.text.includes("Original frozen outside window"))
+        ?.id,
   );
-  const operation = await panel(page)
-    .locator(".answer-batch")
-    .getAttribute("data-operation-id");
+  expect(operation).toBeTruthy();
   await change(request, { sendMode: "accepted", laterSubmissions: 105 });
   const before = (await inputs(request)).length;
   const context = await browser.newContext();
   try {
     const observer = await context.newPage();
     await observer.goto(origin);
+    const questionsRead = observer.waitForResponse(
+      (r) => r.url().includes("/api/read/questions?") && r.ok(),
+    );
     await observer
       .getByRole("button", { name: "Open Streaming voice input Orc" })
       .click();
-    await expect(panel(observer).locator(".answer-batch")).toHaveAttribute(
-      "data-operation-id",
-      operation!,
-    );
-    await expect(panel(observer).locator(".answer-batch")).toContainText(
-      "Original frozen outside window",
-    );
+    await questionsRead;
     await expect(panel(observer).locator("textarea")).toHaveCount(0);
     await expect(
       panel(observer).getByRole("button", { name: "Retry" }),

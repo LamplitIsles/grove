@@ -95,12 +95,7 @@ for (const kind of ["question", "message", "image", "image-remote"] as const) {
     await page
       .getByRole("button", { name: "Open Streaming voice input Orc" })
       .click();
-    if (kind === "question")
-      await page.getByRole("button", { name: /pending question/ }).click();
-    const root =
-      kind === "question"
-        ? page.locator(".question-panel")
-        : page.locator(".agent-detail");
+    const root = page.locator(".agent-detail");
     await expect(
       root.getByRole("button", { name: "Retry", exact: true }),
     ).toBeVisible({ timeout: 20000 });
@@ -355,7 +350,7 @@ test("simultaneous retries of one rejected message do not send it twice", async 
     .toBeGreaterThan(0);
   await expect(
     first.locator(".user-message").filter({ hasText: text }),
-  ).toHaveCount(2);
+  ).toHaveCount(1);
   await request.post(origin + "/fixture/change", {
     data: { sendMode: "accepted" },
   });

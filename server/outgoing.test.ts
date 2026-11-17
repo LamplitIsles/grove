@@ -47,14 +47,14 @@ test("pending lookup preserves identity and accepted results are monotonic", asy
       const prefix = "flickgrove/http://fixture.invalid/outgoing/peer%3Aorc/";
       const images = [{id:"a".repeat(64),name:"kept.png",width:8,height:8,bytes:80,mediaType:"image/png"}];
       for (const [id,status] of [["held","sending"],["unknown","uncertain"],["confirmed","sent"],["refused","failed"]])
-        records.set(prefix+id,JSON.stringify({agentId:"peer:orc",id,text:"kept "+id,at:123,status,images,localImageIds:["local-image"],answers:[{questionId:"original",answer:"kept answer"}]}));
+        records.set(prefix+id,JSON.stringify({agentId:"peer:orc",id,text:"kept "+id,at:123,status,images,localImageIds:["local-image"],answers:[{questionId:id === "confirmed" ? "confirmed-original" : "original",answer:"kept answer"}]}));
       Object.assign(globalThis, {location: {origin: "http://fixture.invalid"}, window: {addEventListener() {}}, localStorage: new Proxy({
         getItem: key => records.get(key) ?? null, setItem: (key, value) => {
           if(rejectAll || (rejectAccepted && key.includes('/accepted/')))throw new DOMException('full','QuotaExceededError');
           records.set(key, value);
         }, removeItem: key => records.delete(key)
       }, {ownKeys:()=>[...records.keys()],getOwnPropertyDescriptor:()=>({enumerable:true,configurable:true})})});
-      const {addOutgoing, acceptReceipt, observeOutgoing, outgoing, receiptAlreadyAccepted, withOutgoing, submissionResult, deleteRejectedOutgoing, forgetLegacyPending, setOutgoingImages} = await import("./outgoing.mjs");
+      const {addOutgoing, acceptReceipt, observeOutgoing, observeNativeMessages, outgoing, receiptAlreadyAccepted, withOutgoing, submissionResult, deleteRejectedOutgoing, forgetLegacyPending, setOutgoingImages} = await import("./outgoing.mjs");
       assert.deepEqual(outgoing.entries.map(o=>[o.id,o.status]),[["held","pending"],["unknown","pending"],["confirmed","accepted"],["refused","rejected"]]);
       assert.equal(JSON.stringify(outgoing.entries[0].images),JSON.stringify(images));
       assert.equal(JSON.stringify(outgoing.entries[0].answers),JSON.stringify([{questionId:"original",answer:"kept answer"}]));
@@ -150,6 +150,9 @@ test("pending lookup preserves identity and accepted results are monotonic", asy
       assert.equal(receiptAlreadyAccepted("other:orc","server-user"),false);
       addOutgoing("peer:orc", "draft", "op");
       assert.throws(()=>addOutgoing("peer:orc","changed","op"),/bound/);
+      observeOutgoing({id:'peer:orc',messages:[{id:'op',clientId:'op',role:'user',provisional:true}],deliveries:[]});
+      assert.equal(receiptAlreadyAccepted('peer:orc','op'),false);
+      assert.equal(records.has(prefix+'op'),true);
       acceptReceipt("peer:orc", null);
       assert.equal(outgoing.entries[0].status, "pending");
       const detail = status => ({id: "peer:orc", messages: [], deliveries: [{id: "op", status}]});
@@ -158,16 +161,25 @@ test("pending lookup preserves identity and accepted results are monotonic", asy
       observeOutgoing(detail("queued"));
       assert.equal(outgoing.entries[0].status, "pending");
       observeOutgoing(detail("sent"));
-      assert.equal(outgoing.entries.length, 0);
+      assert.equal(outgoing.entries.length, 1);
       assert.equal(receiptAlreadyAccepted('peer:orc','op'),true);
-      assert.equal(records.has(prefix+'op'),false);
+      assert.equal(JSON.parse(records.get(prefix+'op')).status,'sent');
+      const receiptFirstReload = await import("./outgoing.mjs?receipt-first-reload");
+      const awaitingNative = receiptFirstReload.withOutgoing({id:'peer:orc',messages:[],questions:[],deliveries:[{id:'op',status:'sent',source:'user',text:'draft',at:1,questionIds:[]}]});
+      assert.equal(awaitingNative.messages.filter(m=>m.clientId==='op').length,1);
+      assert.equal(awaitingNative.messages.find(m=>m.clientId==='op').text,'draft');
+      observeNativeMessages('peer:orc',[{id:'op',clientId:'different',role:'user'}]);
+      observeNativeMessages('peer:orc',[{id:'op',clientId:'op',role:'user',provisional:true}]);
+      observeNativeMessages('peer:other',[{id:'native-op',clientId:'op',role:'user'}]);
+      assert.equal(records.has(prefix+'op'),true);
       acceptReceipt("peer:orc", null);
       observeOutgoing(detail("queued"));
       observeOutgoing(detail("uncertain"));
       acceptReceipt('peer:orc',{operationId:'op',state:'rejected',turnId:null,error:'late'});
-      assert.equal(outgoing.entries.length, 0);
-      observeOutgoing({id:'peer:orc',messages:[{id:'op',role:'user'}],deliveries:[]});
+      assert.equal(outgoing.entries.length, 1);
+      observeNativeMessages('peer:orc',[{id:'native-op',clientId:'op',role:'user'}]);
       assert.equal(outgoing.entries.length,0);
+      assert.equal(records.has(prefix+'op'),false);
       const stale = withOutgoing({id:'peer:orc',messages:[],questions:[],deliveries:[{id:'op',status:'uncertain',source:'user',text:'draft',at:1,questionIds:[]}]});
       assert.equal(stale.deliveries[0].status,'sent');
       assert.equal(stale.messages.length,0);
@@ -176,7 +188,8 @@ test("pending lookup preserves identity and accepted results are monotonic", asy
       assert.equal(outgoing.entries.length,0);
       addOutgoing('peer:orc','second','second');
       observeOutgoing({id:'peer:orc',messages:[],deliveries:[{id:'second',status:'sent'}]});
-
+      assert.equal(outgoing.entries.length, 1);
+      observeOutgoing({id:'peer:orc',messages:[{id:'native-second',clientId:'second',role:'user'}],deliveries:[]});
       assert.equal(outgoing.entries.length, 0);
       const mutableImages = structuredClone(images);
       addOutgoing("peer:orc","image","image",undefined,mutableImages,["local-image"]);

@@ -9,7 +9,7 @@
   import { tick, untrack, onMount } from "svelte";
   import type { Answer, Delivery, Question } from "./contracts";
   import * as m from "./paraglide/messages";
-  let { agentId, previewAgentId = agentId, historyPreview = false, questions, deliveries = [], connected = false, recovering = false, readonly = false, selectedItem, onanswer, onretry, onbeginSend, onpositionSent }: { agentId: string; previewAgentId?: string | null; historyPreview?: boolean; questions: Question[]; deliveries?: Delivery[]; connected?: boolean; recovering?: boolean; readonly?: boolean; selectedItem?: string; onanswer?: (answers: Answer[], operationId: string, text?: string) => Promise<void>; onretry?: (id: string, delivery?: Delivery) => Promise<void>; onbeginSend?: () => number | undefined; onpositionSent?: (operation: string, generation: number) => void; } = $props();
+  let { agentId, previewAgentId = agentId, historyPreview = false, questions, deliveries = [], connected = false, recovering = false, readonly = false, selectedItem, onanswer, onretry, onbeginSend, onpositionSent, onsubmitted }: { agentId: string; previewAgentId?: string | null; historyPreview?: boolean; questions: Question[]; deliveries?: Delivery[]; connected?: boolean; recovering?: boolean; readonly?: boolean; selectedItem?: string; onanswer?: (answers: Answer[], operationId: string, text?: string) => Promise<void>; onretry?: (id: string, delivery?: Delivery) => Promise<void>; onbeginSend?: () => number | undefined; onpositionSent?: (operation: string, generation: number) => void; onsubmitted?: () => void; } = $props();
   const storageKey = untrack(() => `${storagePrefix}/questions/${agentId}`);
   type Draft = { selected: string; text: string };
   let drafts = $state<Record<string, Draft>>(untrack(() => {
@@ -59,7 +59,7 @@
     const text = batch.map(q => `Question: ${q.text}\nAnswer: ${value(q)}`).join("\n\n");
     const position = onbeginSend?.();
     submitting = true; feedback = "";
-    try { const operationId = await reserveSubmission(agentId); if(active) { const sent = onanswer(answers, operationId, text); if (position !== undefined) onpositionSent?.(operationId, position); await sent; } }
+    try { const operationId = await reserveSubmission(agentId); if(active) { const sent = onanswer(answers, operationId, text); if (position !== undefined) onpositionSent?.(operationId, position); onsubmitted?.(); await sent; } }
     catch(e) { feedback = (e as Error).message; }
     finally { submitting = false; }
   }
