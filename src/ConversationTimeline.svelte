@@ -507,6 +507,10 @@
     } finally { if (positioningGeneration === generation) positioningGeneration = undefined; }
   }
   export function releaseAnswerSpace() { answerHolding = false; }
+  export function jumpToTop() {
+    userReading();
+    $virtualizer.scrollToOffset(0);
+  }
   export async function jumpToBottom() {
     cancelLocation();
     answerHolding = false; sendSpace = 0; spaceOperation = undefined;

@@ -338,6 +338,7 @@
   "activity_window": "Activity window",
   "key_visible_number": "Open visible session 1–9 (recent activity first)",
   "key_visible_cycle": "Next / previous visible session, wrapping",
+  "key_jump_conversation": "Jump to the top or the latest message",
   "pending_answer_unconfirmed": "An earlier answer may have been received. Sending again may answer the question twice.",
   "pending_answer_delivery": "Answer delivery unconfirmed.",
   "pending_remove": "Remove pending message",

@@ -274,6 +274,71 @@ test("mobile swipe only reveals, one row at a time; right/outside collapse and e
   await expect(page.getByText("Tree closed.", { exact: true })).toBeVisible();
 });
 
+test("Cmd and Ctrl arrows jump to both ends of the current conversation", async ({
+  page,
+  request,
+}, testInfo) => {
+  await request.post(`${origin}/fixture/reset`, { data: { mode: "long" } });
+  await page.goto(origin);
+  await openSidebar(page);
+  await page.getByRole("button", { name: orcName }).click();
+  const transcript = page.getByRole("region", {
+    name: "Conversation",
+    exact: true,
+  });
+  const input = page.getByRole("textbox", { name: "Message Orc", exact: true });
+  const distanceFromBottom = () =>
+    transcript.evaluate(
+      (el) => el.scrollHeight - el.scrollTop - el.clientHeight,
+    );
+  await expect(transcript).toContainText("Paragraph 70.");
+  await expect.poll(distanceFromBottom).toBeLessThan(80);
+  await input.fill("Keep this draft");
+  await input.evaluate((element: HTMLTextAreaElement) => {
+    element.setSelectionRange(2, 7);
+  });
+  for (const modifier of ["Control", "Meta"]) {
+    await input.press(`${modifier}+ArrowUp`);
+    await expect
+      .poll(() => transcript.evaluate((el) => el.scrollTop))
+      .toBeLessThan(2);
+    await input.press(`${modifier}+ArrowDown`);
+    await expect.poll(distanceFromBottom).toBeLessThan(80);
+  }
+  await expect(input).toBeFocused();
+  await expect(input).toHaveValue("Keep this draft");
+  expect(
+    await input.evaluate((element: HTMLTextAreaElement) => [
+      element.selectionStart,
+      element.selectionEnd,
+    ]),
+  ).toEqual([2, 7]);
+
+  await input.press("Alt+KeyS");
+  const search = page.getByRole("combobox", { name: "Search skills…" });
+  await expect(search).toBeFocused();
+  await search.press("Control+ArrowUp");
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+      }),
+  );
+  expect(await distanceFromBottom()).toBeLessThan(80);
+
+  await search.press("Escape");
+  await expect(input).toBeFocused();
+  await input.blur();
+  await page.keyboard.press("?");
+  const shortcuts = page.getByRole("dialog", { name: "Keyboard shortcuts" });
+  await expect(
+    shortcuts.getByText("⌘ / Ctrl + ↑ / ↓", { exact: true }),
+  ).toBeVisible();
+  await shortcuts.screenshot({
+    path: testInfo.outputPath("shortcut-help.png"),
+  });
+});
+
 for (const width of [1440, 390])
   for (const role of ["Orc", "Worker"]) {
     test(`jump to bottom stays at the reading position for ${role} at ${width}px`, async ({

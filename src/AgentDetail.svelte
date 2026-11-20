@@ -110,10 +110,15 @@
     if (pendingOpen) removeQuestionDrawer();
   }
   function jumpKey(event: KeyboardEvent) {
-    if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || !event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || event.key !== "ArrowDown") return;
-    if (navigation.surfaces.some(surface => surface !== "sidebar") || panelOpen) return;
+    if (
+      event.defaultPrevented || event.isComposing || event.keyCode === 229 ||
+      event.metaKey === event.ctrlKey || event.altKey || event.shiftKey ||
+      (event.key !== "ArrowUp" && event.key !== "ArrowDown")
+    ) return;
+    if (!timeline || navigation.surfaces.some(surface => surface !== "sidebar") || panelOpen) return;
     event.preventDefault();
-    void timeline?.jumpToBottom();
+    if (event.key === "ArrowUp") timeline.jumpToTop();
+    else void timeline.jumpToBottom();
   }
   onMount(() => {
     window.addEventListener("keydown", jumpKey);

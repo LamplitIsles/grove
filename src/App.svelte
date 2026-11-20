@@ -1003,7 +1003,7 @@
         </div>
       </div>
     {:else if modal === "keys"}
-      <Dialog.Title>{m.shortcuts()}</Dialog.Title><p class="modal-help">{m.keyboard_help()}</p><dl class="shortcut-list">{#each [["⌘ / Ctrl + B", m.toggle_sidebar()], ["⌘ / Ctrl + 1–9", m.key_visible_number()], ["Option/Alt + J / K", m.key_visible_cycle()], ["↑ ↓ ← →", m.key_focus()], ["Enter", m.key_open()], ["E", m.key_expand()], ["N", m.key_new()], ["I", m.key_input()], ["Option/Alt + S", m.search_skills()], ["Option/Alt + X", m.close_tree()], ["Esc", m.key_escape()], ["Tab", m.key_completion()], ["Tab", "Queue message while working"], ["Enter", m.key_send()], ["Shift + Enter", m.key_newline()]] as [key, label]}<div><dt><Kbd>{key}</Kbd></dt><dd>{label}</dd></div>{/each}</dl><p class="keyboard-scope">{m.keyboard_scope()}</p>
+      <Dialog.Title>{m.shortcuts()}</Dialog.Title><p class="modal-help">{m.keyboard_help()}</p><dl class="shortcut-list">{#each [["⌘ / Ctrl + B", m.toggle_sidebar()], ["⌘ / Ctrl + 1–9", m.key_visible_number()], ["Option/Alt + J / K", m.key_visible_cycle()], ["⌘ / Ctrl + ↑ / ↓", m.key_jump_conversation()], ["↑ ↓ ← →", m.key_focus()], ["Enter", m.key_open()], ["E", m.key_expand()], ["N", m.key_new()], ["I", m.key_input()], ["Option/Alt + S", m.search_skills()], ["Option/Alt + X", m.close_tree()], ["Esc", m.key_escape()], ["Tab", m.key_completion()], ["Tab", "Queue message while working"], ["Enter", m.key_send()], ["Shift + Enter", m.key_newline()]] as [key, label]}<div><dt><Kbd>{key}</Kbd></dt><dd>{label}</dd></div>{/each}</dl><p class="keyboard-scope">{m.keyboard_scope()}</p>
     {/if}
     {#if error}<p class="inline-error" role="alert">{error}</p>{/if}
   </Dialog.Content>
