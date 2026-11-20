@@ -319,6 +319,10 @@ _Avoid_：任意 user 角色消息、成员报告、全文搜索结果
 **会话树活动（Session tree activity）**：
 开放 Orc 会话或其所属成员的工作与消息活动。成员活动属于其所属的 Orc 会话树。
 
+**正在工作的会话树**：
+Orc 或至少一名所属成员的工作状态为 Working 或 Stopping 的开放会话树。
+_Avoid_：最近活动会话、打开的会话、正在工作的成员总数
+
 **最近活动会话（Recently active session）**：
 在所选时间范围内有会话树活动，或仍在工作的开放 Orc 会话。
 _Avoid_：置顶会话、会话副本

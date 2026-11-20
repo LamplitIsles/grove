@@ -1058,6 +1058,7 @@ pre {
   align-items: center;
   justify-content: space-between;
   flex-direction: row;
+  column-gap: 8px;
   flex-shrink: 0;
   padding: 14px 20px;
   margin: 0;
@@ -1068,6 +1069,74 @@ pre {
   font-size: 13px;
   color: var(--foreground);
   font-weight: 550;
+}
+.organization-shortcuts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 4px 6px;
+  min-width: 0;
+}
+.session-list-heading > button {
+  flex: none;
+}
+.organization-button {
+  display: flex;
+  flex: 0 0 36px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 38px;
+  padding: 0 0 2px;
+}
+.organization-avatar {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--secondary);
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 600;
+}
+.organization-button:hover .organization-avatar {
+  background: var(--accent);
+  color: var(--foreground);
+}
+.organization-button[aria-pressed="true"] .organization-avatar {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.organization-button:focus-visible .organization-avatar {
+  outline: 1px solid var(--ring);
+  outline-offset: 2px;
+}
+.organization-activity {
+  display: grid;
+  grid-template-columns: repeat(5, 4px);
+  gap: 2px;
+  direction: rtl;
+  align-self: flex-end;
+  margin-bottom: -1px;
+  z-index: 1;
+}
+.organization-activity > span {
+  height: 4px;
+  border-radius: 50%;
+  background: var(--primary);
+}
+.organization-tooltip {
+  z-index: 100;
+  max-width: calc(100vw - 24px);
+  padding: 4px 8px;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  font-size: 12px;
 }
 .session-item {
   position: relative;
@@ -1209,16 +1278,13 @@ pre {
   right: 6px;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 3px;
   padding: 4px;
-  color: var(--muted-foreground);
   font-size: 10px;
   line-height: 14px;
 }
-.session-members > span {
-  display: flex;
-  align-items: center;
-  gap: 3px;
+.session-members:not(.working) {
+  color: var(--muted-foreground);
 }
 .session-members svg {
   width: 12px;
@@ -1990,28 +2056,6 @@ button.question-option {
   font-size: 12px;
 }
 
-.org-selector[data-slot="select-trigger"] {
-  max-width: 100%;
-  padding: 0 4px;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-  font-size: inherit;
-  font-weight: inherit;
-}
-.org-selector [data-slot="select-value"] {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.org-selector > svg {
-  opacity: 0;
-}
-.org-selector:hover > svg,
-.org-selector:focus-visible > svg,
-.org-selector[data-state="open"] > svg {
-  opacity: 1;
-}
 .opened-empty {
   margin: 0 10px;
   color: var(--muted-foreground);

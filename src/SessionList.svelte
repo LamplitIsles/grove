@@ -5,8 +5,6 @@
 </script>
 <script lang="ts">
   import ChoiceSelect from "./ChoiceSelect.svelte";
-  import * as Select from "$lib/components/ui/select/index.js";
-  import { choiceLayer } from "./choice-layer.svelte";
   import * as Sidebar from "$lib/components/ui/sidebar/index.js";
   import {environmentId} from "./project-identity";
   import { ChevronRight, Plus, Zap, MessageCircle, GitBranch } from "@lucide/svelte";
@@ -14,7 +12,7 @@
   import { cubicOut } from "svelte/easing";
   import { Button } from "$lib/components/ui/button/index.js";
   import { Settings, LogOut } from "@lucide/svelte";
-  import { ContextMenu } from "bits-ui";
+  import { ContextMenu, Tooltip } from "bits-ui";
   import { onMount, tick, untrack, type Snippet } from "svelte";
   import { readPreference, writePreference } from "./connection";
   import { executionStatus } from "./execution-status";
@@ -31,9 +29,7 @@
   let selectedOrgs = $state<Record<string, string>>(savedOrgs && typeof savedOrgs === "object" && !Array.isArray(savedOrgs) ? Object.fromEntries(Object.entries(savedOrgs).filter(([, v]) => typeof v === "string")) : {});
   const savedFolded = readPreference<unknown>("opened-folded", {});
   let foldedOrgs = $state<Record<string, string[]>>(savedFolded && typeof savedFolded === "object" && !Array.isArray(savedFolded) ? Object.fromEntries(Object.entries(savedFolded).filter(([, v]) => Array.isArray(v) && v.every(x => typeof x === "string"))) : {});
-  let orgMenuOpen = $state(false);
-  const orgMenuId = $props.id();
-  choiceLayer(orgMenuId, () => orgMenuOpen, () => orgMenuOpen = false);
+  const organizationDescriptionPrefix = $props.id();
   function selectOrg(key: string) { selectedOrgs = { ...selectedOrgs, [instanceId]: key }; writePreference("selected-orgs", selectedOrgs); }
   function groupKey(agent: Agent) {
     const catalogue = projects.filter(p=>!p.historyRef && environmentId(p)===environmentId(agent.project) && (environmentId(p)==="local" || p.environment?.target===agent.project.environment?.target));
@@ -110,10 +106,25 @@
   }).sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id)));
   function treeEntries(root: Agent) { return [root, ...(root.role === "orc" && expanded.includes(root.id) ? agents.filter(a => a.ownerId === root.id) : [])]; }
   const recentVisible = $derived(recentRoots.flatMap(treeEntries));
-  const orgKeys = $derived.by(() => [...new Set(roots.map(groupKey).filter(key => key !== "@loading"))].sort((a, b) => !a ? 1 : !b ? -1 : a.localeCompare(b)));
+  const organizations = $derived.by(() => {
+    const workingTrees = new Set<string>();
+    for (const agent of agents) {
+      const state = executionStatus(agent);
+      if (state === "working" || state === "stopping") workingTrees.add(agent.ownerId ?? agent.id);
+    }
+    const counts = new Map<string, number>();
+    for (const root of roots) {
+      const key = groupKey(root);
+      if (key === "@loading") continue;
+      counts.set(key, (counts.get(key) ?? 0) + Number(workingTrees.has(root.id)));
+    }
+    return [...counts]
+      .sort(([a], [b]) => !a ? 1 : !b ? -1 : a.localeCompare(b))
+      .map(([key, count]) => ({ key, label: key || "Ungrouped", count }));
+  });
   const selectedOrg = $derived.by(() => {
     const saved = selectedOrgs[instanceId];
-    return saved !== undefined && orgKeys.includes(saved) ? saved : orgKeys[0] ?? null;
+    return organizations.some(org => org.key === saved) ? saved : organizations[0]?.key ?? null;
   });
   const openedFolded = $derived(selectedOrg !== null && (foldedOrgs[instanceId] ?? []).includes(selectedOrg));
   function toggleOpened() {
@@ -123,7 +134,6 @@
     foldedOrgs = { ...foldedOrgs, [instanceId]: openedFolded ? folded.filter(key => key !== selectedOrg) : [...folded, selectedOrg] };
     writePreference("opened-folded", foldedOrgs);
   }
-  const orgItems = $derived(orgKeys.map(key => ({ value: `org:${key}`, label: key || "Ungrouped" })));
   const openedRoots = $derived(roots.filter(root => groupKey(root) === selectedOrg && !recentRoots.some(recent => recent.id === root.id)));
   const visible = $derived(openedFolded ? [] : openedRoots.flatMap(treeEntries));
   $effect(() => { writePreference("expanded", expanded); });
@@ -204,7 +214,26 @@
         <span class="session-title-row"><strong>{agent.title}</strong><span class="session-indicators">{#if agent.role === "orc" && agent.treeFast}<Zap size={12} role="img" aria-label={m.tree_fast()}><title>{m.tree_fast()} — {m.session_next_turn()}</title></Zap>{/if}{#if showAuthors && shortcut && agent.role === "orc" && recentParticipants.length}<span class="participants">{#each recentParticipants.slice(0, 4) as participant (participant.user.id)}<span class="participant-avatar" style:background={participant.user.color} title={participant.user.name} aria-label={participant.user.name}>{participant.user.name.slice(0, 1).toUpperCase()}</span>{/each}{#if recentParticipants.length > 4}<span class="participant-more">+{recentParticipants.length - 4}</span>{/if}</span>{/if}<span class="session-state-dot" class:working={displayWorking && !agent.closeRequest} class:attention={!displayWorking && (visibleState === "error" || visibleState === "stopping" || queued) || !!agent.closeRequest} title={status} role="img" aria-label={status}></span>{#if agent.questions.some(q => q.state !== "answered" && !q.answerOperation && !hasDismissedAnswer(agent.id, [q.id]) && !outgoing.entries.some(o => o.agentId === agent.id && o.answers?.some(a => a.questionId === q.id)))}<MessageCircle class="needs-input-icon" aria-label={m.needs_input()} role="img" />{/if}</span></span>
         <span class="session-meta">{#if agent.role === "orc"}{:else}<span>{agent.role === "reviewer" ? "Reviewer" : agent.role === "researcher" ? "Researcher" : m.worker()}</span>{/if}<span>{agent.backend === "pi" ? "Pi" : "Codex"} · {agent.project.alias}{#if environmentId(agent.project)!=="local"} · {agent.project.environment?.name}{/if}</span>{#if agent.directoryBranch}<span class="session-branch" title={agent.directoryBranch}><GitBranch aria-hidden="true" /><span>{agent.directoryBranch}</span></span>{/if}</span>
       </button>
-      {#if agent.role === "orc" && children.length}<button class="session-members worker-disclosure" tabindex="-1" aria-label={children.some(w => w.role !== "worker") ? (expanded.includes(agent.id) ? "Collapse Workers, Reviewers and Researchers" : "Expand Workers, Reviewers and Researchers") : expanded.includes(agent.id) ? m.collapse_workers() : m.expand_workers()} title={(children.some(w => w.role !== "worker") ? `${children.filter(w => w.role === "worker").length} Workers · ${children.filter(w => w.role === "reviewer").length} Reviewers · ${children.filter(w => w.role === "researcher").length} Researchers` : m.current_workers({ count: children.length })) + " · " + m.working_count({ count: working })} aria-expanded={expanded.includes(agent.id)} onclick={() => { if(Date.now() >= suppressClickUntil) toggle(agent.id); }}><span><ChevronRight class="disclosure-chevron" />{#if working === 0}{children.length}{/if}</span>{#if working > 0}<span class="working worker-working-count">{working}</span>{/if}</button>{/if}
+      {#if agent.role === "orc" && children.length}
+        {@const membersExpanded = expanded.includes(agent.id)}
+        {@const mixedRoles = children.some(member => member.role !== "worker")}
+        <button
+          class="session-members worker-disclosure"
+          class:working={working > 0}
+          tabindex="-1"
+          aria-label={mixedRoles
+            ? (membersExpanded ? "Collapse Workers, Reviewers and Researchers" : "Expand Workers, Reviewers and Researchers")
+            : (membersExpanded ? m.collapse_workers() : m.expand_workers())}
+          title={(mixedRoles
+            ? `${children.filter(member => member.role === "worker").length} Workers · ${children.filter(member => member.role === "reviewer").length} Reviewers · ${children.filter(member => member.role === "researcher").length} Researchers`
+            : m.current_workers({ count: children.length })) + " · " + m.working_count({ count: working })}
+          aria-expanded={membersExpanded}
+          onclick={() => { if (Date.now() >= suppressClickUntil) toggle(agent.id); }}
+        >
+          <ChevronRight class="disclosure-chevron" aria-hidden="true" />
+          <span class:worker-working-count={working > 0}>{working || children.length}</span>
+        </button>
+      {/if}
     </div>
     </div>
     </ContextMenu.Trigger><ContextMenu.Portal><ContextMenu.Content class="session-context-menu"><ContextMenu.Item class="session-context-item" disabled={!root || !connected || host?.connected === false || !!closingId} onSelect={() => { if (root) void onclosetree(root.id); }}>{m.close_tree()}</ContextMenu.Item></ContextMenu.Content></ContextMenu.Portal></ContextMenu.Root>
@@ -221,16 +250,38 @@
 {/snippet}
 <svelte:window onpointerdown={e => { if (revealedId && e.target instanceof Element && !e.target.closest(`[data-swipe-id="${revealedId}"]`)) revealedId = null; }} />
 <Sidebar.Header class="session-list-heading">
-    <h1 class="org-heading">
-      <Select.Root type="single" bind:open={orgMenuOpen} value={selectedOrg === null ? undefined : `org:${selectedOrg}`} items={orgItems} onValueChange={value => { if (value?.startsWith("org:")) selectOrg(value.slice(4)); }}>
-        <Select.Trigger class="org-selector" aria-label="Select organization" title={selectedOrg === null ? m.product() : selectedOrg || "Ungrouped"} onkeydown={e => e.stopPropagation()}>
-          <Select.Value placeholder={m.product()} />
-        </Select.Trigger>
-        <Select.Content class="min-w-(--bits-select-anchor-width) max-w-[calc(100vw-2rem)] p-1" onEscapeKeydown={event => event.stopPropagation()}>
-          {#each orgItems as item (item.value)}<Select.Item value={item.value} label={item.label} />{/each}
-        </Select.Content>
-      </Select.Root>
-    </h1>
+    {#if organizations.length}
+      <div class="organization-shortcuts" role="group" aria-label={m.session_organizations()}>
+        {#each organizations as organization, index (organization.key)}
+          {@const description = `${organizationDescriptionPrefix}-organization-${index}`}
+          <Tooltip.Root disabled={!desktop} disableHoverableContent>
+            <Tooltip.Trigger
+              onkeydown={event => { if (event.key === "Enter" || event.key === " ") event.stopPropagation(); }}
+              onclick={() => selectOrg(organization.key)}
+            >
+              {#snippet child({ props })}
+                <button {...props} class="organization-button" aria-label={organization.label} aria-describedby={description} aria-pressed={selectedOrg === organization.key}>
+                  {#if organization.count}
+                    <span class="organization-activity" aria-hidden="true">
+                      {#each Array(organization.count) as _}<span></span>{/each}
+                    </span>
+                  {/if}
+                  <span class="organization-avatar" aria-hidden="true">{organization.label.slice(0, 1).toUpperCase()}</span>
+                </button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <span id={description} hidden>{m.working_orc_tree_count({ count: organization.count })}</span>
+            <Tooltip.Portal>
+              <Tooltip.Content class="organization-tooltip" role="tooltip" side="bottom" align="start" sideOffset={6}>
+                {organization.label}
+              </Tooltip.Content>
+            </Tooltip.Portal>
+          </Tooltip.Root>
+        {/each}
+      </div>
+    {:else}
+      <h1>{m.product()}</h1>
+    {/if}
     <Button variant="ghost" size="icon-sm" aria-label={m.new_session()} onclick={onnew}><Plus /></Button>
   </Sidebar.Header>
 <Sidebar.Content class="session-list" aria-label={m.sessions()} bind:ref={list} onscroll={() => writePreference("list-scroll", list.scrollTop)}>

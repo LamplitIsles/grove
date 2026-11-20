@@ -499,9 +499,13 @@ async function reset(mode = "working") {
     unit.app.dispose();
   }
   units = [];
-  orgFixture = ["org-groups", "org-groups-idle", "org-groups-long"].includes(
-    mode,
-  );
+  const orgWorking = mode === "org-groups-working";
+  const extraOrgTasks = orgWorking
+    ? Array.from({ length: 4 }, (_, i) => `org-task-${i + 1}`)
+    : [];
+  orgFixture =
+    orgWorking ||
+    ["org-groups", "org-groups-idle", "org-groups-long"].includes(mode);
   orgLongFixture = mode === "org-groups-long";
   activityFixture = mode === "activity";
   projectsDelay = 0;
@@ -621,6 +625,9 @@ async function reset(mode = "working") {
                 },
               ]
             : []),
+          ...extraOrgTasks.map((id, i) =>
+            agent(id, "orc", `Additional organization task ${i + 1}`, 0),
+          ),
           ...(["dense", "dense-idle"].includes(mode)
             ? Array.from({ length: 18 }, (_, i) =>
                 agent(`extra-${i}`, "orc", `Additional task ${i + 1}`, 0),
@@ -680,6 +687,10 @@ async function reset(mode = "working") {
       workerId: "reader",
       message: "Implement reader",
     });
+  }
+  if (orgWorking) {
+    for (const id of ["forge-orc", ...extraOrgTasks])
+      await current.app.send(id, "Run the organization fixture task", "seed");
   }
   if (mode === "researchers" || mode === "member-count") {
     const r = (await current.app.tool("fixture-orc", "researcher_start", {

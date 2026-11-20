@@ -35,8 +35,21 @@ for (const width of [1440, 390]) {
       .getByRole("button", { name: "Open Streaming voice input Orc" })
       .first();
     const disclosure = root.locator("..").locator(".worker-disclosure");
+    const presentation = () =>
+      disclosure.evaluate((button) => {
+        const chevron = button.querySelector("svg")!;
+        const count = button.querySelector("span")!;
+        return {
+          gap:
+            count.getBoundingClientRect().left -
+            chevron.getBoundingClientRect().right,
+          chevronColor: getComputedStyle(chevron).color,
+          countColor: getComputedStyle(count).color,
+        };
+      });
     await expect(disclosure).toHaveText("4");
-    await expect(disclosure.locator(".worker-working-count")).toHaveCount(0);
+    const idle = await presentation();
+    expect(idle.chevronColor).toBe(idle.countColor);
     await page.screenshot({
       path: testInfo.outputPath(`member-count-total-${width}.png`),
     });
@@ -48,8 +61,11 @@ for (const width of [1440, 390]) {
     );
     await setWorking([researcher.id]);
     await expect(disclosure).toHaveText("1");
-    await expect(disclosure.locator(".worker-working-count")).toHaveText("1");
-    await expect(disclosure.locator(".worker-working-count i")).toHaveCount(0);
+    const working = await presentation();
+    expect(working.gap).toBeCloseTo(idle.gap);
+    expect(working.gap).toBeLessThanOrEqual(4);
+    expect(working.chevronColor).toBe(working.countColor);
+    expect(working.chevronColor).not.toBe(idle.chevronColor);
     await page.screenshot({
       path: testInfo.outputPath(`member-count-active-${width}.png`),
     });
