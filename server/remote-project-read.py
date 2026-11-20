@@ -77,10 +77,12 @@ def canonical(path):
     return result
 
 
-def read(root, target, extensions):
+def read(root, target, extensions, max_bytes=MAX_BYTES, expected=None):
     if os.path.realpath(root) != root:
         raise ValueError('Preview directory changed')
     resolved = canonical(target)
+    if expected is not None and resolved != expected:
+        raise ValueError('Preview file changed')
     if not within(root, resolved):
         raise ValueError('File is outside the preview directory')
     if os.path.splitext(resolved)[1].lower() not in extensions:
@@ -90,15 +92,15 @@ def read(root, target, extensions):
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise ValueError('Only regular files can be previewed')
-        if info.st_size > MAX_BYTES:
-            raise ValueError('File exceeds 20 MiB')
+        if info.st_size > max_bytes:
+            raise ValueError('File exceeds 2 MiB' if max_bytes < MAX_BYTES else 'File exceeds 20 MiB')
         data = bytearray()
         while len(data) <= info.st_size:
             chunk = os.read(fd, min(65536, info.st_size + 1 - len(data)))
             if not chunk:
                 break
             data.extend(chunk)
-        if len(data) > info.st_size or len(data) > MAX_BYTES:
+        if len(data) > info.st_size or len(data) > max_bytes:
             raise ValueError('File changed while reading; retry')
         if os.path.realpath(root) != root or os.path.realpath(target) != resolved:
             raise ValueError('Preview directory changed')
@@ -155,10 +157,10 @@ def run(request):
         if not any(within(root, target) for root in roots):
             raise ValueError('File is outside the session and registered project directories')
         root = os.path.dirname(target)
-        result = read(root, target, request['extensions'])
+        result = read(root, target, request['extensions'], min(request.get('maxBytes', MAX_BYTES), MAX_BYTES), expected=target)
         return dict(result, root=root)
     if operation == 'preview-read':
-        return read(request['root'], request['target'], request['extensions'])
+        return read(request['root'], request['target'], request['extensions'], min(request.get('maxBytes', MAX_BYTES), MAX_BYTES), request.get('expected'))
     raise ValueError('Unsupported project read')
 
 
@@ -167,8 +169,8 @@ try:
     print(json.dumps(run(request)))
 except ValueError as error:
     safe = {
-        'Preview directory changed', 'File is outside the preview directory',
-        'Only regular files can be previewed', 'File exceeds 20 MiB',
+        'Preview directory changed', 'Preview file changed', 'File is outside the preview directory',
+        'Only regular files can be previewed', 'File exceeds 20 MiB', 'File exceeds 2 MiB',
         'File changed while reading; retry', 'File type is not supported',
         'File is outside the session and registered project directories',
         'Could not read project branch', 'Unsupported project read',

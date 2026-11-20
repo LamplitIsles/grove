@@ -52,6 +52,8 @@ In Grove, select **New session** (the plus button), search for and select the re
 
 Reopen a session from the sidebar to read progress, send follow-up instructions or answer an Orc's questions. Workers and other members appear under the Orc; their reports and questions return to the owner. You can attach images, use skill search and preview supported local files from conversations. Closing the browser does not stop an executing session. If a delivery has an unknown outcome, inspect its state before deciding what to do; Grove does not automatically resend it.
 
+To cite local source, use a Markdown link such as `[SDK function](/project/src/client.ts:42)`. Grove opens the file in the conversation and scrolls to line 42. Omit the line suffix to start at the top. The file must be readable from the session's execution environment and inside its session directory or a registered project. Source previews support UTF-8 files up to 2 MiB and 50,000 lines, including JavaScript, TypeScript, Python, Go, Rust, Java, Kotlin, C, C++, C#, Swift, Ruby, PHP, Lua, shell, SQL, CSS, Svelte and Vue.
+
 The shipped collaboration pattern provides a default task division, captured when an Orc is created and adjustable by the user for a particular task:
 
 | Role       | Responsibility                                                                                                                                                                                       |

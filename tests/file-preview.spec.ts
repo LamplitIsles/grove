@@ -1,10 +1,12 @@
 import { expect, test } from "@playwright/test";
+import { openSidebar } from "./browser-actions";
 test.setTimeout(90_000);
 const origin = "http://127.0.0.1:14320";
 const output = ".scratch/flickgrove-file-preview";
 async function open(page: import("@playwright/test").Page, name = "Local") {
   await page.request.post(origin + "/fixture/reset");
   await page.goto(origin);
+  await openSidebar(page);
   await page
     .getByRole("button", { name: `Open ${name} reports Orc`, exact: true })
     .click();
@@ -13,6 +15,74 @@ async function open(page: import("@playwright/test").Page, name = "Local") {
   ).toBeVisible();
 }
 for (const width of [1440, 390]) {
+  test(`${width} source reference opens and scrolls to the cited line in the drawer and new tab`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await open(page);
+    const drawer = page.getByRole("region", { name: "File preview" });
+    const frame = drawer.frameLocator("iframe");
+    const close = drawer.getByRole("button", { name: "Close preview" });
+
+    await page.getByRole("link", { name: "SDK 函数", exact: true }).click();
+    await expect(drawer.locator("header strong")).toHaveText("generated.ts");
+    const sdk = frame.getByText("export const putShareLike = request;", {
+      exact: true,
+    });
+    await expect(sdk).toBeInViewport();
+    await expect
+      .poll(() => sdk.evaluate((row) => row.ownerDocument.defaultView!.scrollX))
+      .toBe(0);
+    expect(
+      await sdk.evaluate((row) => {
+        const viewport = row.ownerDocument.documentElement;
+        return viewport.scrollWidth - viewport.clientWidth;
+      }),
+    ).toBeGreaterThan(0);
+    await page.screenshot({
+      path: `.scratch/source-file-preview/${width}-source.png`,
+    });
+
+    const [tab] = await Promise.all([
+      page.waitForEvent("popup"),
+      drawer.getByRole("link", { name: "Open in new tab" }).click(),
+    ]);
+    await expect(tab).toHaveURL(/#L8972$/);
+    await expect(
+      tab.getByText("export const putShareLike = request;", { exact: true }),
+    ).toBeInViewport();
+    await tab.close();
+    await close.click();
+
+    for (const name of ["WechatOptions 定义", "Relative source line"]) {
+      await page.getByRole("link", { name, exact: true }).click();
+      await expect(drawer.locator("header strong")).toHaveText("mutator.ts");
+      await expect(
+        frame.getByText("export type WechatOptions = { baseUrl: string };", {
+          exact: true,
+        }),
+      ).toBeInViewport();
+      await expect(drawer.locator("iframe")).toHaveAttribute("src", /#L12$/);
+      await close.click();
+    }
+
+    await page.getByRole("link", { name: "Outdated source line" }).click();
+    await expect(
+      frame.getByText("Line 30 is outside this file."),
+    ).toBeVisible();
+    await close.click();
+
+    await page.getByRole("link", { name: "Source from top" }).click();
+    await expect(frame.locator("code")).toContainText("// Request options");
+    await expect(drawer.locator("iframe")).toHaveAttribute(
+      "src",
+      /mutator\.ts$/,
+    );
+    await close.click();
+    await expect(drawer).toHaveCount(0);
+    await expect(page.getByRole("link", { name: "SDK 函数" })).toBeVisible();
+  });
+
   test(`${width} local image opens on its execution Peer in a full height overlay and new tab`, async ({
     page,
   }) => {

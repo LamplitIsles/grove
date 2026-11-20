@@ -189,6 +189,9 @@ test("link classification preserves path characters, decodes once and leaves web
     "//remote/a.md",
     "file://remote/a.md",
     "javascript:alert(1)",
+    "javascript:foo.ts:12",
+    "https:foo.ts:12",
+    "mailto:foo.ts:12",
     "notes.pdf",
   ])
     expect(localFile(href)).toBeNull();
@@ -198,6 +201,143 @@ test("link classification preserves path characters, decodes once and leaves web
     kind: "image",
   });
   expect(localFile("./a%2520b.md")?.path).toBe("./a%20b.md");
+  expect(localFile("mutator.ts:12")).toEqual({
+    path: "mutator.ts",
+    fragment: "",
+    kind: "document",
+    source: true,
+    line: 12,
+  });
+  for (const extension of [
+    "js",
+    "mjs",
+    "cjs",
+    "jsx",
+    "ts",
+    "mts",
+    "cts",
+    "tsx",
+    "py",
+    "pyi",
+    "go",
+    "rs",
+    "java",
+    "kt",
+    "kts",
+    "c",
+    "cc",
+    "cpp",
+    "cxx",
+    "h",
+    "hh",
+    "hpp",
+    "hxx",
+    "cs",
+    "swift",
+    "rb",
+    "php",
+    "lua",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "sql",
+    "css",
+    "scss",
+    "sass",
+    "less",
+    "svelte",
+    "vue",
+  ]) {
+    expect(
+      localFile(`file:///tmp/code.${extension.toUpperCase()}:12?x=1#ignored`),
+    ).toEqual({
+      path: `/tmp/code.${extension.toUpperCase()}`,
+      fragment: "",
+      kind: "document",
+      source: true,
+      line: 12,
+    });
+  }
+  expect(localFile("/tmp/name%3A12.ts:8972")?.path).toBe("/tmp/name:12.ts");
+  expect(localFile("/tmp/a.ts%3A12")).toBeNull();
+  for (const href of [
+    "a.ts:0",
+    "a.ts:9007199254740992",
+    "a.ts:-1",
+    "a.ts:1:2",
+    "a.html:12",
+  ])
+    expect(localFile(href)).toBeNull();
+});
+
+test("source previews bind one file, validate text and limits, and preserve document resource permissions", async () => {
+  const f = await fixture();
+  const source = join(f.reports, "code.ts");
+  await writeFile(source, "<script>alert(1)</script>\r\nsecond\rthird\n");
+  await writeFile(join(f.reports, "other.py"), "private sibling");
+  await writeFile(join(f.reports, "app.js"), "window.example = true;");
+  await writeFile(join(f.reports, "style.css"), "body { color: red }");
+  await writeFile(join(f.reports, "name:12.ts"), "colon filename");
+  const htmlGrant = await (await f.create("reports/page.html")).json();
+  for (const [name, type] of [
+    ["app.js", "text/javascript"],
+    ["style.css", "text/css"],
+  ]) {
+    const response = await fetch(new URL(name!, htmlGrant.url));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain(type!);
+  }
+  for (const name of ["code.ts", "other.py"])
+    expect((await fetch(new URL(name, htmlGrant.url))).ok).toBe(false);
+  for (const [href, fragment] of [
+    [`${source}:8972`, "#L8972"],
+    [`${source}:12`, "#L12"],
+    [source, ""],
+    ["reports/name%3A12.ts:1", "#L1"],
+  ]) {
+    const admitted = await f.create(href!);
+    expect(admitted.status).toBe(200);
+    const result = await admitted.json();
+    expect(result.kind).toBe("document");
+    expect(new URL(result.url).hash).toBe(fragment!);
+    const response = await fetch(result.url);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    expect(response.headers.get("content-security-policy")).toBe(
+      "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+    );
+    const text = await response.text();
+    if (href === source || href!.startsWith(source)) {
+      expect(text).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+      expect(text).not.toContain("<script>");
+      expect(text).toContain("1\n2\n3\n4");
+    }
+    expect((await fetch(new URL("other.py", result.url))).ok).toBe(false);
+    expect((await fetch(new URL("app.js", result.url))).ok).toBe(false);
+    expect((await fetch(result.url, { method: "HEAD" })).status).toBe(200);
+  }
+  const selected = await (await f.create("reports/app.js:1")).json();
+  expect(await (await fetch(selected.url)).text()).toContain(
+    '<mark id="L1">window.example = true;</mark>',
+  );
+  await writeFile(join(f.reports, "invalid.ts"), new Uint8Array([0xff]));
+  await writeFile(
+    join(f.reports, "big.ts"),
+    new Uint8Array(2 * 1024 * 1024 + 1),
+  );
+  await writeFile(join(f.reports, "lines.ts"), "x\n".repeat(50_000));
+  for (const name of ["invalid.ts", "big.ts", "lines.ts"])
+    expect((await f.create(`reports/${name}`)).ok).toBe(false);
+  await writeFile(join(f.reports, "lines.ts"), "x\n".repeat(49_999));
+  expect((await f.create("reports/lines.ts")).ok).toBe(true);
+  const mutable = await (await f.create("reports/lines.ts")).json();
+  await writeFile(join(f.reports, "lines.ts"), "x\r".repeat(50_000));
+  expect((await fetch(mutable.url)).ok).toBe(false);
+  const grant = await (await f.create("reports/code.ts")).json();
+  await rm(source);
+  await symlink(join(f.reports, "other.py"), source);
+  expect((await fetch(grant.url)).ok).toBe(false);
 });
 test("real HTTP creates only origin/auth/identity-bound grants and serves bounded resources without credentials", async () => {
   const f = await fixture();
@@ -464,13 +604,11 @@ test("authenticated preview capabilities follow only their issuing session throu
     expect(response.status).toBe(200);
     return cookie(response, "better-auth.session_token");
   }
-  const create = (session?: string) =>
-    call(
-      "/api/file-preview",
-      { agent: f.id, href: "reports/page.html" },
-      session ? [session] : [],
-      { "X-Grove-Peer": f.service.identity.id },
-    );
+  await writeFile(join(f.reports, "code.ts"), "first\nsecond");
+  const create = (session?: string, href = "reports/page.html") =>
+    call("/api/file-preview", { agent: f.id, href }, session ? [session] : [], {
+      "X-Grove-Peer": f.service.identity.id,
+    });
   expect((await create()).status).toBe(401);
   expect((await call(`/preview/${"a".repeat(64)}/page.html`)).status).toBe(410);
   const alice = await register(
@@ -486,6 +624,10 @@ test("authenticated preview capabilities follow only their issuing session throu
   const aliceHuman = await auth.session(new Headers({ cookie: alice }));
   const aliceGrant = await create(alice),
     bobGrant = await create(bob);
+  const sourceGrant = await create(alice, "reports/code.ts:2");
+  expect(sourceGrant.status).toBe(200);
+  const sourceUrl = ((await sourceGrant.json()) as { url: string }).url;
+  expect((await call(sourceUrl)).status).toBe(200);
   expect(aliceGrant.status).toBe(200);
   expect(bobGrant.status).toBe(200);
   expect(aliceGrant.headers.get("cache-control")).toBe("no-store");
@@ -541,13 +683,18 @@ test("authenticated preview capabilities follow only their issuing session throu
       issuing.resolve();
       await release.promise;
     }
+    const source = request.target === "/project/reports/code.ts";
     return {
-      canonical: "/project/reports/page.html",
+      canonical: source
+        ? "/project/reports/code.ts"
+        : "/project/reports/page.html",
       root: "/project/reports",
-      bytes: Buffer.from("<h1>synthetic remote</h1>").toString("base64"),
+      bytes: Buffer.from(
+        source ? "remote first\nremote second" : "<h1>synthetic remote</h1>",
+      ).toString("base64"),
     };
   };
-  const remoteGrant = await create(alice);
+  const remoteGrant = await create(alice, "reports/code.ts:2");
   expect(remoteGrant.status).toBe(200);
   const remoteUrl = ((await remoteGrant.json()) as { url: string }).url;
   const inFlight = call(remoteUrl);
@@ -562,6 +709,7 @@ test("authenticated preview capabilities follow only their issuing session throu
   f.service.previewProject = originalProject;
   f.service.remoteProjectRead = originalRead;
   expect((await call(aliceUrl)).status).toBe(410);
+  expect((await call(sourceUrl)).status).toBe(410);
   expect((await call(bobUrl)).status).toBe(200);
 
   const loginOptions = await call(

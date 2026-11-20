@@ -1,17 +1,20 @@
 import { browserOrigin } from "./browser-origin";
 import { previewMarkdown } from "./preview-markdown";
+import { previewSource } from "./preview-source";
 import { constants } from "node:fs";
 import { open, realpath } from "node:fs/promises";
 import { basename, dirname, extname, resolve, sep, posix } from "node:path";
 import { environmentId } from "../src/project-identity";
 import type { Project } from "../src/contracts";
 import { z } from "zod";
-import { localFile } from "../src/local-file";
+import { isSourceFile, localFile, sourceExtensions } from "../src/local-file";
 import type { HostService } from "./hosts";
 import type { GroveAuth, HumanSession } from "./auth";
 
 export const PREVIEW_BYTES = 20 * 1024 * 1024;
 export const PREVIEW_TTL = 15 * 60 * 1000;
+const SOURCE_BYTES = 2 * 1024 * 1024;
+const SOURCE_LINES = 50_000;
 const types: Record<string, string> = {
   ".png": "image/png",
   ".jpg": "image/jpeg",
@@ -37,14 +40,41 @@ function clean(path: string) {
   if (/[\0\\]/.test(path) || path.split("/").includes(".."))
     throw new Error("File is outside the preview directory");
 }
-async function read(root: string, target: string) {
+function previewType(path: string, source: boolean, extension = extname) {
+  const type = source
+    ? isSourceFile(path)
+      ? "text/plain; charset=utf-8"
+      : undefined
+    : types[extension(path).toLowerCase()];
+  if (!type) throw new Error("File type is not supported");
+  return type;
+}
+function sourceText(bytes: Buffer) {
+  if (bytes.length > SOURCE_BYTES) throw new Error("File exceeds 2 MiB");
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("Source file must be UTF-8 text");
+  }
+  if (text.split(/\r\n?|\n/).length > SOURCE_LINES)
+    throw new Error("File exceeds 50,000 lines");
+  return text;
+}
+async function read(
+  root: string,
+  target: string,
+  source = false,
+  expected?: string,
+) {
   if ((await realpath(root)) !== root)
     throw new Error("Preview directory changed");
   const canonical = await realpath(target);
+  if (expected && canonical !== expected)
+    throw new Error("Preview file changed");
   if (!within(root, canonical))
     throw new Error("File is outside the preview directory");
-  const type = types[extname(canonical).toLowerCase()];
-  if (!type) throw new Error("File type is not supported");
+  const type = previewType(canonical, source);
   const handle = await open(
     canonical,
     constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
@@ -52,23 +82,25 @@ async function read(root: string, target: string) {
   try {
     const stat = await handle.stat();
     if (!stat.isFile()) throw new Error("Only regular files can be previewed");
-    if (stat.size > PREVIEW_BYTES) throw new Error("File exceeds 20 MiB");
+    const limit = source ? SOURCE_BYTES : PREVIEW_BYTES;
+    if (stat.size > limit)
+      throw new Error(source ? "File exceeds 2 MiB" : "File exceeds 20 MiB");
     // Read at most budget + 1 even if the file grows after stat.
-    const bytes = Buffer.alloc(Math.min(stat.size + 1, PREVIEW_BYTES + 1));
+    const bytes = Buffer.alloc(Math.min(stat.size + 1, limit + 1));
     let size = 0;
     while (size < bytes.length) {
       const chunk = await handle.read(bytes, size, bytes.length - size, size);
       if (!chunk.bytesRead) break;
       size += chunk.bytesRead;
     }
-    if (size > PREVIEW_BYTES || size > stat.size)
+    if (size > limit || size > stat.size)
       throw new Error("File changed while reading; retry");
     if (
       (await realpath(target)) !== canonical ||
       (await realpath(root)) !== root
     )
       throw new Error("Preview directory changed");
-    return { bytes: bytes.subarray(0, size), type };
+    return { bytes: bytes.subarray(0, size), type, canonical };
   } finally {
     await handle.close();
   }
@@ -80,9 +112,19 @@ export function filePreview(
 ) {
   const grants = new Map<
     string,
-    { root: string; expires: number; project?: Project; sessionId?: string }
+    {
+      root: string;
+      expires: number;
+      project?: Project;
+      sessionId?: string;
+      source?: { target: string; line?: number };
+    }
   >();
-  const remote = async (project: Project, request: Record<string, unknown>) => {
+  const remote = async (
+    project: Project,
+    request: Record<string, unknown>,
+    source = false,
+  ) => {
     const value = z
       .object({
         canonical: z.string(),
@@ -92,13 +134,16 @@ export function filePreview(
       .parse(
         await service.remoteProjectRead(project, {
           ...request,
-          extensions: Object.keys(types),
+          extensions: source
+            ? sourceExtensions.map((ext) => `.${ext}`)
+            : Object.keys(types),
+          ...(source ? { maxBytes: SOURCE_BYTES } : {}),
         }),
       );
-    const type = types[posix.extname(value.canonical).toLowerCase()];
-    if (!type) throw new Error("File type is not supported");
+    const type = previewType(value.canonical, source, posix.extname);
     const bytes = Buffer.from(value.bytes, "base64");
-    if (bytes.length > PREVIEW_BYTES) throw new Error("File exceeds 20 MiB");
+    if (bytes.length > (source ? SOURCE_BYTES : PREVIEW_BYTES))
+      throw new Error(source ? "File exceeds 2 MiB" : "File exceeds 20 MiB");
     return { ...value, bytes, type };
   };
   return async (
@@ -143,13 +188,28 @@ export function filePreview(
         clean(path);
         if (path.startsWith("/"))
           return fail("File is outside the preview directory", 403);
+        const target = posix.resolve(grant.root, path);
+        if (grant.source && target !== grant.source.target)
+          return fail("File is outside the preview grant", 403);
         const file = grant.project
-          ? await remote(grant.project, {
-              operation: "preview-read",
-              root: grant.root,
-              target: posix.resolve(grant.root, path),
-            })
-          : await read(grant.root, resolve(grant.root, path));
+          ? await remote(
+              grant.project,
+              {
+                operation: "preview-read",
+                root: grant.root,
+                target,
+                ...(grant.source ? { expected: grant.source.target } : {}),
+              },
+              !!grant.source,
+            )
+          : await read(
+              grant.root,
+              resolve(grant.root, path),
+              !!grant.source,
+              grant.source?.target,
+            );
+        if (grant.source && file.canonical !== grant.source.target)
+          throw new Error("Preview file changed");
         // The read can cross an async local or remote boundary; a revoked session
         // must not receive bytes that finished loading after revocation.
         if (!active()) {
@@ -162,16 +222,28 @@ export function filePreview(
         headers.set("Content-Type", file.type);
         headers.set("Access-Control-Allow-Origin", "*");
         const markdown = file.type.startsWith("text/markdown");
-        const bytes = markdown
-          ? previewMarkdown(
-              file.bytes.toString("utf8"),
-              grant.root,
-              resolve(grant.root, path),
-              `/preview/${match![1]}/`,
+        const bytes = grant.source
+          ? previewSource(
+              sourceText(file.bytes),
+              basename(grant.source.target),
+              grant.source.line,
             )
-          : file.bytes;
-        if (markdown) headers.set("Content-Type", "text/html; charset=utf-8");
-        if (markdown || file.type.startsWith("text/html"))
+          : markdown
+            ? previewMarkdown(
+                file.bytes.toString("utf8"),
+                grant.root,
+                resolve(grant.root, path),
+                `/preview/${match![1]}/`,
+              )
+            : file.bytes;
+        if (markdown || grant.source)
+          headers.set("Content-Type", "text/html; charset=utf-8");
+        if (grant.source)
+          headers.set(
+            "Content-Security-Policy",
+            "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+          );
+        else if (markdown || file.type.startsWith("text/html"))
           headers.set("Content-Security-Policy", "sandbox allow-scripts");
         return new Response(request.method === "HEAD" ? null : bytes, {
           headers,
@@ -218,13 +290,23 @@ export function filePreview(
         // No remote path reaches host realpath/stat. The grant captures both
         // target identity and the canonical root returned by that device.
         const requested = posix.resolve(project.path, link.path);
-        const file = await remote(project, {
-          operation: "preview-grant",
-          target: requested,
-          allowed: [project.path],
-        });
-        if (!file.root || !localFile(file.canonical))
+        const file = await remote(
+          project,
+          {
+            operation: "preview-grant",
+            target: requested,
+            allowed: [project.path],
+          },
+          !!link.source,
+        );
+        if (
+          !file.root ||
+          (link.source
+            ? !isSourceFile(file.canonical)
+            : !localFile(file.canonical) || isSourceFile(file.canonical))
+        )
           throw new Error("File type is not supported");
+        if (link.source) sourceText(file.bytes);
         if (auth && (!human || !auth.sessionActive(human.sessionId)))
           return fail("Authentication required", 401);
         const id =
@@ -236,11 +318,14 @@ export function filePreview(
           project: structuredClone(project),
           expires: now() + PREVIEW_TTL,
           sessionId: human?.sessionId,
+          ...(link.source
+            ? { source: { target: file.canonical, line: link.line } }
+            : {}),
         });
         return Response.json(
           {
-            url: `${origin}/preview/${id}/${encodeURIComponent(posix.basename(file.canonical))}${link.fragment}`,
-            kind: localFile(file.canonical)!.kind,
+            url: `${origin}/preview/${id}/${encodeURIComponent(posix.basename(file.canonical))}${link.source ? (link.line ? `#L${link.line}` : "") : link.fragment}`,
+            kind: link.source ? "document" : localFile(file.canonical)!.kind,
           },
           { headers },
         );
@@ -265,9 +350,20 @@ export function filePreview(
           "File is outside the session and registered project directories",
           403,
         );
-      if (!localFile(target)) return fail("File type is not supported");
+      if (
+        link.source
+          ? !isSourceFile(target)
+          : !localFile(target) || isSourceFile(target)
+      )
+        return fail("File type is not supported");
       const root = dirname(target);
-      await read(root, target);
+      const file = await read(
+        root,
+        target,
+        !!link.source,
+        link.source ? target : undefined,
+      );
+      if (link.source) sourceText(file.bytes);
       if (auth && (!human || !auth.sessionActive(human.sessionId)))
         return fail("Authentication required", 401);
       const id =
@@ -278,11 +374,12 @@ export function filePreview(
         root,
         expires: now() + PREVIEW_TTL,
         sessionId: human?.sessionId,
+        ...(link.source ? { source: { target, line: link.line } } : {}),
       });
       return Response.json(
         {
-          url: `${origin}/preview/${id}/${encodeURIComponent(basename(target))}${link.fragment}`,
-          kind: localFile(target)!.kind,
+          url: `${origin}/preview/${id}/${encodeURIComponent(basename(target))}${link.source ? (link.line ? `#L${link.line}` : "") : link.fragment}`,
+          kind: link.source ? "document" : localFile(target)!.kind,
         },
         { headers },
       );

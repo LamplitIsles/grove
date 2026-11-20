@@ -6,6 +6,7 @@ import {
   readFile,
   rm,
   symlink,
+  readlink,
   truncate,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -373,6 +374,60 @@ test("same aliases/paths remain isolated through delegation, history, restart an
   expect(f.runtime.inputs.at(-1)!.agentId).toBe(local.id);
 }, 20000);
 
+test("remote preview admission pins the authorized canonical target across catalogue lookup", async () => {
+  const f = await fixture();
+  const target = join(f.other, "target.ts");
+  const sibling = join(f.other, "sibling.ts");
+  const alias = join(f.root, "other-alias");
+  const quote = (text: string) => `'${text.replaceAll("'", "'\\''")}'`;
+  const catalogue = quote(JSON.stringify({ projects: [{ path: alias }] }));
+  await writeFile(target, "authorized first\nauthorized second");
+  await writeFile(sibling, "different sibling");
+  await symlink(f.other, alias);
+  await symlink(target, join(f.other, "entry.ts"));
+  const agent = await f.service.createOrc("mac:same", f.settings);
+  await writeFile(
+    join(f.root, "fixture-og"),
+    `#!/bin/sh\nprintf '%s' ${catalogue}\n`,
+    { mode: 0o700 },
+  );
+  const preview = filePreview(f.service);
+  const origin = "http://fixture.invalid";
+  const grant = (href: string) =>
+    preview(
+      new Request(origin + "/api/file-preview", {
+        method: "POST",
+        headers: {
+          Origin: origin,
+          "X-Grove-Peer": f.service.identity.id,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ agent: agent.id, href }),
+      }),
+      [origin],
+    );
+  const admitted = (await grant(join(alias, "entry.ts") + ":2"))!;
+  expect(admitted.status).toBe(200);
+  const { url } = await admitted.json();
+  const contents = await (await preview(new Request(url), [origin]))!.text();
+  expect(contents).toContain('<mark id="L2">authorized second</mark>');
+  expect(contents).not.toContain("different sibling");
+
+  // The real remote reader invokes this test-owned catalogue after it has
+  // canonicalized the cross-project target but before it opens the file.
+  await writeFile(
+    join(f.root, "fixture-og"),
+    `#!/bin/sh\nset -e\nrm ${quote(target)}\nln -s ${quote(sibling)} ${quote(target)}\nprintf '%s' ${catalogue}\n`,
+    { mode: 0o700 },
+  );
+  const changed = (await grant(target + ":2"))!;
+  expect(await readlink(target)).toBe(sibling);
+  expect(changed.status).toBe(400);
+  expect(await changed.json()).toEqual({
+    error: "Mac device: project read failed. Check the device and retry.",
+  });
+}, 20000);
+
 test("remote preview HTML/Markdown/resources bind canonical device roots, limits, TTL and target identity", async () => {
   const f = await fixture();
   await writeFile(join(f.local, "reports", "page.html"), "LOCAL MUST NOT LEAK");
@@ -381,6 +436,12 @@ test("remote preview HTML/Markdown/resources bind canonical device roots, limits
     '<h1>Remote</h1><link rel="stylesheet" href="style.css"><img src="plot.png">',
   );
   await writeFile(join(f.mac, "reports", "style.css"), "body{color:blue}");
+  await writeFile(
+    join(f.mac, "reports", "source.ts"),
+    "remote first\nremote second",
+  );
+  await writeFile(join(f.local, "reports", "source.ts"), "LOCAL MUST NOT LEAK");
+  await writeFile(join(f.mac, "reports", "sibling.py"), "remote sibling");
   await writeFile(join(f.mac, "reports", "plot.png"), "REMOTE IMAGE");
   await writeFile(
     join(f.mac, "reports", "note.md"),
@@ -417,6 +478,27 @@ test("remote preview HTML/Markdown/resources bind canonical device roots, limits
   expect(response!.headers.get("Content-Security-Policy")).toBe(
     "sandbox allow-scripts",
   );
+  expect(
+    (await preview(new Request(new URL("source.ts", html)), [origin]))!.ok,
+  ).toBe(false);
+  const source = await grant("reports/source.ts:2");
+  expect(new URL(source).hash).toBe("#L2");
+  const sourceResponse = await preview(new Request(source), [origin]);
+  expect(sourceResponse!.headers.get("content-security-policy")).toBe(
+    "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+  );
+  const sourceHtml = await sourceResponse!.text();
+  expect(sourceHtml).toContain('<mark id="L2">remote second</mark>');
+  expect(sourceHtml).not.toContain("LOCAL MUST NOT LEAK");
+  expect(
+    (await preview(new Request(new URL("sibling.py", source)), [origin]))!.ok,
+  ).toBe(false);
+  await rm(join(f.mac, "reports", "source.ts"));
+  await symlink(
+    join(f.mac, "reports", "sibling.py"),
+    join(f.mac, "reports", "source.ts"),
+  );
+  expect((await preview(new Request(source), [origin]))!.ok).toBe(false);
   const css = new URL("style.css", html).href;
   expect(await (await preview(new Request(css), [origin]))!.text()).toBe(
     "body{color:blue}",
@@ -465,6 +547,7 @@ test("remote preview HTML/Markdown/resources bind canonical device roots, limits
   expect(f.remoteCalls).toBe(calls);
   clock += PREVIEW_TTL;
   expect((await preview(new Request(html), [origin]))!.status).toBe(410);
+  expect((await preview(new Request(source), [origin]))!.status).toBe(410);
 }, 20000);
 
 test("strict runtime wire binds creation, original resume, new turns, og and central skill queries without changing steer", async () => {

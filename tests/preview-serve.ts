@@ -159,6 +159,18 @@ async function unit(name: string, color: string, origin: () => string) {
     join(reports, "notes.md"),
     `# ${name} analysis\n\nThis report keeps the conversation nearby while showing the complete file.\n\n![Local chart](plot.png)\n\n<script>window.markdownUnsafe=true</script>\n\n| Measure | ${"Very long column ".repeat(12)} |\n| --- | --- |\n| Result | ${"UnbrokenData".repeat(25)} |\n\n\`\`\`json\n${JSON.stringify({ note: "long code ".repeat(30) })}\n\`\`\`\n\n${"## Reading notes\n\nA readable paragraph with the original report content and local links.\n\n".repeat(15)}[Interactive](page.html)`,
   );
+  await writeFile(
+    join(cwd, "generated.ts"),
+    "// Generated client\n".repeat(8971) +
+      "export const putShareLike = request;\n" +
+      `// ${"A long source line ".repeat(24)}\n` +
+      "export const deleteShareLike = request;\n" +
+      "// Generated client\n".repeat(40),
+  );
+  await writeFile(
+    join(cwd, "mutator.ts"),
+    `${"// Request options\n".repeat(11)}export type WechatOptions = { baseUrl: string };\n`,
+  );
   const turn = await app.send(agent.id, "Prepare reports", "fixture-input");
   const emit = (id: string, text: string) =>
     runtime.emit(agent.id, {
@@ -168,7 +180,7 @@ async function unit(name: string, color: string, origin: () => string) {
     });
   emit(
     "links",
-    `[Chart](reports/${encodeURIComponent(filename)}) · [HTML](reports/page.html) · [Markdown](reports/notes.md) · [Missing](reports/missing.png) · [Other file](reports/plot.png) · [Web](https://example.com)\n\n[Absolute chart](${join(reports, "plot.png")}) · [File URL](file://${join(reports, "plot.png")})`,
+    `[Chart](reports/${encodeURIComponent(filename)}) · [HTML](reports/page.html) · [Markdown](reports/notes.md) · [Missing](reports/missing.png) · [Other file](reports/plot.png) · [Web](https://example.com)\n\n[Absolute chart](${join(reports, "plot.png")}) · [File URL](file://${join(reports, "plot.png")})\n\n[SDK 函数](${join(cwd, "generated.ts")}:8972) · [WechatOptions 定义](${join(cwd, "mutator.ts")}:12) · [Relative source line](mutator.ts:12) · [Source from top](mutator.ts) · [Outdated source line](mutator.ts:30)`,
   );
   runtime.emit(agent.id, {
     type: "completed",

@@ -18,7 +18,7 @@ export function previewMarkdown(
   const link = (href: string) => {
     if (/^(https?:|mailto:|#)/i.test(href)) return href;
     const file = localFile(href);
-    if (!file) return null;
+    if (!file || file.source) return null;
     const path = relative(root, resolve(dirname(target), file.path));
     if (path.startsWith("..") || path.includes("\\")) return null;
     return (
