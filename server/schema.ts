@@ -201,6 +201,7 @@ export const deliveries = sqliteTable(
     admissionAt: integer("admission_at"),
     error: text("error"),
     images: json<NonNullable<Delivery["images"]>>("images"),
+    files: json<NonNullable<Delivery["files"]>>("files"),
     // The historical column name also stores optional per-operation recovery evidence.
     report: json<DeliveryContext>("report").notNull(),
   },

@@ -8,6 +8,7 @@ import { createHandler, createUpgrade } from "./http";
 import { groveWebsocket } from "./chord-socket";
 import { callRoute } from "./socket-testing";
 import { FakeRuntime, fixtureProjects } from "./testing";
+import { REQUEST_BODY_BYTES } from "./http";
 
 let dispose: () => void;
 afterEach(() => dispose?.());
@@ -31,6 +32,14 @@ test("local API creates a session, preserves work across visits and rejects fore
     service,
     origin: () => "http://127.0.0.1:4321",
   });
+  const excessive = await fetch(
+    new Request("http://127.0.0.1:4321/api/mcp/call", {
+      method: "POST",
+      headers: { "content-length": String(REQUEST_BODY_BYTES + 1) },
+      body: "{}",
+    }),
+  );
+  expect(excessive.status).toBe(413);
   let address = "";
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -90,10 +99,12 @@ test("local API creates a session, preserves work across visits and rejects fore
   });
   expect(response.status).toBe(200);
   const agent = (await response.json()) as { id: string };
-  await request(`/api/agents/${agent.id}/messages`, {
+  const { operationId } = await service.reserveSubmission(agent.id);
+  const sent = await request(`/api/agents/${agent.id}/messages`, {
     text: "Build a reader",
-    operationId: "first",
+    operationId,
   });
+  expect(sent.status).toBe(200);
   const secondVisit = service.snapshot() as {
     agents: { state: string; token?: string }[];
   };

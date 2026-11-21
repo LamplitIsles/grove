@@ -79,9 +79,12 @@ test("same-origin reading, media and voice ignore stale bearer credentials", asy
   })
     .png()
     .toBuffer();
-  const images = await f.service.uploadImages(agent.id, "image-operation", "", [
-    new File([bytes], "pixel.png", { type: "image/png" }),
-  ]);
+  const images = await f.app.images.upload(
+    agent.id.slice(f.service.identity.id.length + 1),
+    "image-operation",
+    "",
+    [new File([bytes], "pixel.png", { type: "image/png" })],
+  );
   for (const path of [
     `/api/read/messages?agent=${agent.id}`,
     `/api/images/${images[0].id}/original?agent=${agent.id}`,
@@ -269,9 +272,12 @@ test("proxy browser admission covers reading, media, preview and hostile evidenc
   })
     .png()
     .toBuffer();
-  const images = await f.service.uploadImages(agent.id, "fixture-image", "", [
-    new File([bytes], "pixel.png", { type: "image/png" }),
-  ]);
+  const images = await f.app.images.upload(
+    agent.id.slice(f.service.identity.id.length + 1),
+    "fixture-image",
+    "",
+    [new File([bytes], "pixel.png", { type: "image/png" })],
+  );
   const server = servePeer(f.app, {
     ...f.options,
     origin: () => origin,

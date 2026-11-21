@@ -77,6 +77,11 @@ export interface MessageImage {
   mediaType: string;
   availability?: "missing";
 }
+export interface MessageFile {
+  id: string;
+  name: string;
+  bytes: number;
+}
 export interface Human {
   id: string;
   name: string;
@@ -92,6 +97,7 @@ export interface Message {
   bodyRef?: string;
   localImageIds?: string[];
   images?: MessageImage[];
+  files?: MessageFile[];
   id: string;
   turnId?: string;
   role: "user" | "assistant";
@@ -126,6 +132,7 @@ export interface UserMessageAnchor {
   operation: string;
   summary: string;
   images: number;
+  files: number;
   status: Delivery["status"];
   authorUserId?: string | null;
 }
@@ -169,6 +176,7 @@ export interface Delivery {
   attemptId?: string;
   recoveryRef?: boolean;
   images?: MessageImage[];
+  files?: MessageFile[];
   answers?: Answer[];
   turnId?: string;
   id: string;

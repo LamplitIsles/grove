@@ -7,23 +7,9 @@ import { servePeer } from "./http";
 import { Workspace } from "./workspace";
 import { HostService } from "./hosts";
 import { FakeRuntime, fixtureProjects } from "./testing";
-import { IMAGE_BYTES, MESSAGE_IMAGE_BYTES, IMAGE_UPLOAD_BYTES } from "./images";
+import { IMAGE_BYTES, MESSAGE_IMAGE_BYTES } from "./images";
 
-// Uncompressed PNG is deterministic, fully decodable and large without pixel noise.
-const image = async () =>
-  new File(
-    [
-      await sharp({
-        create: { width: 1024, height: 1360, channels: 3, background: "white" },
-      })
-        .png({ compressionLevel: 0 })
-        .toBuffer(),
-    ],
-    "large.png",
-    { type: "image/png" },
-  );
-
-test("production HTTP listener admits legal image bodies and rejects excess", async () => {
+test("production listener enforces attachment image limits and body identity", async () => {
   const directory = mkdtempSync(join(tmpdir(), "grove-upload-limit-"));
   const runtime = new FakeRuntime();
   const app = new Workspace({
@@ -46,57 +32,95 @@ test("production HTTP listener admits legal image bodies and rejects excess", as
       orc: { model: "sol", effort: "medium" },
     });
     const headers = { Origin: origin, "X-Grove-Peer": service.identity.id };
-    const url = (operation: string) =>
-      `${origin}/api/images?agent=${agent.id}&operation=${operation}`;
-    const file = await image();
+    const query = async () =>
+      `agent=${agent.id}&operation=${(await service.reserveSubmission(agent.id)).operationId}`;
+    const begin = (q: string, sizes: number[]) =>
+      fetch(`${origin}/api/attachments?${q}`, {
+        method: "POST",
+        headers: { ...headers, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: "",
+          mode: "direct",
+          attachments: sizes.map((bytes) => ({
+            kind: "image",
+            name: "image.png",
+            bytes,
+          })),
+        }),
+      });
+    const file = new File(
+      [
+        await sharp({
+          create: {
+            width: 1024,
+            height: 1360,
+            channels: 3,
+            background: "white",
+          },
+        })
+          .png({ compressionLevel: 0 })
+          .toBuffer(),
+      ],
+      "large.png",
+    );
     expect(file.size).toBeGreaterThan(1024 * 1024);
-    expect(file.size).toBeLessThanOrEqual(IMAGE_BYTES);
     expect(file.size * 5).toBeLessThanOrEqual(MESSAGE_IMAGE_BYTES);
-    const form = (files: File[], text = "") => {
-      const body = new FormData();
-      body.set("text", JSON.stringify(text));
-      for (const f of files) body.append("images", f);
-      return body;
-    };
-    const single = await fetch(url("single"), {
+    expect((await begin(await query(), [IMAGE_BYTES + 1])).status).toBe(400);
+    expect(
+      (
+        await begin(await query(), [
+          IMAGE_BYTES,
+          IMAGE_BYTES,
+          IMAGE_BYTES,
+          IMAGE_BYTES,
+          IMAGE_BYTES,
+        ])
+      ).status,
+    ).toBe(400);
+    const q = await query();
+    expect((await begin(q, [file.size])).status).toBe(200);
+    const put = (body: Blob) =>
+      fetch(`${origin}/api/attachments/0?${q}`, {
+        method: "PUT",
+        headers,
+        body,
+      });
+    expect((await put(file.slice(0, file.size - 1))).status).toBe(400);
+    expect((await put(new Blob([file, new Uint8Array(1)]))).status).toBe(400);
+    expect((await put(file)).status).toBe(200);
+    const complete = await fetch(`${origin}/api/attachments/complete?${q}`, {
       method: "POST",
       headers,
-      body: form([file]),
     });
-    expect(single.status).toBe(200);
-    const refs = (await single.json()).images;
-    expect(refs).toHaveLength(1);
-    expect(refs[0].width).toBe(1024);
-    expect(refs[0].height).toBe(1360);
-    const batch = await fetch(url("batch"), {
-      method: "POST",
-      headers,
-      body: form(Array(5).fill(file), "\u0000".repeat(100_000)),
+    expect(complete.status).toBe(200);
+    expect((await complete.json()).images[0]).toMatchObject({
+      width: 1024,
+      height: 1360,
     });
-    expect(batch.status).toBe(200);
-    expect((await batch.json()).images).toHaveLength(5);
-    const replay = await fetch(url("single"), {
-      method: "POST",
-      headers,
-      body: form([file]),
-    });
-    expect(replay.status).toBe(200);
-    expect((await replay.json()).images).toEqual(refs);
-    const oversized = await fetch(url("excess"), {
-      method: "POST",
-      headers,
-      body: form([
-        new File([new Uint8Array(IMAGE_UPLOAD_BYTES + 1)], "excess.png"),
-      ]),
-    });
-    expect(oversized.status).toBe(413);
-    const tooLargeImage = await fetch(url("file-limit"), {
-      method: "POST",
-      headers,
-      body: form([new File([new Uint8Array(IMAGE_BYTES + 1)], "excess.png")]),
-    });
-    expect(tooLargeImage.status).toBe(400);
-    expect((await tooLargeImage.json()).error).toContain("5 MiB");
+    const batch = await query();
+    expect((await begin(batch, Array(5).fill(file.size))).status).toBe(200);
+    for (let index = 0; index < 5; index++) {
+      const response = await fetch(
+        `${origin}/api/attachments/${index}?${batch}`,
+        { method: "PUT", headers, body: file },
+      );
+      expect(response.status).toBe(200);
+    }
+    const completedBatch = await fetch(
+      `${origin}/api/attachments/complete?${batch}`,
+      { method: "POST", headers },
+    );
+    expect(completedBatch.status).toBe(200);
+    expect((await completedBatch.json()).images).toHaveLength(5);
+    expect(
+      (
+        await fetch(`${origin}/api/images?${q}`, {
+          method: "POST",
+          headers,
+          body: new FormData(),
+        })
+      ).status,
+    ).toBe(405);
     expect(runtime.inputs).toHaveLength(0);
   } finally {
     await server.stop(true);

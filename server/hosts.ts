@@ -16,6 +16,7 @@ import type {
   Snapshot,
   Answer,
   MessageImage,
+  MessageFile,
 } from "../src/contracts";
 import type { Workspace } from "./workspace";
 
@@ -367,29 +368,55 @@ export class HostService {
   skills(id: string) {
     return this.workspace.skills(this.raw(id));
   }
-  async uploadImages(
+  beginAttachments(
     id: string,
-    operationId: string,
-    text: string,
-    files: File[],
+    operation: string,
+    input: unknown,
     authorUserId?: string,
   ) {
-    const raw = this.raw(id);
-    const agent = this.workspace.detail(raw);
-    if (agent.role !== "orc" || agent.closed)
-      throw new Error("Choose an open Orc conversation");
-    return this.workspace.uploadSubmissionImages(
-      raw,
-      operationId,
-      text,
-      files,
+    return this.workspace.beginAttachments(
+      this.raw(id),
+      operation,
+      input,
       authorUserId,
     );
+  }
+  discardAttachments(id: string, operation: string, authorUserId?: string) {
+    return this.workspace.discardAttachments(
+      this.raw(id),
+      operation,
+      authorUserId,
+    );
+  }
+  putAttachment(
+    id: string,
+    operation: string,
+    index: number,
+    body: ReadableStream<Uint8Array> | null,
+    authorUserId?: string,
+  ) {
+    return this.workspace.putAttachment(
+      this.raw(id),
+      operation,
+      index,
+      body,
+      authorUserId,
+    );
+  }
+  completeAttachments(id: string, operation: string, authorUserId?: string) {
+    return this.workspace.completeAttachments(
+      this.raw(id),
+      operation,
+      authorUserId,
+    );
+  }
+  downloadAttachment(id: string, fileId: string) {
+    return this.workspace.downloadAttachment(this.raw(id), fileId);
   }
   media(id: string, imageId: string, preview: boolean) {
     const raw = this.raw(id);
     this.workspace.detail(raw);
-    return this.workspace.images.read(raw, imageId, preview);
+    return this.workspace.media(raw, imageId, preview);
   }
   async send(
     id: string,
@@ -399,6 +426,7 @@ export class HostService {
     authorUserId?: string,
     predecessor?: import("./submission-admission").SubmissionEnvelope,
     claimToken?: string,
+    files?: MessageFile[],
   ) {
     const result = await this.workspace.send(
       this.raw(id),
@@ -409,6 +437,8 @@ export class HostService {
       true,
       predecessor,
       claimToken,
+      false,
+      files,
     );
     return qualified(this.local(), result);
   }
@@ -456,6 +486,7 @@ export class HostService {
     images?: MessageImage[],
     authorUserId?: string,
     singleCall = false,
+    files?: MessageFile[],
   ) {
     return qualified(
       this.local(),
@@ -466,6 +497,7 @@ export class HostService {
         images,
         authorUserId,
         singleCall,
+        files,
       ),
     );
   }

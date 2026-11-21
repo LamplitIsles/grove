@@ -555,7 +555,7 @@ test("mobile outline failure restores its Sheet and keeps image draft/caret with
     (el as HTMLTextAreaElement).setSelectionRange(7, 12),
   );
   const { default: sharp } = await import("sharp");
-  await page.getByLabel("Choose message images").setInputFiles({
+  await page.getByLabel("Choose message attachments").setInputFiles({
     name: "owned.png",
     mimeType: "image/png",
     buffer: await sharp({

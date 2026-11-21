@@ -52,6 +52,7 @@ const deliveryKeys = [
   "attemptId",
   "steerEvidence",
   "images",
+  "files",
   "answers",
   "turnId",
   "text",
@@ -217,6 +218,7 @@ export class WorkspaceStore {
         operation: s.deliveries.operationId,
         summary: sql<string>`substr(${s.deliveries.text}, 1, 240)`,
         images: sql<number>`coalesce(json_array_length(${s.deliveries.images}), 0)`,
+        files: sql<number>`coalesce(json_array_length(${s.deliveries.files}), 0)`,
         status: s.deliveries.status,
         authorUserId: s.deliveries.authorUserId,
       })
@@ -394,6 +396,7 @@ export class WorkspaceStore {
               turnId: d.turnId,
               error: d.error,
               images: d.images,
+              files: d.files,
             }),
             questionIds: qs.map((q) => q.questionId),
             ...(answers.length ? { answers } : {}),
@@ -576,6 +579,7 @@ export class WorkspaceStore {
           turnId: d.turnId ?? null,
           error: d.error ?? null,
           images: d.images ?? null,
+          files: d.files ?? null,
           report: pick(d, [
             "reportingWorkerId",
             "reportingReviewerId",
@@ -654,6 +658,23 @@ export class WorkspaceStore {
         ),
       )
       .get()?.value;
+  }
+  attachmentDelivery(sessionId: string, operationId: string) {
+    return this.db
+      .select({
+        authorUserId: s.deliveries.authorUserId,
+        status: s.deliveries.status,
+        images: s.deliveries.images,
+        files: s.deliveries.files,
+      })
+      .from(s.deliveries)
+      .where(
+        and(
+          eq(s.deliveries.sessionId, sessionId),
+          eq(s.deliveries.operationId, operationId),
+        ),
+      )
+      .get();
   }
   submissionFencesFor(sessionId: string, operationIds: string[]) {
     const rows: { operationId: string; value: string }[] = [];

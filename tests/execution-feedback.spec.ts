@@ -155,7 +155,7 @@ for (const width of [1440, 390]) {
     });
     await expect(page.locator(".image-draft")).toHaveCount(1);
     await expect(
-      page.getByRole("button", { name: "Add images", exact: true }),
+      page.getByRole("button", { name: "Add attachments", exact: true }),
     ).toBeEnabled();
     await input.fill("abcdef $manual");
     await input.press("End");

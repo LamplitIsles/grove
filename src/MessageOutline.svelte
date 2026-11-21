@@ -96,7 +96,7 @@
     {#each items as item (item.operation)}
       {@const author = showAuthors && item.authorUserId ? users?.find(user => user.id === item.authorUserId) : undefined}
       <div>
-        <button onkeydown={itemKey} class="outline-item" data-operation={item.operation} aria-current={current===item.operation ? "location" : undefined} aria-busy={locating===item.operation} onclick={()=>select(item.operation)}>{#if author}<span class="participant-avatar" style:background={author.color} title={author.name} role="img" aria-label={author.name}>{author.name.slice(0,1).toUpperCase()}</span>{/if}<span class="outline-summary">{item.summary.trim() || m.outline_images()}</span></button>
+        <button onkeydown={itemKey} class="outline-item" data-operation={item.operation} aria-current={current===item.operation ? "location" : undefined} aria-busy={locating===item.operation} onclick={()=>select(item.operation)}>{#if author}<span class="participant-avatar" style:background={author.color} title={author.name} role="img" aria-label={author.name}>{author.name.slice(0,1).toUpperCase()}</span>{/if}<span class="outline-summary">{item.summary.trim() || (item.files ? m.outline_files() : m.outline_images())}</span></button>
         {#if locating===item.operation}<p class="outline-feedback" role="status">{m.outline_loading()}</p>{/if}
         {#if locationError && retryOperation===item.operation}<div class="outline-feedback"><p class="inline-error" role="alert">{locationError}</p><Button variant="ghost" size="sm" onkeydown={itemKey} onclick={()=>select(item.operation)}>{m.retry()}</Button></div>{/if}
       </div>

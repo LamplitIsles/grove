@@ -38,6 +38,44 @@ const png = async () =>
     "screen.png",
     { type: "image/png" },
   );
+async function upload(
+  origin: string,
+  headers: Record<string, string>,
+  agent: string,
+  operation: string,
+  text: string,
+  files: File[],
+) {
+  const query = `agent=${encodeURIComponent(agent)}&operation=${encodeURIComponent(operation)}`;
+  const start = await fetch(`${origin}/api/attachments?${query}`, {
+    method: "POST",
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      text,
+      mode: "direct",
+      attachments: files.map((f) => ({
+        kind: "image",
+        name: f.name,
+        bytes: f.size,
+      })),
+    }),
+  });
+  expect(start.status).toBe(200);
+  for (const [index, file] of files.entries()) {
+    const put = await fetch(`${origin}/api/attachments/${index}?${query}`, {
+      method: "PUT",
+      headers,
+      body: file,
+    });
+    expect(put.status).toBe(200);
+  }
+  const complete = await fetch(`${origin}/api/attachments/complete?${query}`, {
+    method: "POST",
+    headers,
+  });
+  expect(complete.status).toBe(200);
+  return (await complete.json()).images;
+}
 const defaults = {
   fast: false,
   orc: { model: "sol", effort: "medium" },
@@ -83,25 +121,12 @@ test("HTTP upload and real Chord preserve a multiline caption exactly", async ()
       const { operationId } = await service.reserveSubmission(a.id);
       const otherOperation = await service.reserveSubmission(other.id);
       const wrongOperation = await service.reserveSubmission(a.id);
-      const form = new FormData();
-      form.set("text", JSON.stringify(text));
-      form.append("images", file);
-      form.append(
-        "images",
+      const refs = await upload(origin, headers, a.id, operationId, text, [
+        file,
         new File([await file.arrayBuffer()], "second.png", {
           type: "image/png",
         }),
-      );
-      const upload = await fetch(
-        `${origin}/api/images?agent=${a.id}&operation=${operationId}`,
-        {
-          method: "POST",
-          headers,
-          body: form,
-        },
-      );
-      expect(upload.status).toBe(200);
-      const refs = (await upload.json()).images;
+      ]);
       const input = { text, operationId, images: refs };
       for (const [id, changed] of [
         [other.id, { ...input, operationId: otherOperation.operationId }],
@@ -121,11 +146,9 @@ test("HTTP upload and real Chord preserve a multiline caption exactly", async ()
           changed,
         );
         expect(refused.status).toBe(400);
-        expect((await refused.json()).error).toContain(
-          id.startsWith("wrong:")
-            ? "another Peer"
-            : "Images do not belong to this conversation and operation",
-        );
+        const error = (await refused.json()).error;
+        expect(error).toBeTruthy();
+        if (id.startsWith("wrong:")) expect(error).toContain("another Peer");
         expect(runtime.inputs).toHaveLength(index);
       }
       const manifest = JSON.parse(
@@ -157,19 +180,16 @@ test("HTTP upload and real Chord preserve a multiline caption exactly", async ()
       expect((await changed.json()).error).toContain("different content");
     }
     for (const encoded of ["not-json", "null", "42", "{}", "[]"]) {
-      const form = new FormData();
-      form.set("text", encoded);
-      form.append("images", file);
+      const { operationId } = await service.reserveSubmission(a.id);
       const refused = await fetch(
-        `${origin}/api/images?agent=${a.id}&operation=invalid`,
+        `${origin}/api/attachments?agent=${a.id}&operation=${operationId}`,
         {
           method: "POST",
-          headers,
-          body: form,
+          headers: { ...headers, "Content-Type": "application/json" },
+          body: encoded,
         },
       );
       expect(refused.status).toBe(400);
-      expect((await refused.json()).error).toBe("Invalid message text");
     }
     expect(runtime.inputs).toHaveLength(6);
   } finally {
@@ -323,17 +343,18 @@ test("same-origin token-independent HTTP upload/read on real socket and stable C
       preflight.headers.get("Access-Control-Allow-Credentials"),
     ).toBeNull();
     const file = await png();
-    const form = new FormData();
-    form.set("text", JSON.stringify(""));
-    form.append("images", file);
-    const upload = await fetch(
-      `${origin}/api/images?agent=${a.id}&operation=${operationId}`,
-      { method: "POST", headers, body: form },
-    );
-    expect(upload.status).toBe(200);
-    const refs = (await upload.json()).images;
+    const refs = await upload(origin, headers, a.id, operationId, "", [file]);
     expect(runtime.inputs.length).toBe(0);
     const url = `${origin}/api/images/${refs[0].id}/original?agent=${a.id}`;
+    expect(
+      (
+        await callRoute(origin, `/api/agents/${a.id}/messages`, {
+          text: "",
+          operationId,
+          images: refs,
+        })
+      ).status,
+    ).toBe(200);
     expect(
       (
         await fetch(url, {
@@ -364,15 +385,6 @@ test("same-origin token-independent HTTP upload/read on real socket and stable C
     const original = await fetch(url, { headers });
     expect(original.headers.get("X-Content-Type-Options")).toBe("nosniff");
     expect(original.headers.get("Content-Type")).toBe(refs[0].mediaType);
-    expect(
-      (
-        await callRoute(origin, `/api/agents/${a.id}/messages`, {
-          text: "",
-          operationId,
-          images: refs,
-        })
-      ).status,
-    ).toBe(200);
     expect(runtime.inputs.length).toBe(1);
     expect(runtime.inputs[0].text).toBe("");
     expect(readFileSync(runtime.inputs[0].images![0])).toEqual(
@@ -406,7 +418,9 @@ test("same-origin token-independent HTTP upload/read on real socket and stable C
       }),
     ).rejects.toThrow("another Peer");
     const nextOperation = await service.reserveSubmission(a.id);
-    const next = await service.uploadImages(
+    const next = await upload(
+      origin,
+      headers,
       a.id,
       nextOperation.operationId,
       "steer",

@@ -21,10 +21,10 @@ for (const width of [1440, 390])
       exact: true,
     });
     await expect(
-      page.getByRole("button", { name: "Add images", exact: true }),
+      page.getByRole("button", { name: "Add attachments", exact: true }),
     ).toBeEnabled();
     const sharp = (await import("sharp")).default;
-    await page.getByLabel("Choose message images").setInputFiles({
+    await page.getByLabel("Choose message attachments").setInputFiles({
       name: "escape.png",
       mimeType: "image/png",
       buffer: await sharp({

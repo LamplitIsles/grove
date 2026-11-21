@@ -12,7 +12,9 @@ import { memberPresetsHttp } from "./member-presets-http";
 import { configFilesHttp } from "./config-files-http";
 import type { VoiceOptions } from "./voice";
 import { imageHttp } from "./image-http";
-import { IMAGE_UPLOAD_BYTES } from "./images";
+import { attachmentHttp } from "./attachment-http";
+import { MESSAGE_IMAGE_BYTES } from "./images";
+import { FILE_BYTES } from "./attachments";
 import { resolve, sep } from "node:path";
 import { z } from "zod";
 import type { Server } from "bun";
@@ -20,8 +22,48 @@ import type { Workspace } from "./workspace";
 import { qualify, type HostService } from "./hosts";
 import { groveWebsocket, type SocketData } from "./chord-socket";
 import { externalMcp } from "./external-mcp";
+export const REQUEST_BODY_BYTES = MESSAGE_IMAGE_BYTES + 700_000;
 const json = (value: unknown, status = 200) =>
   Response.json(value, { status, headers: { "Cache-Control": "no-store" } });
+async function limitBody(request: Request): Promise<Request | Response> {
+  const path = new URL(request.url).pathname;
+  const rawAttachment =
+    request.method === "PUT" &&
+    /^\/api\/attachments\/(0|[1-9][0-9]*)$/.test(path);
+  if (rawAttachment || !request.body) return request;
+  if (Number(request.headers.get("content-length")) > REQUEST_BODY_BYTES) {
+    // Drain without buffering so a keep-alive client can receive the 413
+    // without leaving unread request bytes on the connection. Bun still caps
+    // the total body at FILE_BYTES for every route.
+    try {
+      const reader = request.body.getReader();
+      while (!(await reader.read()).done) {
+        /* discard */
+      }
+    } catch {
+      /* A disconnected client has no response to receive. */
+    }
+    return Response.json(
+      { error: "Request body too large" },
+      {
+        status: 413,
+        headers: { "Cache-Control": "no-store", Connection: "close" },
+      },
+    );
+  }
+  let bytes = 0;
+  const limited = request.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        bytes += chunk.byteLength;
+        if (bytes > REQUEST_BODY_BYTES)
+          throw new Error("Request body too large");
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  return new Request(request, { body: limited, duplex: "half" } as RequestInit);
+}
 type Options = {
   instance?: import("./instance-controls").InstanceControls;
   voice?: VoiceOptions;
@@ -85,6 +127,9 @@ export function createUpgrade(workspace: Workspace, options: Options) {
 export function createHandler(workspace: Workspace, options: Options) {
   const preview = filePreview(options.service, Date.now, () => options.auth);
   return async (request: Request): Promise<Response> => {
+    const bounded = await limitBody(request);
+    if (bounded instanceof Response) return bounded;
+    request = bounded;
     const url = new URL(request.url);
     if (url.pathname === "/external-mcp") {
       const origins = [options.origin(), options.localOrigin?.()].filter(
@@ -126,8 +171,15 @@ export function createHandler(workspace: Workspace, options: Options) {
         url.pathname === "/config-files"
       ) {
         human = await options.auth.session(request.headers);
-        if (!human && url.pathname.startsWith("/api/"))
-          return json({ error: "Authentication required" }, 401);
+        if (!human && url.pathname.startsWith("/api/")) {
+          const response = json({ error: "Authentication required" }, 401);
+          if (
+            request.method === "PUT" &&
+            url.pathname.startsWith("/api/attachments/")
+          )
+            response.headers.set("Connection", "close");
+          return response;
+        }
       }
     }
     // The preview handler validates each bearer grant against its issuing session.
@@ -162,8 +214,15 @@ export function createHandler(workspace: Workspace, options: Options) {
     if (file) return file;
     const reading = await readingHttp(request, options.service, origins);
     if (reading) return reading;
-    const media = await imageHttp(request, options.service, origins, human);
+    const media = await imageHttp(request, options.service, origins);
     if (media) return media;
+    const attachment = await attachmentHttp(
+      request,
+      options.service,
+      origins,
+      human,
+    );
+    if (attachment) return attachment;
     if (
       !origins.some((value) => url.host === new URL(value).host) ||
       (request.headers.get("origin") &&
@@ -322,9 +381,14 @@ export function servePeer(
     hostname: options.hostname,
     port: options.port,
     idleTimeout: 0,
-    maxRequestBodySize: IMAGE_UPLOAD_BYTES,
+    maxRequestBodySize: FILE_BYTES,
     websocket: groveWebsocket,
     async fetch(request, server) {
+      // Bun has one listener-wide limit; preserve the smaller limit before
+      // voice handling too, which can consume a settings body here.
+      const bounded = await limitBody(request);
+      if (bounded instanceof Response) return bounded;
+      request = bounded;
       const human =
         options.auth && new URL(request.url).pathname.startsWith("/api/voice/")
           ? await options.auth.session(request.headers)

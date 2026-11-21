@@ -8,6 +8,7 @@
   import Markdown from "./Markdown.svelte";
   import MessageTime from "./MessageTime.svelte";
   import MessageImages from "./MessageImages.svelte";
+  import MessageFiles from "./MessageFiles.svelte";
   import MessageGroup from "./MessageGroup.svelte";
   import WorkerReport from "./WorkerReport.svelte";
   import * as m from "./paraglide/messages";
@@ -63,7 +64,8 @@
             <div class="message-role">{#if showAuthors && author}<span class="message-author" style:--author-color={author.color}><span>{author.name.slice(0,1).toUpperCase()}</span>{author.name}</span>{:else}{message.role === "assistant" ? agent.role === "orc" ? m.orc() : agent.role === "worker" ? m.worker() : agent.role === "reviewer" ? "Reviewer" : "Researcher" : ""}{/if}</div>
             <div class="message-content">
               {#if message.bodyRef}<p class="preview-status">{m.hover_preview_long_message()}</p>{:else}<Markdown text={message.text} agentId={agent.id} />{/if}
-              {#if message.images?.length || message.localImageIds?.length}<MessageImages agentId={agent.id} operationId={message.id} images={message.images} localImageIds={message.localImageIds} {connected} />{/if}
+              {#if message.images?.length || message.localImageIds?.length}<MessageImages agentId={agent.id} operationId={message.id} images={message.images} localImageIds={message.localImageIds} available={!message.provisional || delivery?.status === "sent"} {connected} />{/if}
+              {#if message.files?.length}<MessageFiles agentId={agent.id} files={message.files} downloadable={connected && (!message.provisional || delivery?.status === "sent")} />{/if}
             </div>
             <div class="message-actions"><MessageTime at={message.at} /></div>
           </div>

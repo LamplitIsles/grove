@@ -265,9 +265,10 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
   const { openGrove } = await import("../src/chord-client");
   const { fakeVoiceProvider } = await import("../tests/voice-fixture");
   const dir = mkdtempSync(join(tmpdir(), "grove-auth-http-"));
+  const runtime = new FakeRuntime();
   const app = new Workspace({
     directory: dir,
-    runtime: new FakeRuntime(),
+    runtime,
     projects: async () => fixtureProjects,
   });
   let origin = "";
@@ -879,6 +880,263 @@ test("HTTP and WebSocket require a session and sign-out closes only its connecti
       app.detail(orc.id).messages.find((m) => m.clientId === bobOp)?.author
         ?.name,
     ).toBe("Bob");
+    const attachmentOp = await aliceClient.call<{ operationId: string }>(
+      "reserveSubmission",
+      { id },
+    );
+    const attachmentParams = `agent=${encodeURIComponent(id)}&operation=${attachmentOp.operationId}`;
+    const attachmentUrl =
+      origin.replace("localhost", "127.0.0.1") + "/api/attachments";
+    const uploadHeaders = (who: string) => ({
+      host: `localhost:${server.port}`,
+      origin,
+      cookie: who,
+      "x-grove-peer": service.identity.id,
+    });
+    const manifest = {
+      text: "file",
+      mode: "direct",
+      attachments: [{ kind: "file", name: "safe.txt", bytes: 3 }],
+    };
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${attachmentParams}`, {
+          method: "POST",
+          headers: {
+            ...uploadHeaders(session),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(manifest),
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${attachmentParams}`, {
+          method: "DELETE",
+          headers: uploadHeaders(bobSession),
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${attachmentParams}`, {
+          method: "DELETE",
+          headers: { ...uploadHeaders(session), cookie: "" },
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${attachmentParams}`, {
+          method: "DELETE",
+          headers: {
+            ...uploadHeaders(session),
+            origin: "https://foreign.invalid",
+          },
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${attachmentParams}`, {
+          method: "DELETE",
+          headers: { ...uploadHeaders(session), "x-grove-peer": "wrong" },
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await fetch(`${attachmentUrl}/0?${attachmentParams}`, {
+          method: "PUT",
+          headers: uploadHeaders(bobSession),
+          body: "abc",
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await fetch(`${attachmentUrl}/0?${attachmentParams}`, {
+          method: "PUT",
+          headers: uploadHeaders(session),
+          body: "abc",
+        })
+      ).status,
+    ).toBe(200);
+    const prepared = (await (
+      await fetch(`${attachmentUrl}/complete?${attachmentParams}`, {
+        method: "POST",
+        headers: uploadHeaders(session),
+      })
+    ).json()) as {
+      images: unknown[];
+      files: { id: string; name: string; bytes: number }[];
+    };
+    const navigation = `${attachmentUrl}/${prepared.files[0].id}/download?agent=${encodeURIComponent(id)}`;
+    expect(
+      (
+        await fetch(navigation, {
+          headers: {
+            host: `localhost:${server.port}`,
+            "sec-fetch-site": "same-origin",
+          },
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await fetch(navigation, {
+          headers: {
+            host: `localhost:${server.port}`,
+            cookie: session,
+            "sec-fetch-site": "same-origin",
+          },
+        })
+      ).status,
+    ).toBe(404);
+    await aliceClient.call("send", {
+      id,
+      operationId: attachmentOp.operationId,
+      text: "file",
+      images: prepared.images,
+      files: prepared.files,
+    });
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${attachmentParams}`, {
+          method: "DELETE",
+          headers: uploadHeaders(session),
+        })
+      ).status,
+    ).toBe(400);
+    const cancelOp = await aliceClient.call<{ operationId: string }>(
+      "reserveSubmission",
+      { id },
+    );
+    const cancelParams = `agent=${encodeURIComponent(id)}&operation=${cancelOp.operationId}`;
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${cancelParams}`, {
+          method: "POST",
+          headers: {
+            ...uploadHeaders(session),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(manifest),
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${cancelParams}`, {
+          method: "DELETE",
+          headers: uploadHeaders(bobSession),
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${cancelParams}`, {
+          method: "DELETE",
+          headers: uploadHeaders(session),
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${cancelParams}`, {
+          method: "DELETE",
+          headers: uploadHeaders(session),
+        })
+      ).status,
+    ).toBe(200);
+    const queueParams = `agent=${encodeURIComponent(id)}&operation=owner-queue`;
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${queueParams}`, {
+          method: "POST",
+          headers: {
+            ...uploadHeaders(session),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ ...manifest, mode: "follow_up" }),
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${queueParams}`, {
+          method: "DELETE",
+          headers: uploadHeaders(bobSession),
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${queueParams}`, {
+          method: "DELETE",
+          headers: uploadHeaders(session),
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await fetch(`${attachmentUrl}?${queueParams}`, {
+          method: "DELETE",
+          headers: uploadHeaders(bobSession),
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      await (
+        await fetch(navigation, {
+          headers: {
+            host: `localhost:${server.port}`,
+            cookie: bobSession,
+            "sec-fetch-site": "same-origin",
+          },
+        })
+      ).text(),
+    ).toBe("abc");
+    expect(
+      (
+        await fetch(navigation, {
+          headers: {
+            host: `localhost:${server.port}`,
+            cookie: session,
+            "sec-fetch-site": "cross-site",
+          },
+        })
+      ).status,
+    ).toBe(403);
+    const { DeliveryRejected } = await import("./runtime");
+    const aliceUser = (await auth.session(new Headers({ cookie: session })))!
+      .user.id;
+    const legacyText = " \n external legacy \n ";
+    runtime.sendOverride = async () => {
+      throw new DeliveryRejected("legacy refusal");
+    };
+    await service.externalSend(
+      id,
+      legacyText,
+      "external-legacy-fixture",
+      aliceUser,
+    );
+    runtime.sendOverride = undefined;
+    const legacyRetry = await aliceClient.call<{
+      state: string;
+      operationId: string;
+      claimToken: string;
+    }>("reserveRetry", { id, operationId: "external-legacy-fixture" });
+    expect(legacyRetry.state).toBe("won");
+    await aliceClient.call("send", {
+      id,
+      operationId: legacyRetry.operationId,
+      text: legacyText,
+      predecessor: { source: "user", text: legacyText },
+      claimToken: legacyRetry.claimToken,
+    });
+    expect(service.recovery(id, legacyRetry.operationId).text).toBe(legacyText);
     expect((await call("/api/auth/sign-out", {}, [session])).status).toBe(200);
     expect(socket.readyState).toBe(WebSocket.CLOSED);
     await expect(aliceClient.call("closeStatus", { id })).rejects.toThrow();

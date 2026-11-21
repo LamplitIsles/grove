@@ -141,12 +141,9 @@ test("a second SQLite connection finalizing before claim cannot be overwritten o
   })
     .png()
     .toBuffer();
-  const images = await f.app.uploadSubmissionImages(
-    f.id,
-    operationId,
-    "hello",
-    [new File([png], "x.png", { type: "image/png" })],
-  );
+  const images = await f.app.images.upload(f.id, operationId, "hello", [
+    new File([png], "x.png", { type: "image/png" }),
+  ]);
   const envelope = { source: "user" as const, text: "hello", images };
   const path = (
     f.app.store.sqlite.query("PRAGMA database_list").get() as { file: string }
@@ -222,9 +219,13 @@ test("finalize first persists an envelope-bound fence and blocks late sends afte
   await expect(
     f.app.send(f.id, "hello", operationId, undefined, undefined, true),
   ).rejects.toThrow("not admitted");
-  await expect(
-    f.app.uploadSubmissionImages(f.id, operationId, "hello", []),
-  ).rejects.toThrow("no longer open");
+  expect(() =>
+    f.app.beginAttachments(f.id, operationId, {
+      text: "hello",
+      mode: "direct",
+      attachments: [{ kind: "image", name: "x.png", bytes: 1 }],
+    }),
+  ).toThrow("no longer open");
   await expect(
     f.app.send(f.id, "changed", operationId, undefined, undefined, true),
   ).rejects.toThrow("different content");
@@ -631,12 +632,9 @@ test("finalize binds validated original image references and rejects altered ima
   })
     .png()
     .toBuffer();
-  const images = await f.app.uploadSubmissionImages(
-    f.id,
-    operationId,
-    "caption",
-    [new File([bytes], "image.png", { type: "image/png" })],
-  );
+  const images = await f.app.images.upload(f.id, operationId, "caption", [
+    new File([bytes], "image.png", { type: "image/png" }),
+  ]);
   const envelope = { source: "user" as const, text: "caption", images };
   expect(
     await f.app.finalizeSubmission(f.id, operationId, envelope),
@@ -871,88 +869,6 @@ test("late original native acceptance blocks both retry reservation and claimed 
     f.runtime.inputs.filter((i) => i.clientId === winner.operationId),
   ).toHaveLength(0);
   expect(f.app.lookup(f.id, old.operationId)?.state).toBe("accepted");
-});
-
-test("retry images require original fingerprints, including a recovered server original", async () => {
-  const f = await fixture();
-  const pixels = await sharp({
-    create: { width: 10, height: 10, channels: 3, background: "red" },
-  })
-    .png()
-    .toBuffer();
-  const different = await sharp({
-    create: { width: 10, height: 10, channels: 3, background: "blue" },
-  })
-    .png()
-    .toBuffer();
-  const old = await f.app.reserveSubmission(f.id);
-  const images = await f.app.uploadSubmissionImages(
-    f.id,
-    old.operationId,
-    "hello",
-    [new File([pixels], "picture.png")],
-  );
-  const original = { source: "user" as const, text: "hello", images };
-  await f.app.finalizeSubmission(f.id, old.operationId, original);
-  const bad = await f.app.reserveRetry(f.id, old.operationId);
-  if (bad.state !== "won") throw new Error("Expected winner");
-  const wrong = await f.app.uploadSubmissionImages(
-    f.id,
-    bad.operationId,
-    "hello",
-    [new File([different], "picture.png")],
-  );
-  await expect(
-    f.app.send(
-      f.id,
-      "hello",
-      bad.operationId,
-      wrong,
-      undefined,
-      true,
-      original,
-      bad.claimToken,
-    ),
-  ).rejects.toThrow("Cannot verify");
-  expect(f.runtime.inputs).toHaveLength(0);
-  await expect(
-    f.app.finalizeSubmission(
-      f.id,
-      bad.operationId,
-      { source: "user", text: "hello", images: wrong },
-      undefined,
-      original,
-    ),
-  ).rejects.toThrow("Cannot verify");
-  await f.app.finalizeSubmission(
-    f.id,
-    bad.operationId,
-    original,
-    undefined,
-    original,
-  );
-  const next = await f.app.reserveRetry(f.id, bad.operationId);
-  if (next.state !== "won") throw new Error("Expected winner");
-  const full = f.app.images.read(f.id, images[0].id, false)!;
-  const restored = await f.app.uploadSubmissionImages(
-    f.id,
-    next.operationId,
-    "hello",
-    [new File([full.bytes], "picture.png")],
-  );
-  await f.app.send(
-    f.id,
-    "hello",
-    next.operationId,
-    restored,
-    undefined,
-    true,
-    original,
-    next.claimToken,
-  );
-  expect(
-    f.runtime.inputs.filter((i) => i.clientId === next.operationId),
-  ).toHaveLength(1);
 });
 
 test("question retry preserves answers and requires a linked winner", async () => {
@@ -1555,12 +1471,9 @@ test("inspectRetry requires matching image references in the original envelope",
   })
     .png()
     .toBuffer();
-  const images = await f.app.uploadSubmissionImages(
-    f.id,
-    old.operationId,
-    "hello",
-    [new File([bytes], "picture.png")],
-  );
+  const images = await f.app.images.upload(f.id, old.operationId, "hello", [
+    new File([bytes], "picture.png"),
+  ]);
   const envelope = { source: "user" as const, text: "hello", images };
   await f.app.finalizeSubmission(f.id, old.operationId, envelope);
   const next = await f.app.reserveRetry(f.id, old.operationId);
@@ -1796,4 +1709,179 @@ test("an interrupted answer stays re-answerable after a restart", async () => {
   expect(
     f.app.detail(f.id).deliveries.find((d) => d.id === old.operationId),
   ).toMatchObject({ status: "uncertain" });
+});
+
+test("legacy image rejection retries the original references after restart", async () => {
+  const f = await fixture();
+  const insertUser = f.app.store.sqlite.query(
+    "INSERT INTO user (id, name, email, emailVerified, createdAt, updatedAt, color) VALUES (?, ?, ?, 0, ?, ?, ?)",
+  );
+  for (const id of ["alice", "bob"])
+    insertUser.run(
+      id,
+      id,
+      `${id}@fixture.invalid`,
+      "2026-01-01",
+      "2026-01-01",
+      "#123456",
+    );
+  const png = await sharp({
+    create: { width: 2, height: 2, channels: 3, background: "red" },
+  })
+    .png()
+    .toBuffer();
+  const old = await f.app.reserveSubmission(f.id, "alice");
+  const images = await f.app.images.upload(f.id, old.operationId, "legacy", [
+    new File([png], "old.png"),
+    new File([png], "second.png"),
+  ]);
+  const envelope = { source: "user" as const, text: "legacy", images };
+  f.runtime.sendOverride = async () => {
+    throw new DeliveryRejected("fixture rejection");
+  };
+  await f.app.send(f.id, "legacy", old.operationId, images, "alice", true);
+  expect(f.app.lookup(f.id, old.operationId)?.state).toBe("rejected");
+  f.restart();
+  await expect(
+    f.app.reserveRetry(f.id, old.operationId, "bob"),
+  ).rejects.toThrow("another user");
+  const successor = await f.app.reserveRetry(f.id, old.operationId, "alice");
+  if (successor.state !== "won") throw new Error("retry reservation lost");
+  const replacement = await f.app.images.upload(f.id, "replacement", "legacy", [
+    new File([png], "old.png"),
+    new File([png], "second.png"),
+  ]);
+  await expect(
+    f.app.send(
+      f.id,
+      "legacy",
+      successor.operationId,
+      replacement,
+      "alice",
+      true,
+      envelope,
+      successor.claimToken,
+    ),
+  ).rejects.toThrow("differs");
+  await expect(
+    f.app.send(
+      f.id,
+      "legacy",
+      successor.operationId,
+      images.slice(0, 1),
+      "alice",
+      true,
+      envelope,
+      successor.claimToken,
+    ),
+  ).rejects.toThrow("differs");
+  await expect(
+    f.app.send(
+      f.id,
+      "legacy",
+      successor.operationId,
+      [{ ...images[0], id: "0".repeat(64) }, images[1]],
+      "alice",
+      true,
+      envelope,
+      successor.claimToken,
+    ),
+  ).rejects.toThrow("differs");
+  await expect(
+    f.app.send(
+      f.id,
+      "legacy",
+      successor.operationId,
+      images,
+      "bob",
+      true,
+      envelope,
+      successor.claimToken,
+    ),
+  ).rejects.toThrow("another user");
+  const other = await f.app.createOrc("beta");
+  await expect(
+    f.app.send(
+      other.id,
+      "legacy",
+      successor.operationId,
+      images,
+      "alice",
+      true,
+      envelope,
+      successor.claimToken,
+    ),
+  ).rejects.toThrow();
+  await f.app.finalizeSubmission(
+    f.id,
+    successor.operationId,
+    envelope,
+    "alice",
+    envelope,
+  );
+  const next = await f.app.reserveRetry(f.id, successor.operationId, "alice");
+  if (next.state !== "won") throw new Error("retry reservation lost");
+  await expect(
+    f.app.send(
+      f.id,
+      "legacy",
+      successor.operationId,
+      images,
+      "alice",
+      true,
+      envelope,
+      successor.claimToken,
+    ),
+  ).rejects.toThrow();
+  await f.app.send(
+    f.id,
+    "legacy",
+    next.operationId,
+    images,
+    "alice",
+    true,
+    envelope,
+    next.claimToken,
+  );
+  expect(f.runtime.inputs).toHaveLength(1);
+  expect(f.runtime.inputs[0].images).toEqual(
+    images.map((image) => join(f.app.images.directory, image.id)),
+  );
+  expect(f.app.lookup(f.id, next.operationId)?.state).toBe("accepted");
+  f.restart();
+  expect(f.app.images.read(f.id, images[0].id, false)).not.toBeNull();
+  expect(f.app.recovery(f.id, next.operationId).images).toEqual(images);
+});
+
+test("finalized legacy image fence preserves exact evidence for retry through cleanup", async () => {
+  const f = await fixture();
+  const bytes = await sharp({
+    create: { width: 2, height: 2, channels: 3, background: "red" },
+  })
+    .png()
+    .toBuffer();
+  const original = await f.app.reserveSubmission(f.id);
+  const images = await f.app.images.upload(f.id, original.operationId, "old", [
+    new File([bytes], "old.png"),
+  ]);
+  const envelope = { source: "user" as const, text: "old", images };
+  await f.app.finalizeSubmission(f.id, original.operationId, envelope);
+  f.app.images.cleanup(Date.now() + 2 * 86400000);
+  f.restart();
+  const successor = await f.app.reserveRetry(f.id, original.operationId);
+  if (successor.state !== "won") throw new Error("retry reservation lost");
+  await f.app.send(
+    f.id,
+    "old",
+    successor.operationId,
+    images,
+    undefined,
+    true,
+    envelope,
+    successor.claimToken,
+  );
+  expect(f.app.lookup(f.id, successor.operationId)?.state).toBe("accepted");
+  f.restart();
+  expect(f.app.recovery(f.id, successor.operationId).images).toEqual(images);
+  expect(f.app.images.read(f.id, images[0].id, false)).not.toBeNull();
 });

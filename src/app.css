@@ -1720,11 +1720,65 @@ button.question-option {
   display: none;
 }
 .image-drafts,
-.message-images {
+.message-images,
+.message-files {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   margin: 8px 0;
+}
+.image-drafts {
+  align-content: flex-start;
+  max-height: min(205px, 28dvh);
+  overflow-y: auto;
+}
+.attachment-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 8px;
+  background: var(--background);
+  color: var(--foreground);
+}
+a.attachment-card:hover {
+  background: var(--muted);
+}
+.attachment-card > svg {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--muted-foreground);
+}
+.attachment-label {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  max-width: 34ch;
+  font-size: 12px;
+  line-height: 1.25;
+}
+.attachment-label span {
+  display: -webkit-box;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.attachment-label small {
+  color: var(--muted-foreground);
+}
+.attachment-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
 }
 .image-draft {
   position: relative;

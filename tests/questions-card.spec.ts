@@ -52,7 +52,7 @@ for (const width of [1440, 390]) {
     })
       .png()
       .toBuffer();
-    await page.getByLabel("Choose message images").setInputFiles({
+    await page.getByLabel("Choose message attachments").setInputFiles({
       name: "owned.png",
       mimeType: "image/png",
       buffer: image,

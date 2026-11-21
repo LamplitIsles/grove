@@ -106,7 +106,7 @@ for (const kind of ["message", "image", "answer"] as const) {
         exact: true,
       });
       if (kind === "image") {
-        await page.getByLabel("Choose message images").setInputFiles({
+        await page.getByLabel("Choose message attachments").setInputFiles({
           name: "receipt.png",
           mimeType: "image/png",
           buffer: await sharp({

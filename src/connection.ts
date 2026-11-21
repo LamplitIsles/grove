@@ -322,7 +322,12 @@ export class LocalConnection {
       );
     return link.client.call<T>(member, input);
   }
-  async media(agent: string, path: string, init: RequestInit = {}) {
+  async media(
+    agent: string,
+    path: string,
+    options: RequestInit & { timeoutMs?: number } = {},
+  ) {
+    const { timeoutMs = 60_000, ...init } = options;
     const peer = agent.split(":")[0];
     const link = this.link?.config.id === peer ? this.link : undefined;
     if (!link || !link.host.connected) throw new Error("Instance is offline");
@@ -333,17 +338,15 @@ export class LocalConnection {
       headers,
       credentials: "same-origin",
       signal: init.signal
-        ? AbortSignal.any([init.signal, AbortSignal.timeout(60_000)])
-        : AbortSignal.timeout(60_000),
+        ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)])
+        : AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
       const body = await response.json().catch(() => null);
       const error =
         typeof body?.error === "string" && body.error.trim()
           ? body.error
-          : response.status === 413
-            ? "Image upload exceeds 20 MiB"
-            : `Image request failed (HTTP ${response.status})`;
+          : `Media request failed (HTTP ${response.status})`;
       throw new Error(error);
     }
     if (response.headers.get("X-Grove-Peer") !== peer)

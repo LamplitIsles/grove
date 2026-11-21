@@ -239,7 +239,7 @@ for (const width of [1440, 390])
     await input(page).evaluate((el: HTMLTextAreaElement) =>
       el.setSelectionRange(7, 10),
     );
-    await page.getByLabel("Choose message images").setInputFiles({
+    await page.getByLabel("Choose message attachments").setInputFiles({
       name: "pixel.png",
       mimeType: "image/png",
       buffer: await sharp({
@@ -721,9 +721,9 @@ test("capability checks are silent and bounded across detail refresh and unavail
     page.getByRole("button", { name: "Send message", exact: true }),
   ).toBeEnabled();
   await expect(
-    page.getByRole("button", { name: "Add images", exact: true }),
+    page.getByRole("button", { name: "Add attachments", exact: true }),
   ).toBeEnabled();
-  await page.getByLabel("Choose message images").setInputFiles({
+  await page.getByLabel("Choose message attachments").setInputFiles({
     name: "silent.png",
     mimeType: "image/png",
     buffer: await sharp({

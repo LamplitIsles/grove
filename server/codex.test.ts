@@ -762,7 +762,11 @@ test("native isolated process reads validated localImage on start and steer exac
       new URL("../tests/fake-codex.mjs", import.meta.url),
     ),
     env: {
-      ...process.env,
+      ...Object.fromEntries(
+        Object.keys(process.env).map((key) => [key, undefined]),
+      ),
+      PATH: process.env.PATH,
+      HOME: join(directory, "home"),
       CODEX_HOME: join(directory, "codex-home"),
       FAKE_SERVER_ROOT: directory,
     },
@@ -845,6 +849,56 @@ test("native isolated process reads validated localImage on start and steer exac
         image.id,
       ),
     ).not.toBeNull();
+    const heic = await readFile(
+      new URL("./fixtures/attachment-orientation-6.heic", import.meta.url),
+    );
+    const reservation = await workspace.reserveSubmission(agent.id);
+    workspace.beginAttachments(agent.id, reservation.operationId, {
+      text: "heic",
+      mode: "direct",
+      attachments: [{ kind: "image", name: "phone.heic", bytes: heic.length }],
+    });
+    await workspace.putAttachment(
+      agent.id,
+      reservation.operationId,
+      0,
+      new ReadableStream({
+        start(c) {
+          c.enqueue(heic);
+          c.close();
+        },
+      }),
+    );
+    const prepared = await workspace.completeAttachments(
+      agent.id,
+      reservation.operationId,
+    );
+    await workspace.send(
+      agent.id,
+      "heic",
+      reservation.operationId,
+      prepared.images,
+      undefined,
+      true,
+      undefined,
+      undefined,
+      false,
+      prepared.files,
+    );
+    const latest = (
+      await readFile(join(directory, ".fake-app-server-requests.jsonl"), "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line))
+      .filter((r) => r.method === "turn/steer")
+      .at(-1);
+    const local = latest.params.input.find(
+      (item: { type: string }) => item.type === "localImage",
+    );
+    const converted = await sharp(local.path).metadata();
+    expect([converted.width, converted.height]).toEqual([1200, 800]);
+    expect(["png", "jpeg", "webp", "gif"]).toContain(converted.format);
   } finally {
     workspace.dispose();
     await runtime.close();

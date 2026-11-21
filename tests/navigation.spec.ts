@@ -42,7 +42,7 @@ for (const surface of [
       await expect(page.locator(".agent-detail")).toBeVisible();
       if (surface === "skill") {
         await expect(
-          page.getByRole("button", { name: "Add images", exact: true }),
+          page.getByRole("button", { name: "Add attachments", exact: true }),
         ).toBeEnabled();
         await page
           .getByRole("textbox", { name: "Message Orc", exact: true })
@@ -215,7 +215,7 @@ test("a closed mobile historical target stays closed on Forward", async ({
   await target.click();
   await expect(page.locator(".agent-detail")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Add images", exact: true }),
+    page.getByRole("button", { name: "Add attachments", exact: true }),
   ).toBeEnabled();
   await page.keyboard.press("Alt+x");
   await page

@@ -1,8 +1,13 @@
 import { createHash } from "node:crypto";
-import type { Answer, MessageImage } from "../src/contracts";
+import type { Answer, MessageImage, MessageFile } from "../src/contracts";
 
 export type SubmissionEnvelope =
-  | { source: "user"; text: string; images?: MessageImage[] }
+  | {
+      source: "user";
+      text: string;
+      images?: MessageImage[];
+      files?: MessageFile[];
+    }
   | { source: "question"; answers: Answer[] };
 
 const digest = (value: string) =>
@@ -16,7 +21,9 @@ export function envelopeHash(envelope: SubmissionEnvelope) {
     envelope.source === "user"
       ? [
           "user",
-          envelope.text.trim(),
+          envelope.images?.length || envelope.files?.length
+            ? envelope.text
+            : envelope.text.trim(),
           (envelope.images ?? []).map((image) => [
             image.id,
             image.name,
@@ -26,6 +33,9 @@ export function envelopeHash(envelope: SubmissionEnvelope) {
             image.mediaType,
             image.availability ?? null,
           ]),
+          ...(envelope.files?.length
+            ? [envelope.files.map((file) => [file.id, file.name, file.bytes])]
+            : []),
         ]
       : [
           "question",

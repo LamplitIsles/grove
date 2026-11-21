@@ -65,6 +65,33 @@ function store(path: string) {
   cleanup.push(() => value.close());
   return value;
 }
+test("persists file references at delivery flush boundaries", () => {
+  const { path } = fixture();
+  const db = store(path);
+  const a = db.track(
+    agent("parent", {
+      deliveries: [
+        {
+          id: "input",
+          text: "",
+          source: "user",
+          status: "waiting",
+          questionIds: [],
+          at: 1,
+        },
+      ],
+    }),
+    true,
+  );
+  db.flush();
+  const refs = [{ id: "f".repeat(64), name: "notes.txt", bytes: 0 }];
+  a.deliveries[0].files = refs;
+  expect(store(path).byId("parent")!.deliveries[0].files).toBeUndefined();
+  db.flush();
+  expect(JSON.stringify(store(path).byId("parent")!.deliveries[0].files)).toBe(
+    JSON.stringify(refs),
+  );
+});
 test("persists each Orc's captured organization review policy", () => {
   const { path } = fixture();
   const db = store(path);
@@ -318,14 +345,14 @@ test("real Bun migrator converts all durable roles, envelopes and order atomical
   ).toBeNull();
   expect(
     db.sqlite.query("SELECT count(*) AS n FROM __drizzle_migrations").get(),
-  ).toEqual({ n: 9 });
+  ).toEqual({ n: 10 });
   const reopened = store(path);
   expect(reopened.byId("parent")?.deliveries).toEqual(parent.deliveries);
   expect(
     reopened.sqlite
       .query("SELECT count(*) AS n FROM __drizzle_migrations")
       .get(),
-  ).toEqual({ n: 9 });
+  ).toEqual({ n: 10 });
 });
 test("conversion failure rolls back schema, data and success log and refuses Workspace startup", () => {
   const { path, directory } = fixture();

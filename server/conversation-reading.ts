@@ -27,6 +27,7 @@ export function deliveryMetadata(d: Delivery): Delivery {
     status: d.status,
     at: d.at,
     images: d.images,
+    files: d.files,
     questionIds: [],
     reportingWorkerId: d.reportingWorkerId,
     reportingReviewerId: d.reportingReviewerId,
@@ -50,6 +51,9 @@ export function associate(message: Message, deliveries: Delivery[]): Message {
         at: message.at || d.at,
         delivery: deliveryMetadata(d),
         ...(d.images?.length ? { images: d.images } : {}),
+        ...(d.files?.length && message.role === "user"
+          ? { files: d.files, text: d.text }
+          : {}),
       }
     : message;
 }

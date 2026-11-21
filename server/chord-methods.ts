@@ -56,6 +56,7 @@ export async function invoke(
         authorUserId,
         p.predecessor,
         p.claimToken,
+        p.files,
       );
     }
     case "reserveSubmission":
@@ -86,6 +87,8 @@ export async function invoke(
         p.operationId,
         p.images,
         authorUserId,
+        false,
+        p.files,
       );
     }
     case "cancelFollowUp": {

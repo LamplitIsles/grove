@@ -32,6 +32,13 @@ export const imageSchema = z.object({
   mediaType: z.string(),
   availability: z.literal("missing").optional(),
 });
+export const fileSchema = z
+  .object({
+    id: z.string().regex(/^[a-f0-9]{64}$/),
+    name: z.string().min(1).max(200),
+    bytes: z.number().int().nonnegative().max(100_000_000),
+  })
+  .strict();
 export const answerSchema = z.object({ questionId: id, answer: text });
 const defaults = z.object({
   backend: z.enum(["codex", "pi"]).default("codex"),
@@ -47,13 +54,15 @@ export const submissionEnvelopeSchema = z.discriminatedUnion("source", [
   z
     .object({
       source: z.literal("user"),
-      text: z.string().trim().max(100_000),
+      text: z.string().max(100_000),
       images: z.array(imageSchema).max(5).optional(),
+      files: z.array(fileSchema).max(6).optional(),
     })
     .strict()
     .refine(
-      (p) => p.text.length > 0 || !!p.images?.length,
-      "Write a message or choose an image",
+      (p) =>
+        p.text.trim().length > 0 || !!p.images?.length || !!p.files?.length,
+      "Write a message or choose an attachment",
     ),
   z
     .object({
@@ -109,8 +118,9 @@ export const inputs = {
   send: z
     .object({
       id,
-      text: z.string().trim().max(100_000),
+      text: z.string().max(100_000),
       images: z.array(imageSchema).max(5).optional(),
+      files: z.array(fileSchema).max(6).optional(),
       operationId: z.string().min(1).max(120),
       predecessor: submissionEnvelopeSchema.optional(),
       claimToken: z
@@ -120,8 +130,8 @@ export const inputs = {
     })
     .strict()
     .refine(
-      (p) => p.text.length || p.images?.length,
-      "Write a message or choose an image",
+      (p) => p.text.trim().length || p.images?.length || p.files?.length,
+      "Write a message or choose an attachment",
     ),
   retryDelivery: z.object({ id, deliveryId: id }),
   deleteFailedSubmission: z
@@ -131,14 +141,15 @@ export const inputs = {
   enqueueFollowUp: z
     .object({
       id,
-      text: z.string().trim().max(100_000),
+      text: z.string().max(100_000),
       images: z.array(imageSchema).max(5).optional(),
+      files: z.array(fileSchema).max(6).optional(),
       operationId: z.string().min(1).max(120),
     })
     .strict()
     .refine(
-      (p) => p.text.length || p.images?.length,
-      "Write a message or choose an image",
+      (p) => p.text.trim().length || p.images?.length || p.files?.length,
+      "Write a message or choose an attachment",
     ),
   cancelFollowUp: z
     .object({ id, operationId: z.string().min(1).max(120) })
@@ -382,6 +393,7 @@ export const deliverySchema = z.object({
     "uncertain",
   ]),
   images: z.array(imageSchema).optional(),
+  files: z.array(fileSchema).optional(),
   source: z.enum(["user", "worker", "reviewer", "researcher", "question"]),
   questionIds: z.array(id),
   answers: z.array(answerSchema).optional(),
@@ -422,6 +434,7 @@ export const detailSchema = agent.extend({
       bodyRef: z.string().optional(),
       delivery: deliverySchema.optional(),
       images: z.array(imageSchema).optional(),
+      files: z.array(fileSchema).optional(),
       role: z.enum(["user", "assistant"]),
       text: z.string(),
       at: z.number(),

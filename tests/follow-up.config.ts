@@ -5,6 +5,7 @@ export default defineConfig({
   testDir: ".",
   testMatch: [
     "follow-up.spec.ts",
+    "message-attachments.spec.ts",
     "composer-ime.spec.ts",
     "skill-fuzzy.spec.ts",
   ],

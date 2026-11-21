@@ -117,7 +117,7 @@ for (const width of [1440, 390]) {
       name: "Message Orc",
       exact: true,
     });
-    await page.getByLabel("Choose message images").setInputFiles({
+    await page.getByLabel("Choose message attachments").setInputFiles({
       name: "time-image.png",
       mimeType: "image/png",
       buffer: await sharp({
@@ -236,7 +236,7 @@ test("image messages keep time and copy below the attachment", async ({
   await page.request.post(design + "/fixture/change", {
     data: { sendMode: "held" },
   });
-  await page.getByLabel("Choose message images").setInputFiles({
+  await page.getByLabel("Choose message attachments").setInputFiles({
     name: "footer-image.png",
     mimeType: "image/png",
     buffer: await sharp({

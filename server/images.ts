@@ -12,14 +12,13 @@ import { join } from "node:path";
 import { imageSchema } from "../src/chord-contract";
 import type { MessageImage } from "../src/contracts";
 import { RequestRefused } from "./runtime";
+import { decodeHeif } from "./heif";
 export const IMAGE_BYTES = 5 * 1024 * 1024;
 export const MESSAGE_IMAGE_BYTES = 20 * 1024 * 1024;
-// Up to 100,000 JSON-escaped UTF-16 units (600KB) plus multipart metadata.
-export const IMAGE_UPLOAD_BYTES = MESSAGE_IMAGE_BYTES + 700_000;
 export const PREVIEW_BYTES = 160_000;
 const hash = (value: string | Buffer) =>
   createHash("sha256").update(value).digest("hex");
-type Upload = {
+export type ImageUpload = {
   agent: string;
   operation: string;
   text: string;
@@ -27,18 +26,23 @@ type Upload = {
   images: MessageImage[];
   at: number;
   committed: boolean;
+  scoped?: boolean;
 };
 // Only opaque IDs resolve paths. Original native paths never come from browser input.
 export class ImageStore {
-  private uploads: Upload[];
+  private uploads: ImageUpload[];
   private busy = false;
-  constructor(readonly directory: string) {
+  constructor(
+    readonly directory: string,
+    private referenced: (upload: ImageUpload) => boolean = () => false,
+    cleanupOnStart = true,
+  ) {
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const manifest = join(directory, "index.json");
     this.uploads = existsSync(manifest)
       ? JSON.parse(readFileSync(manifest, "utf8"))
       : [];
-    this.cleanup();
+    if (cleanupOnStart) this.cleanup();
   }
   private save() {
     const temporary = join(this.directory, "index.tmp");
@@ -47,7 +51,8 @@ export class ImageStore {
   }
   cleanup(now = Date.now()) {
     const remove = this.uploads.filter(
-      (u) => !u.committed && now - u.at > 24 * 60 * 60 * 1000,
+      (u) =>
+        !u.committed && now - u.at > 24 * 60 * 60 * 1000 && !this.referenced(u),
     );
     this.uploads = this.uploads.filter((u) => !remove.includes(u));
     for (const u of remove)
@@ -57,7 +62,28 @@ export class ImageStore {
       }
     this.save();
   }
-  async upload(agent: string, operation: string, text: string, files: File[]) {
+  discardScoped(agent: string, operation: string) {
+    const upload = this.uploads.find(
+      (item) =>
+        item.agent === agent && item.operation === operation && item.scoped,
+    );
+    if (!upload) return;
+    if (upload.committed || this.referenced(upload))
+      throw new Error("Image preparation is already bound");
+    for (const image of upload.images) {
+      rmSync(join(this.directory, image.id), { force: true });
+      rmSync(join(this.directory, image.id + ".preview"), { force: true });
+    }
+    this.uploads = this.uploads.filter((item) => item !== upload);
+    this.save();
+  }
+  async upload(
+    agent: string,
+    operation: string,
+    text: string,
+    files: File[],
+    scoped = false,
+  ) {
     if (this.busy)
       throw new Error("Image preparation busy. Try again shortly.");
     this.busy = true;
@@ -86,9 +112,15 @@ export class ImageStore {
           JSON.stringify(prior.fingerprints) !== JSON.stringify(fingerprints)
         )
           throw new Error("Operation ID is bound to different content");
+        if (scoped && !prior.scoped) {
+          prior.scoped = true;
+          this.save();
+        }
         return prior.images;
       }
-      const orphans = this.uploads.filter((u) => !u.committed);
+      const orphans = this.uploads.filter(
+        (u) => !u.committed && !this.referenced(u),
+      );
       if (
         orphans.length >= 100 ||
         orphans.reduce(
@@ -101,7 +133,8 @@ export class ImageStore {
         throw new Error("Temporary image storage full. Try again later.");
       const prepared = [];
       for (let i = 0; i < buffers.length; i++) {
-        const bytes = buffers[i];
+        let bytes: Buffer = buffers[i];
+        let convertedHeif = false;
         const decode = () =>
           sharp(bytes, {
             limitInputPixels: 40_000_000,
@@ -113,11 +146,22 @@ export class ImageStore {
         } catch {
           throw new Error("Image is damaged or exceeds 40 megapixels");
         }
+        if (meta.format === "heif") {
+          try {
+            bytes = await decodeHeif(bytes, IMAGE_BYTES);
+            convertedHeif = true;
+            meta = await decode().metadata();
+          } catch {
+            throw new Error(
+              "HEIF image is damaged, unsupported or exceeds image limits",
+            );
+          }
+        }
         if (
           !["png", "jpeg", "webp", "gif"].includes(meta.format ?? "") ||
           (meta.pages ?? 1) !== 1
         )
-          throw new Error("Choose PNG, JPEG, WebP or non-animated GIF");
+          throw new Error("Choose HEIF, PNG, JPEG, WebP or non-animated GIF");
         if (
           !meta.width ||
           !meta.height ||
@@ -130,7 +174,7 @@ export class ImageStore {
         const raw = await decode().ensureAlpha().raw().toBuffer();
         let original = bytes;
         let mediaType = `image/${meta.format === "jpeg" ? "jpeg" : meta.format}`;
-        if (!meta.orientation || meta.orientation === 1) {
+        if (!convertedHeif && (!meta.orientation || meta.orientation === 1)) {
           const webp = await decode()
             .webp({ lossless: true, effort: 3 })
             .toBuffer();
@@ -195,6 +239,7 @@ export class ImageStore {
         images,
         at: Date.now(),
         committed: false,
+        ...(scoped ? { scoped: true } : {}),
       });
       this.save();
       return images;
@@ -221,54 +266,12 @@ export class ImageStore {
       );
     return upload;
   }
-  validateRetry(
-    agent: string,
-    retryId: string,
-    text: string,
-    original: MessageImage[],
-    retry: MessageImage[],
-  ) {
-    // A rejected retry can be finalized with its predecessor's references;
-    // those references remain bound by the persisted envelope hash.
-    const before = this.uploads.find(
-      (u) =>
-        u.agent === agent &&
-        u.text === text &&
-        JSON.stringify(u.images) === JSON.stringify(original),
-    );
-    if (!before)
-      throw new Error(
-        "Original image evidence is unavailable; keep the failed message and its original files",
-      );
-    const after = this.validate(agent, retryId, text, retry);
-    if (
-      original.length !== retry.length ||
-      before.fingerprints.length !== after.fingerprints.length
-    )
-      throw new Error("Retry images do not match the original submission");
-    for (let i = 0; i < original.length; i++) {
-      if (original[i].name !== retry[i].name)
-        throw new Error("Retry images do not match the original submission");
-      if (before.fingerprints[i] === after.fingerprints[i]) continue;
-      // A different device may recover the saved full image, which can be a
-      // lossless WebP rather than the originally uploaded byte sequence.
-      const path = join(this.directory, imageSchema.parse(original[i]).id);
-      if (
-        !existsSync(path) ||
-        hash(
-          Buffer.concat([Buffer.from(original[i].name), readFileSync(path)]),
-        ) !== after.fingerprints[i]
-      )
-        throw new Error(
-          "Cannot verify original retry images; restore the original files and try again",
-        );
-    }
-  }
   commit(
     agent: string,
     operation: string,
     text: string,
     images: MessageImage[],
+    markCommitted = true,
   ) {
     const upload = this.validate(agent, operation, text, images);
     const paths = images.map((image) =>
@@ -278,8 +281,10 @@ export class ImageStore {
       throw new Error(
         "Message image is missing. Restore the message and choose it again.",
       );
-    upload.committed = true;
-    this.save();
+    if (markCommitted) {
+      upload.committed = true;
+      this.save();
+    }
     return paths;
   }
   read(agent: string, id: string, preview: boolean) {
@@ -294,5 +299,12 @@ export class ImageStore {
       bytes: readFileSync(path),
       mediaType: preview ? "image/webp" : image.mediaType,
     };
+  }
+  uploadFor(agent: string, id: string) {
+    return this.uploads.find(
+      (upload) =>
+        upload.agent === agent &&
+        upload.images.some((image) => image.id === id),
+    );
   }
 }

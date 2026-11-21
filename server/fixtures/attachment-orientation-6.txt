@@ -1,0 +1,2 @@
+HEVC orientation-6.heic, CC0 1.0, obtained from https://heic.fyi/samples/orientation-6.heic
+SHA-256: 80b615ae433d7ec53e9aaaeee081ecd11c0d9931350da13d6ce4e2b363d12c12

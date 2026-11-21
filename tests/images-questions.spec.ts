@@ -35,12 +35,12 @@ async function setup(page: Page, request: any, width: number, mode = "long") {
   }
   await expect(composer(page)).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "Add images", exact: true }),
+    page.getByRole("button", { name: "Add attachments", exact: true }),
   ).toBeEnabled();
 }
 async function add(page: Page, count = 1) {
   const image = await png();
-  await page.getByLabel("Choose message images").setInputFiles(
+  await page.getByLabel("Choose message attachments").setInputFiles(
     Array.from({ length: count }, (_, i) => ({
       ...image,
       name: `screen-${i}.png`,
@@ -196,40 +196,6 @@ for (const width of [1440, 390]) {
       }
       await releaseImageDecode(page);
       if (escape) {
-        // Wait for the old intake's durable write while another Orc owns focus.
-        await expect
-          .poll(() =>
-            page.evaluate(async () => {
-              const name = (await indexedDB.databases()).find((db) =>
-                db.name?.endsWith("/images"),
-              )!.name!;
-              return new Promise<number>((resolve, reject) => {
-                const open = indexedDB.open(name);
-                open.onerror = () => reject(open.error);
-                open.onsuccess = () => {
-                  const db = open.result;
-                  const read = db
-                    .transaction("drafts")
-                    .objectStore("drafts")
-                    .getAll();
-                  read.onsuccess = () => {
-                    db.close();
-                    resolve(
-                      read.result.reduce(
-                        (count, record) => count + record.images.length,
-                        0,
-                      ),
-                    );
-                  };
-                  read.onerror = () => {
-                    db.close();
-                    reject(read.error);
-                  };
-                };
-              });
-            }),
-          )
-          .toBe(1);
         await expect(composer(page)).toBeFocused();
         await page.keyboard.type(" continued");
         await expect(page.locator(".image-draft")).toHaveCount(0);
@@ -290,7 +256,7 @@ for (const width of [1440, 390]) {
     let uploaded: any;
     let submitted: any;
     page.on("response", async (response) => {
-      if (response.url().includes("/api/images?"))
+      if (response.url().includes("/api/attachments/complete?"))
         uploaded = await response.json();
     });
     page.on("websocket", (socket) =>
@@ -348,7 +314,7 @@ for (const width of [1440, 390]) {
   });
 }
 for (const width of [1440, 390]) {
-  test(`images picker/paste/drag, persistent drafts, remove, limits, pure image and full size at ${width}`, async ({
+  test(`images picker/paste/drag, text-only refresh, remove, limits, pure image and full size at ${width}`, async ({
     page,
     request,
   }) => {
@@ -357,8 +323,9 @@ for (const width of [1440, 390]) {
     await composer(page).fill("Screenshot feedback");
     await page.screenshot({ path: `${shots}/${width}-image-draft.png` });
     await page.reload();
-    await expect(page.locator(".image-draft")).toHaveCount(2);
+    await expect(page.locator(".image-draft")).toHaveCount(0);
     await expect(composer(page)).toHaveValue("Screenshot feedback");
+    await add(page, 2);
     await page
       .getByRole("button", { name: "Remove image 2", exact: true })
       .click();
@@ -368,7 +335,7 @@ for (const width of [1440, 390]) {
     await clipboard(page, "drop");
     await expect(page.locator(".image-draft")).toHaveCount(3);
     await page
-      .getByLabel("Choose message images")
+      .getByLabel("Choose message attachments")
       .setInputFiles([
         await png("4.png"),
         await png("5.png"),
@@ -376,7 +343,7 @@ for (const width of [1440, 390]) {
       ]);
     await expect(page.getByRole("alert")).toContainText("up to 5");
     await expect(page.locator(".image-draft")).toHaveCount(3);
-    await page.getByLabel("Choose message images").setInputFiles({
+    await page.getByLabel("Choose message attachments").setInputFiles({
       name: "bad.png",
       mimeType: "image/png",
       buffer: Buffer.from("invalid"),
@@ -448,51 +415,38 @@ for (const width of [1440, 390]) {
   });
 }
 
-test("slow upload binds original Peer/conversation while new draft remains isolated; rejection retains complete images for Retry", async ({
+test("upload stays with the originating conversation; native rejection preserves the attachment for Retry", async ({
   page,
   request,
 }) => {
   await setup(page, request, 1440, "no-workers");
+  const original = page.getByRole("button", {
+    name: "Open Streaming voice input Orc",
+    exact: true,
+  });
+  await original.click();
   const info = await (await request.get(origin + "/fixture/info")).json();
-  let release!: () => void;
-  let caught!: () => void;
-  const held = new Promise<void>((r) => (release = r));
-  const arrived = new Promise<void>((r) => (caught = r));
-  await page.route("**/api/images?*", async (route) => {
-    caught();
-    await held;
+  const seen = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  await page.route("**/api/attachments/0?*", async (route) => {
+    seen.resolve();
+    await release.promise;
     await route.continue();
   });
   await add(page);
   await composer(page).fill("Original upload");
   await composer(page).press("Enter");
-  await arrived;
-  await expect(page.locator(".detail-status")).toContainText("Working");
+  await seen.promise;
   await expect(
-    page.locator('.session-open[aria-current="true"] [aria-label="Working"]'),
+    page.getByRole("button", { name: "Cancel upload" }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Stop Orc", exact: true }),
-  ).toHaveCount(0);
-  expect(
-    (await (await request.get(origin + "/fixture/info")).json()).inputs.length,
-  ).toBe(info.inputs.length);
-  await expect(page.locator(".message-image")).toHaveCount(1);
-  await expect(
-    page.locator(".user-message").filter({ hasText: "Original upload" }),
-  ).toHaveCount(1);
-  await expect(page.locator(".user-message [role=status]")).toHaveCount(0);
-  await page.screenshot({ path: `${shots}/desktop-uploading.png` });
+  await expect(page.locator(".detail-status")).not.toContainText("Working");
   await page
     .getByRole("button", { name: "Open Reader performance Orc", exact: true })
     .click();
-  await expect(page.locator(".agent-detail h1")).toHaveText(
-    "Reader performance",
-  );
-  await expect(page.locator(".detail-status")).not.toContainText("Working");
   await add(page);
-  await composer(page).fill("New Peer draft");
-  release();
+  await composer(page).fill("Other session draft");
+  release.resolve();
   await page.unrouteAll({ behavior: "wait" });
   await expect
     .poll(
@@ -501,25 +455,12 @@ test("slow upload binds original Peer/conversation while new draft remains isola
           .length,
     )
     .toBe(info.inputs.length + 1);
-  await expect(composer(page)).toHaveValue("New Peer draft");
+  await expect(composer(page)).toHaveValue("Other session draft");
   await expect(page.locator(".image-draft")).toHaveCount(1);
-  await composer(page).press("Enter");
-  await expect
-    .poll(
-      async () =>
-        (await (await request.get(origin + "/fixture/info")).json()).inputs
-          .length,
-    )
-    .toBe(info.inputs.length + 2);
-  await expect(page.locator(".message-image")).toHaveCount(1);
-  await page
-    .getByRole("button", {
-      name: "Open Streaming voice input Orc",
-      exact: true,
-    })
-    .click();
-  await expect(page.locator(".message-image")).toHaveCount(1);
+  await original.click();
   await expect(composer(page)).toHaveValue("");
+  await expect(page.locator(".image-draft")).toHaveCount(0);
+  await expect(page.locator(".message-image")).toHaveCount(1);
   await request.post(origin + "/fixture/change", {
     data: { sendMode: "rejected" },
   });
@@ -564,7 +505,7 @@ test("slow upload binds original Peer/conversation while new draft remains isola
   await failed.getByRole("button", { name: "Retry", exact: true }).click();
   await expect(failed.locator("small.failed")).toHaveCount(0);
   await expect(failed.locator(".message-image")).toHaveCount(1);
-  await expect(page.locator(".image-draft")).toHaveCount(1);
+  await expect(page.locator(".image-draft")).toHaveCount(0);
   await expect(composer(page)).toHaveValue("New image draft");
   await page.screenshot({ path: `${shots}/desktop-image-failed.png` });
   await request.post(origin + "/fixture/change", {
@@ -599,74 +540,15 @@ test("slow upload binds original Peer/conversation while new draft remains isola
   await page.screenshot({ path: `${shots}/desktop-image-unknown.png` });
 });
 
-test("storage failure keeps complete editable draft; HTTP rejection preserves newer originating draft; long question remains readable", async ({
+test("a long question keeps a separate readable Composer draft", async ({
   page,
   request,
 }) => {
   await setup(page, request, 1440);
   await page
-    .getByRole("button", {
-      name: "Open Streaming voice input Orc",
-      exact: true,
-    })
+    .getByRole("button", { name: "Open Streaming voice input Orc" })
     .click();
-  await add(page);
-  await composer(page).fill("Never discard this");
-  const info = await (await request.get(origin + "/fixture/info")).json();
-  await page.evaluate(() => {
-    const put = IDBObjectStore.prototype.put;
-    (window as any).restorePut = () => (IDBObjectStore.prototype.put = put);
-    IDBObjectStore.prototype.put = function (value: any, ...args: any[]) {
-      if (value.key.startsWith("operation/"))
-        throw new DOMException("Synthetic storage full", "QuotaExceededError");
-      return put.call(this, value, ...(args as []));
-    };
-  });
-  await composer(page).press("Enter");
-  await expect(page.getByRole("alert")).toContainText("Synthetic storage full");
-  await expect(composer(page)).toHaveValue("Never discard this");
-  await expect(page.locator(".image-draft")).toHaveCount(1);
-  expect(
-    (await (await request.get(origin + "/fixture/info")).json()).inputs.length,
-  ).toBe(info.inputs.length);
-  await page.evaluate(() => (window as any).restorePut());
-  let release!: () => void;
-  const gate = new Promise<void>((r) => (release = r));
-  let arrived!: () => void;
-  const arrival = new Promise<void>((r) => (arrived = r));
-  await page.route("**/api/images?*", async (route) => {
-    arrived();
-    await gate;
-    await route.fulfill({
-      status: 400,
-      headers: { "X-Grove-Peer": info.hub },
-      contentType: "application/json",
-      body: JSON.stringify({ error: "Synthetic upload rejection" }),
-    });
-  });
-  await composer(page).press("Enter");
-  await arrival;
-  await add(page);
   await composer(page).fill("Newer original-session draft");
-  release();
-  await page.unrouteAll({ behavior: "wait" });
-  await expect(page.locator(".image-draft")).toHaveCount(1);
-  await expect(composer(page)).toHaveValue("Newer original-session draft");
-  const failed = page
-    .locator(".user-message")
-    .filter({ hasText: "Never discard this" });
-  await expect(failed.locator("small.failed")).toContainText(
-    "Synthetic upload rejection",
-  );
-  await page.reload();
-  await expect(
-    failed.getByRole("button", { name: "Retry", exact: true }),
-  ).toBeVisible();
-  await failed.getByRole("button", { name: "Retry", exact: true }).click();
-  await expect(failed.locator("small.failed")).toHaveCount(0);
-  await expect(composer(page)).toHaveValue("Newer original-session draft");
-  await expect(page.locator(".image-draft")).toHaveCount(1);
-  await expect(page.locator(".delivery-error")).toHaveCount(0);
   await request.post(origin + "/fixture/change", {
     data: {
       question: true,
@@ -675,7 +557,6 @@ test("storage failure keeps complete editable draft; HTTP rejection preserves ne
       questionCount: 2,
     },
   });
-  await expect(composer(page)).toHaveValue("Newer original-session draft");
   await page.getByRole("button", { name: /pending question/ }).click();
   await expect(page.locator(".question-card")).toHaveCount(1);
   await page.screenshot({ path: `${shots}/desktop-questions-long.png` });
@@ -713,140 +594,33 @@ async function boundedPreview(page: Page, selector: string) {
   expect(bytes).toBeLessThanOrEqual(160_000);
 }
 
-test("bounded local draft/pending/rejected previews retain original and edited recovery caption across reload", async ({
+test("draft and committed previews are bounded while full-size media survives reload", async ({
   page,
   request,
 }) => {
   await setup(page, request, 1440);
-  await add(page);
-  await boundedPreview(page, ".image-draft img");
-  await composer(page).fill("Original rejected caption");
-  const info = await (await request.get(origin + "/fixture/info")).json();
-  let release!: () => void;
-  const gate = new Promise<void>((resolve) => (release = resolve));
-  let arrived!: () => void;
-  const arrival = new Promise<void>((resolve) => (arrived = resolve));
-  await page.route("**/api/images?*", async (route) => {
-    arrived();
-    await gate;
-    await route.fulfill({
-      status: 400,
-      headers: { "X-Grove-Peer": info.hub },
-      contentType: "application/json",
-      body: JSON.stringify({ error: "Preview test rejection" }),
-    });
-  });
-  await composer(page).press("Enter");
-  await arrival;
-  await boundedPreview(page, ".message-image img");
-  await page.locator(".message-image").first().click();
-  await expect(page.locator(".full-image")).toBeVisible();
-  expect(
-    await page
-      .locator(".full-image")
-      .evaluate((node: HTMLImageElement) => node.naturalWidth),
-  ).toBe(1600);
-  await page.keyboard.press("Escape");
-  release();
-  await page.unrouteAll({ behavior: "wait" });
-  await expect(composer(page)).toHaveValue("");
-  await boundedPreview(page, ".message-image img");
-  await expect(page.locator(".message-image")).toHaveCount(1);
-  await composer(page).fill("Edited recovered caption");
-  await page.reload();
-  await expect(composer(page)).toHaveValue("Edited recovered caption");
-  await boundedPreview(page, ".message-image img");
-  const operationText = await page.evaluate(async () => {
-    const name = (await indexedDB.databases()).find((d) =>
-      d.name?.endsWith("/images"),
-    )!.name!;
-    const db = await new Promise<IDBDatabase>((resolve) => {
-      const r = indexedDB.open(name);
-      r.onsuccess = () => resolve(r.result);
-    });
-    const rows = await new Promise<any[]>((resolve) => {
-      const r = db.transaction("drafts").objectStore("drafts").getAll();
-      r.onsuccess = () => resolve(r.result);
-    });
-    db.close();
-    return rows.find((r) => r.key.startsWith("operation/")).text;
-  });
-  expect(operationText).toBe("Original rejected caption");
-  const failed = page
-    .locator(".user-message")
-    .filter({ hasText: "Original rejected caption" });
-  await page.evaluate(async () => {
-    const name = (await indexedDB.databases()).find((d) =>
-      d.name?.endsWith("/images"),
-    )!.name!;
-    const db = await new Promise<IDBDatabase>((resolve) => {
-      const r = indexedDB.open(name);
-      r.onsuccess = () => resolve(r.result);
-    });
-    await new Promise<void>((resolve) => {
-      const tx = db.transaction("drafts", "readwrite"),
-        store = tx.objectStore("drafts"),
-        r = store.getAll();
-      r.onsuccess = () => {
-        const row = r.result.find((r: any) => r.key.startsWith("operation/"));
-        (window as any).retryOriginal = row;
-        store.delete(row.key);
-      };
-      tx.oncomplete = () => resolve();
-    });
-    db.close();
-  });
-  await failed.getByRole("button", { name: "Retry", exact: true }).click();
-  await expect(failed.locator("small.failed")).toContainText(
-    "Original images are unavailable",
-  );
-  await expect(composer(page)).toHaveValue("Edited recovered caption");
-  expect(
-    (await (await request.get(origin + "/fixture/info")).json()).inputs.length,
-  ).toBe(info.inputs.length);
-  await expect(failed.locator(".message-image")).toHaveCount(1);
-  await page.screenshot({ path: `${shots}/review-edited-recovery.png` });
-});
-
-test("IndexedDB open SecurityError leaves image error visible and pure text sends once without blob access", async ({
-  page,
-  request,
-}) => {
-  await page.addInitScript(() => {
-    let opens = 0;
-    Object.defineProperty(window, "imageStoreOpens", { get: () => opens });
+  await page.evaluate(() => {
     indexedDB.open = () => {
-      opens++;
-      throw new DOMException("Synthetic image storage denied", "SecurityError");
+      throw new DOMException(
+        "Do not persist attachment blobs",
+        "SecurityError",
+      );
     };
   });
-  await request.post(origin + "/fixture/reset", { data: { mode: "long" } });
-  await page.goto(origin);
-  await expect(composer(page)).toBeVisible();
-  await expect(page.getByRole("alert")).toContainText(
-    "Image storage unavailable",
-  );
-  const before = await (await request.get(origin + "/fixture/info")).json();
-  await composer(page).fill("Pure text with unavailable image store");
-  await expect(
-    page.getByRole("button", { name: "Send message", exact: true }),
-  ).toBeEnabled();
+  await add(page);
+  await boundedPreview(page, ".image-draft img");
+  await composer(page).fill("Image with retained detail");
   await composer(page).press("Enter");
-  await expect
-    .poll(
-      async () =>
-        (await (await request.get(origin + "/fixture/info")).json()).inputs
-          .length,
-    )
-    .toBe(before.inputs.length + 1);
-  const sent = await (await request.get(origin + "/fixture/info")).json();
-  expect(sent.inputs.at(-1).text).toBe(
-    "Pure text with unavailable image store",
-  );
-  expect(await page.evaluate(() => (window as any).imageStoreOpens)).toBe(1);
-  await expect(page.getByRole("alert")).toContainText(
-    "Image storage unavailable",
-  );
+  await expect(page.locator(".message-image")).toHaveCount(1);
+  await boundedPreview(page, ".message-image img");
+  await page.reload();
+  await boundedPreview(page, ".message-image img");
+  await page.locator(".message-image").first().click();
+  const full = page.locator(".full-image");
+  await expect(full).toBeVisible();
+  expect(
+    await full.evaluate((node: HTMLImageElement) => node.naturalWidth),
+  ).toBe(1600);
 });
 
 for (const failure of [
@@ -854,13 +628,13 @@ for (const failure of [
     status: 413,
     body: "",
     contentType: "text/plain",
-    expected: "Image upload exceeds 20 MiB",
+    expected: "Media request failed (HTTP 413)",
   },
   {
     status: 502,
     body: "<html>proxy failed</html>",
     contentType: "text/html",
-    expected: "Image request failed (HTTP 502)",
+    expected: "Media request failed (HTTP 502)",
   },
   {
     status: 400,
@@ -872,19 +646,19 @@ for (const failure of [
     status: 400,
     body: "null",
     contentType: "application/json",
-    expected: "Image request failed (HTTP 400)",
+    expected: "Media request failed (HTTP 400)",
   },
   {
     status: 400,
     body: JSON.stringify({ error: { detail: "invalid" } }),
     contentType: "application/json",
-    expected: "Image request failed (HTTP 400)",
+    expected: "Media request failed (HTTP 400)",
   },
   {
     status: 200,
     body: JSON.stringify({ images: [] }),
     contentType: "application/json",
-    expected: "Peer identity changed",
+    expected: "Instance identity changed",
   },
 ]) {
   test(`image HTTP ${failure.status} ${failure.body.slice(0, 35) || "empty"} missing identity header classification`, async ({
@@ -896,7 +670,7 @@ for (const failure of [
       .inputs.length;
     await add(page);
     await composer(page).fill("Preserve failed upload");
-    await page.route("**/api/images?*", (route) =>
+    await page.route("**/api/attachments/0?*", (route) =>
       route.fulfill({
         status: failure.status,
         body: failure.body,
@@ -904,16 +678,16 @@ for (const failure of [
       }),
     );
     await composer(page).press("Enter");
-    await expect(page.locator(".user-message small.failed")).toContainText(
+    await expect(page.locator(".composer [role=alert]")).toContainText(
       failure.expected,
     );
-    await expect(composer(page)).toHaveValue("");
-    await expect(page.locator(".image-draft")).toHaveCount(0);
+    await expect(composer(page)).toHaveValue("Preserve failed upload");
+    await expect(page.locator(".image-draft")).toHaveCount(1);
     await expect(
       page
         .locator(".user-message")
-        .getByRole("button", { name: "Retry", exact: true }),
-    ).toBeVisible();
+        .filter({ hasText: "Preserve failed upload" }),
+    ).toHaveCount(0);
     expect(
       (await (await request.get(origin + "/fixture/info")).json()).inputs
         .length,
@@ -960,24 +734,6 @@ test("virtual image recycling retains only an open viewer row, releases URLs and
       );
     })
     .toBe(true);
-  // Only this isolated browser's draft DB: force the real media preview path.
-  await page.evaluate(async () => {
-    for (const info of await indexedDB.databases())
-      if (info.name?.endsWith("/images")) {
-        const db = await new Promise<IDBDatabase>((resolve, reject) => {
-          const open = indexedDB.open(info.name!);
-          open.onsuccess = () => resolve(open.result);
-          open.onerror = () => reject(open.error);
-        });
-        await new Promise<void>((resolve, reject) => {
-          const tx = db.transaction("drafts", "readwrite");
-          tx.objectStore("drafts").clear();
-          tx.oncomplete = () => resolve();
-          tx.onerror = () => reject(tx.error);
-        });
-        db.close();
-      }
-  });
   let reads = 0;
   await page.route("**/api/images/*/preview?*", async (route) => {
     reads++;
@@ -1118,8 +874,9 @@ for (const width of [1440, 390]) {
         }
       });
     });
-    await page.reload(); // Observe the new socket while retaining drafts and image blobs.
+    await page.reload(); // Observe the new socket while retaining the text draft.
     await expect(composer(page)).toHaveValue("Newer image draft");
+    await add(page);
     await composer(page).fill("Uploaded image without native confirmation");
     await expect(
       page.getByRole("button", { name: "Send message", exact: true }),
@@ -1143,7 +900,7 @@ for (const width of [1440, 390]) {
     await expect(pending.locator("small[role=status]")).toHaveCount(0);
     await page.reload();
     await expect(pending.locator("small[role=status]")).toHaveCount(0);
-    await expect(pending.locator(".message-image")).toHaveCount(1);
+    await expect(pending.locator(".image-placeholder")).toHaveCount(1);
     await expect(composer(page)).toHaveValue("");
     await expect(page.locator(".image-draft")).toHaveCount(0); // Null did not authorize recovery.
     expect(calls).toEqual([operationId]);
@@ -1168,6 +925,7 @@ test("server image ownership rejection keeps originals and Retry preserves newer
   request,
 }) => {
   let reject = true;
+  let operation: string | undefined;
   await page.routeWebSocket("**/api/socket", (ws) => {
     const server = ws.connectToServer();
     ws.onMessage((raw) => {
@@ -1176,8 +934,10 @@ test("server image ownership rejection keeps originals and Retry preserves newer
         reject &&
         frame.args?.member === "send" &&
         frame.args.input.images?.length
-      )
+      ) {
+        operation = frame.args.input.operationId;
         frame.args.input.text += " changed";
+      }
       server.send(JSON.stringify(frame));
     });
     server.onMessage((raw) => ws.send(raw));
@@ -1189,9 +949,24 @@ test("server image ownership rejection keeps originals and Retry preserves newer
   await composer(page).fill("Original\ncaption");
   await composer(page).press("Enter");
   const failed = page.locator(".user-message").filter({ hasText: "Original" });
-  await expect(failed.locator("small.failed")).toContainText(
-    "Images do not belong",
-  );
+  await expect.poll(() => operation).toBeDefined();
+  expect(
+    (await (await request.get(origin + "/fixture/info")).json()).inputs,
+  ).toHaveLength(before);
+  await expect(
+    failed.getByRole("button", { name: "Retry", exact: true }),
+  ).toHaveCount(0);
+  await page.evaluate((operation) => {
+    for (const key of Object.keys(localStorage)) {
+      if (!key.includes("/outgoing/")) continue;
+      const entry = JSON.parse(localStorage.getItem(key)!);
+      if (entry.id === operation)
+        localStorage.setItem(
+          key,
+          JSON.stringify({ ...entry, at: Date.now() - 61_000 }),
+        );
+    }
+  }, operation);
   await add(page);
   await composer(page).fill("Newer draft");
   await page.reload();
@@ -1211,7 +986,7 @@ test("server image ownership rejection keeps originals and Retry preserves newer
   await expect(failed).toHaveCount(1);
   await expect(failed.locator(".message-image")).toHaveCount(1);
   await expect(composer(page)).toHaveValue("Newer draft");
-  await expect(page.locator(".image-draft")).toHaveCount(1);
+  await expect(page.locator(".image-draft")).toHaveCount(0);
   const last = (
     await (await request.get(origin + "/fixture/info")).json()
   ).inputs.at(-1);

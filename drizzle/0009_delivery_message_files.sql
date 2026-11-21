@@ -1,0 +1,1 @@
+ALTER TABLE `deliveries` ADD `files` text;

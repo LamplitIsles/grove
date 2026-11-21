@@ -205,7 +205,7 @@ test("close warns about a local-only unknown and preserves its image through his
   await page.goto("/");
   await openSidebar(page);
   await select(page, target);
-  await page.getByLabel("Choose message images").setInputFiles({
+  await page.getByLabel("Choose message attachments").setInputFiles({
     name: "local.png",
     mimeType: "image/png",
     buffer: await sharp({
@@ -230,7 +230,7 @@ test("close warns about a local-only unknown and preserves its image through his
   await expect.poll(async () => (await journal()).length).toBe(1);
   const before = (await journal())[0];
   expect(before.text).toBe("Local only input");
-  expect(before.localImageIds).toHaveLength(1);
+  expect(before.images).toHaveLength(1);
   expect(
     (await (await request.get("/fixture/info")).json()).deliveries,
   ).toEqual([]);
@@ -250,31 +250,8 @@ test("close warns about a local-only unknown and preserves its image through his
     )
     .toBe(true);
   expect(await journal()).toMatchObject([
-    { id: before.id, text: before.text, localImageIds: before.localImageIds },
+    { id: before.id, text: before.text, images: before.images },
   ]);
-  const storedImages = () =>
-    page.evaluate(
-      async ({ target, id }) => {
-        const db = await new Promise<IDBDatabase>((resolve, reject) => {
-          const open = indexedDB.open(
-            `flickgrove/${location.origin}/images`,
-            1,
-          );
-          open.onsuccess = () => resolve(open.result);
-          open.onerror = () => reject(open.error);
-        });
-        return await new Promise<number>((resolve, reject) => {
-          const get = db
-            .transaction("drafts")
-            .objectStore("drafts")
-            .get(`operation/${target}/${id}`);
-          get.onsuccess = () => resolve(get.result?.images?.length ?? 0);
-          get.onerror = () => reject(get.error);
-        });
-      },
-      { target, id: before.id },
-    );
-  expect(await storedImages()).toBe(1);
   await page.reload();
   await newSession(page);
   await page.getByRole("option", { name: "Fixture", exact: true }).click();
@@ -285,9 +262,8 @@ test("close warns about a local-only unknown and preserves its image through his
     .click();
   await expect(page.locator(".agent-detail")).toContainText("Local only input");
   await expect(
-    page.getByRole("button", { name: "Open image 1: local.png" }),
+    page.locator(".image-placeholder").filter({ hasText: "local.png" }),
   ).toBeVisible();
-  expect(await storedImages()).toBe(1);
   expect((await (await request.get("/fixture/info")).json()).inputs).toBe(1);
 });
 
@@ -564,7 +540,7 @@ test("a real delayed image queue adds its warning before close", async ({
   await expect(
     page.getByRole("button", { name: "Queue for next turn" }),
   ).toBeVisible();
-  await page.getByLabel("Choose message images").setInputFiles({
+  await page.getByLabel("Choose message attachments").setInputFiles({
     name: "queued.png",
     mimeType: "image/png",
     buffer: await sharp({

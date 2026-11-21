@@ -26,9 +26,9 @@
   import { RequestRejected, RequestTimeout } from "./chord-client";
   import { lookupSchema, inspectRetrySchema, closeStatusSchema, deliverySchema, type Receipt } from "./chord-contract";
   import { addOutgoing, observeRetry, observeRetryLink, observeOutgoing, outgoing, withOutgoing, acceptReceipt, unknownOutgoing, submissionResult, dismissedAnswerOperations } from "./outgoing.svelte";
-  import { imageSchema } from "./chord-contract";
-  import { loadImages, saveImages, operationKey, type ImageDraft } from "./image-drafts";
-  import { receiptAlreadyAccepted, setOutgoingImages, closeRecovery, rememberCloseRecovery, forgetCloseRecovery } from "./outgoing.svelte";
+  import { setAttachmentDrafts, type AttachmentRefs } from "./attachments";
+  import { SvelteMap } from "svelte/reactivity";
+  import { receiptAlreadyAccepted, closeRecovery, rememberCloseRecovery, forgetCloseRecovery } from "./outgoing.svelte";
   import { observeQuestions, questionPanels, setQuestionPanel } from "./question-state.svelte";
   import ModelFields from "./ModelFields.svelte";
   import Weekly from "./Weekly.svelte";
@@ -48,6 +48,11 @@
   import SessionHistory from "./SessionHistory.svelte";
   import * as m from "./paraglide/messages";
   let { user, colors, onlogout, ondisconnect } = $props<{user:Human; colors:string[]; onlogout:()=>void; ondisconnect:()=>void}>();
+  const attachmentDrafts = new SvelteMap<string, import("./attachments").AttachmentDraftState>();
+  setAttachmentDrafts(attachmentDrafts);
+  onMount(() => () => {
+    for (const draft of attachmentDrafts.values()) draft.transfer?.controller.abort();
+  });
   const auth = createAuthClient({ plugins: [passkeyClient()] });
   let users = $state<Human[] | undefined>();
   const showAuthors = $derived((users?.length ?? 0) > 1);
@@ -422,7 +427,7 @@
     const local=outgoing.entries.find(o=>o.agentId===agentId && o.id===operationId && o.status==="rejected");
     if (!client || !connected || !local || Date.now() < (retryInspections.get(key) ?? 0)) return;
     if (local.localImageIds?.length && local.images?.length !== local.localImageIds.length) return;
-    const envelope = local.answers ? {source:"question" as const,answers:$state.snapshot(local.answers)} : {source:"user" as const,text:local.text,...(local.images?.length ? {images:$state.snapshot(local.images)} : {})};
+    const envelope = local.answers ? {source:"question" as const,answers:$state.snapshot(local.answers)} : userEnvelope(local.text, local);
     retryInspections.set(key,Date.now()+30_000);
     try {
       const result=inspectRetrySchema.parse(await client.call('inspectRetry',{id:agentId,operationId,envelope}));
@@ -444,24 +449,10 @@
       if (!pending.admissionVersion || Date.now() - pending.at < 60_000 || Date.now() < (nextFinalization.get(key) ?? 0)) return;
       if (dispatches.some(d => d.key === key && dispatchActive(d))) return;
       nextFinalization.set(key, Date.now() + 30_000);
-      if (!pending.predecessor && pending.localImageIds?.length && pending.images?.length !== pending.localImageIds.length) {
-        // Recreate only the staged image references. The original message is
-        // never sent here; the Peer permits this upload only while reserved.
-        const stored = await loadImages(operationKey(agentId, operationId));
-        const images = stored?.images ?? [];
-        if (images.length !== pending.localImageIds.length || images.some((image, i) => image.id !== pending.localImageIds![i])) return;
-        const form = new FormData();
-        form.set("text", JSON.stringify(pending.text));
-        for (const image of images) form.append("images", image.file, image.file.name);
-        const response = await client.media(agentId, `/api/images?agent=${encodeURIComponent(agentId)}&operation=${encodeURIComponent(operationId)}`, {method:"POST",body:form});
-        const upload = await response.json();
-        if (!response.ok || upload.agent !== agentId || upload.operation !== operationId) throw new Error(upload.error ?? "Image operation identity changed");
-        const refs = upload.images.map((image:unknown) => imageSchema.parse(image));
-        if (refs.length !== images.length) throw new Error("Original images are unavailable");
-        if (!outgoing.entries.some(o => o.agentId === agentId && o.id === operationId && o.status === "pending")) return;
-        setOutgoingImages(agentId, operationId, refs);
-      }
-      const envelope = pending.predecessor ?? (pending.answers ? {source:"question" as const, answers:pending.answers} : {source:"user" as const, text:pending.text, ...(pending.images?.length ? {images:pending.images} : {})});
+      if (pending.localImageIds?.length && pending.images?.length !== pending.localImageIds.length) return;
+      const envelope = pending.predecessor ?? (pending.answers
+        ? {source:"question" as const, answers:pending.answers}
+        : userEnvelope(pending.text, pending));
       const final = lookupSchema.parse(await client.call<Receipt | null>('finalizeSubmission',{id:agentId,operationId,envelope,...(pending.predecessor ? {predecessor:pending.predecessor} : {})}));
       if (final && final.operationId !== operationId) throw new Error("Receipt operation identity changed");
       acceptReceipt(agentId, final);
@@ -469,7 +460,14 @@
     catch(e) { if(outgoing.entries.find(o=>o.agentId===agentId && o.id===operationId)?.attemptId===attempt) unknownOutgoing(agentId,operationId,e instanceof Error?e.message:m.load_failure()); }
     finally{lookups.delete(key);}
   }
-  type RetryEnvelope = {source:"user";text:string;images?:import("./contracts").MessageImage[]} | {source:"question";answers:Answer[]};
+  type RetryEnvelope = ({source:"user";text:string} & AttachmentRefs) | {source:"question";answers:Answer[]};
+  function userEnvelope(text: string, refs: AttachmentRefs) {
+    return {
+      source:"user" as const, text,
+      ...(refs.images?.length ? {images:$state.snapshot(refs.images)} : {}),
+      ...(refs.files?.length ? {files:$state.snapshot(refs.files)} : {}),
+    };
+  }
   async function retryReservation(id:string, operationId:string, envelope:RetryEnvelope) {
     if (!client) throw new Error("Connection offline");
     const connection = client;
@@ -530,52 +528,24 @@
       const local = outgoing.entries.find(o => o.agentId === id && o.id === operationId);
       const original = local ?? (d.recoveryRef ? await reading<import("./contracts").Delivery>(`/recovery?${new URLSearchParams({agent:id,operation:operationId})}`, id) : d);
       if (receiptAlreadyAccepted(id,operationId)) return;
-      let images:ImageDraft[] = [];
-      const localIds = "localImageIds" in original ? original.localImageIds : undefined;
-      if (localIds?.length) {
-        const stored = await loadImages(operationKey(id,operationId));
-        images = stored?.images ?? [];
-        if (images.length !== localIds.length || images.some((image,i) => image.id !== localIds[i])) images = [];
-      }
-      if (!images.length && original.images?.length) {
-        const connection = client;
-        images = await Promise.all(original.images.map(async image => {
-          const response = await connection.media(id, `/api/images/${encodeURIComponent(image.id)}/original?agent=${encodeURIComponent(id)}`);
-          if (!response.ok) throw new Error("Original images are unavailable. Reconnect to the original device and retry.");
-          return {id:crypto.randomUUID(),file:new File([await response.blob()],image.name,{type:image.mediaType})};
-        }));
-      }
-      if ((localIds?.length || original.images?.length) && !images.length) throw new Error("Original images are unavailable. Reconnect to the original device and retry.");
-      let refs = original.images ? $state.snapshot(original.images) : undefined;
-      if (images.length && !refs?.length) {
-        const form = new FormData(); form.set("text",JSON.stringify(original.text));
-        for(const image of images) form.append("images",image.file,image.file.name);
-        const response = await client.media(id,`/api/images?agent=${encodeURIComponent(id)}&operation=${encodeURIComponent(operationId)}`,{method:"POST",body:form});
-        const upload = await response.json();
-        if(!response.ok || upload.agent!==id || upload.operation!==operationId) throw new Error(upload.error ?? "Image operation identity changed");
-        refs = upload.images.map((image:unknown)=>imageSchema.parse(image));
-        if(refs?.length!==images.length) throw new Error("Original images are unavailable.");
-        setOutgoingImages(id,operationId,refs);
-      }
-      const predecessor:RetryEnvelope = {source:"user",text:original.text,...(refs?.length ? {images:refs} : {})};
+      if (local?.localImageIds?.length && original.images?.length !== local.localImageIds.length)
+        throw new Error("Original images are unavailable. Reconnect to the original device and retry.");
+      const predecessor = userEnvelope(original.text, original);
       const retry = await retryReservation(id,operationId,predecessor);
       const meta = {of:operationId,predecessor};
       if(retry.state === "existing") { observeRetry(id,original.text,retry.operationId,undefined,meta); void lookup(id,retry.operationId); return; }
-      if (images.length) await saveImages(operationKey(id,retry.operationId),images,original.text);
-      addOutgoing(id,original.text,retry.operationId,undefined,undefined,images.map(image=>image.id),meta);
+      addOutgoing(id,original.text,retry.operationId,undefined,predecessor,meta);
       dispatches = [...dispatches,{key:dispatchKey(id,retry.operationId),token:retry.operationId,admitting:false}];
-      try { await dispatch(id,original.text,retry.operationId,images,{...meta,claimToken:retry.claimToken!}); }
+      try { await dispatch(id,original.text,retry.operationId,predecessor,{...meta,claimToken:retry.claimToken!}); }
       finally { dispatches=dispatches.filter(d=>d.token!==retry.operationId); }
     } catch(e) {
       retryErrors = {...retryErrors,[key]:(e as Error).message};
     } finally { dispatches = dispatches.filter(d => d.token !== token); }
   }
-  async function send(id: string, text: string, operationId: string, images: ImageDraft[] = []) {
-    if (detail?.id !== id) return false;
-    addOutgoing(id,text,operationId,undefined,undefined,images.map(i=>i.id));
+  async function send(id: string, text: string, operationId: string, refs: AttachmentRefs) {
     const key=dispatchKey(id,operationId);
     dispatches=[...dispatches,{key,token:operationId,admitting:false}];
-    try { await dispatch(id,text,operationId,images); }
+    try { await dispatch(id,text,operationId,refs); }
     finally { dispatches=dispatches.filter(d=>d.token!==operationId); }
     return true;
   }
@@ -583,20 +553,12 @@
     if(!client || !connected || !hosts.some(h=>id.startsWith(h.id+":") && h.connected)) throw new Error("Connect to manage the queue.");
     return client;
   }
-  async function enqueueFollowUp(id:string, text:string, operationId:string, images:ImageDraft[]) {
+  async function enqueueFollowUp(id:string, text:string, operationId:string, refs: AttachmentRefs) {
     let submitted=false;
     try {
       const connection=queueConnection(id);
-      let refs:import("./contracts").MessageImage[] | undefined;
-      if(images.length){
-        const form=new FormData();form.set("text",JSON.stringify(text));for(const image of images)form.append("images",image.file,image.file.name);
-        const response=await connection.media(id,`/api/images?agent=${encodeURIComponent(id)}&operation=${encodeURIComponent(operationId)}`,{method:"POST",body:form});
-        const upload=await response.json();
-        if(!response.ok || upload.agent!==id || upload.operation!==operationId)throw new Error(upload.error ?? "Image upload failed");
-        refs=upload.images.map((item:unknown)=>imageSchema.parse(item));
-      }
       submitted=true;
-      await connection.call("enqueueFollowUp",{id,text,operationId,...(refs ? {images:refs} : {})});
+      await connection.call("enqueueFollowUp",{id,text,operationId,images:refs.images,files:refs.files});
       return {status:"accepted" as const};
     } catch(e) {
       return {status:(!submitted || e instanceof RequestRejected ? "rejected" : "unknown") as "rejected" | "unknown",error:e instanceof Error ? e.message : m.load_failure()};
@@ -610,23 +572,15 @@
   async function queueAction(id:string,member:"cancelFollowUp" | "resumeFollowUps",operationId?:string) {
     await queueConnection(id).call(member,operationId ? {id,operationId} : {id});
   }
-  async function dispatch(id:string,text:string,operationId:string,images:ImageDraft[],retry?:{of:string;predecessor:RetryEnvelope;claimToken:string}) {
+  async function dispatch(id:string,text:string,operationId:string,refs:AttachmentRefs,retry?:{of:string;predecessor:RetryEnvelope;claimToken:string}) {
     const connection = client;
     let submitted=false;
     try {
       if (!connection || !hosts.find(h=>h.id===id.split(":")[0])?.connected) throw new RequestRejected("Execution host disconnected before submission");
-      let refs=outgoing.entries.find(o=>o.agentId===id && o.id===operationId)?.images;
-      if(images.length && !refs?.length){
-        const form=new FormData();form.set('text',JSON.stringify(text));for(const image of images)form.append('images',image.file,image.file.name);
-        const response=await connection.media(id,`/api/images?agent=${encodeURIComponent(id)}&operation=${encodeURIComponent(operationId)}`,{method:'POST',body:form});
-        const upload=await response.json();
-        if(upload.agent!==id || upload.operation!==operationId)throw new Error(upload.error ?? "Image operation identity changed");
-        refs=upload.images.map((i:unknown)=>imageSchema.parse(i));setOutgoingImages(id,operationId,refs!);
-      }
       if (receiptAlreadyAccepted(id,operationId)) return;
       submitted=true;
       const active=dispatches.find(d=>d.token===operationId);if(active)active.admitting=true;
-      const result=await connection.call<import("./chord-contract").SendResult>('send',{id,text,operationId,...(refs ? {images:refs} : {}),...(retry ? {predecessor:retry.predecessor,claimToken:retry.claimToken} : {})});
+      const result=await connection.call<import("./chord-contract").SendResult>('send',{id,text,operationId,images:refs.images,files:refs.files,...(retry ? {predecessor:retry.predecessor,claimToken:retry.claimToken} : {})});
       observeOutgoing(result);
       if(!result.deliveries.some(d=>d.id===operationId))unknownOutgoing(id,operationId,"");
     }catch(e){
@@ -772,7 +726,7 @@
     if (!selectedId || !hostConnected || !client || !detail) throw new Error("Connect to send your answer.");
     const id = selectedId;
     const text = preparedText ?? outgoing.entries.find(o => o.agentId === id && o.id === operationId)?.text ?? answers.map(answer => `Question: ${detail!.questions.find(q => q.id === answer.questionId)?.text}\nAnswer: ${answer.answer}`).join("\n\n");
-    addOutgoing(id, text, operationId, answers, undefined, undefined, retry);
+    addOutgoing(id, text, operationId, answers, undefined, retry);
     const connection = client;
     return (async () => {
       try {

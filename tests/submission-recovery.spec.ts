@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 import sharp from "sharp";
 const origin = "http://127.0.0.1:14319";
-for (const kind of ["question", "message", "image", "image-remote"] as const) {
+for (const kind of ["question", "message", "image"] as const) {
   test(`${kind}: dropped request is fenced and can be retried with a new identity`, async ({
     page,
     request,
@@ -62,14 +62,14 @@ for (const kind of ["question", "message", "image", "image-remote"] as const) {
       await page.locator(".question-panel textarea").fill("synthetic answer");
       await page.locator(".question-panel textarea").press("Enter");
     } else {
-      if (kind === "image" || kind === "image-remote") {
+      if (kind === "image") {
         const buffer = await sharp({
           create: { width: 32, height: 32, channels: 4, background: "#3377aa" },
         })
           .png()
           .toBuffer();
         await page
-          .getByLabel("Choose message images")
+          .getByLabel("Choose message attachments")
           .setInputFiles({ name: "owned.png", mimeType: "image/png", buffer });
         await expect(page.locator(".image-draft")).toHaveCount(1);
       }
@@ -103,31 +103,10 @@ for (const kind of ["question", "message", "image", "image-remote"] as const) {
     expect(
       info.inputs.filter((x: any) => x.clientId === operation),
     ).toHaveLength(0);
-    if (kind === "image-remote")
-      await page.evaluate(
-        async ({ agent, operation }) => {
-          const name = (await indexedDB.databases()).find((d) =>
-            d.name?.endsWith("/images"),
-          )!.name!;
-          const db = await new Promise<IDBDatabase>((resolve, reject) => {
-            const r = indexedDB.open(name);
-            r.onsuccess = () => resolve(r.result);
-            r.onerror = () => reject(r.error);
-          });
-          await new Promise<void>((resolve, reject) => {
-            const tx = db.transaction("drafts", "readwrite");
-            tx.objectStore("drafts").delete(`operation/${agent}/${operation}`);
-            tx.oncomplete = () => resolve();
-            tx.onerror = () => reject(tx.error);
-          });
-          db.close();
-        },
-        { agent: captured.id, operation },
-      );
     await root.getByRole("button", { name: "Retry", exact: true }).click();
     await expect.poll(() => sends.length, { timeout: 15000 }).toBe(2);
     expect(sends[1].operationId).not.toBe(operation);
-    if (kind === "image" || kind === "image-remote") {
+    if (kind === "image") {
       expect(captured.images).toHaveLength(1);
       expect(sends[1].images).toHaveLength(1);
     }
@@ -182,7 +161,7 @@ test("a lost reservation response leaves the message and image draft intact", as
     .png()
     .toBuffer();
   await page
-    .getByLabel("Choose message images")
+    .getByLabel("Choose message attachments")
     .setInputFiles({ name: "owned.png", mimeType: "image/png", buffer });
   await expect(page.locator(".image-draft")).toHaveCount(1);
   await input.fill("keep this draft");
@@ -197,90 +176,63 @@ test("a lost reservation response leaves the message and image draft intact", as
   expect(rows).toHaveLength(0);
 });
 
-for (const uploaded of [false, true]) {
-  test(`image preparation interrupted ${uploaded ? "after" : "before"} upload converges without sending`, async ({
+for (const prepared of [false, true]) {
+  test(`refresh ${prepared ? "after preparation" : "during upload"} keeps the text without admitting the message`, async ({
     page,
-    context,
     request,
   }) => {
     await request.post(origin + "/fixture/reset", {
       data: { mode: "no-workers" },
     });
-    let intercepted = false,
-      release!: () => void;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
+    const seen = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const endpoint = prepared
+      ? "**/api/attachments/complete?*"
+      : "**/api/attachments/0?*";
+    await page.route(endpoint, async (route) => {
+      if (prepared) await route.fetch();
+      seen.resolve();
+      await release.promise;
+      await route.abort().catch(() => {});
     });
-    await page.route("**/api/images?*", async (route) => {
-      if (route.request().method() === "POST" && !intercepted) {
-        if (uploaded) await route.fetch();
-        intercepted = true;
-        await held;
-        try {
-          await route.abort();
-        } catch {
-          /* closed with the tab */
-        }
-      } else await route.continue();
-    });
+    const sends: string[] = [];
+    page.on("websocket", (socket) =>
+      socket.on("framesent", ({ payload }) => {
+        const frame = JSON.parse(String(payload));
+        if (frame.args?.member === "send")
+          sends.push(frame.args.input.operationId);
+      }),
+    );
     await page.goto(origin);
     await page
       .getByRole("button", { name: "Open Streaming voice input Orc" })
       .click();
+    const composer = page.getByRole("textbox", {
+      name: "Message Orc",
+      exact: true,
+    });
     const buffer = await sharp({
-      create: { width: 32, height: 32, channels: 4, background: "#3377aa" },
+      create: { width: 32, height: 32, channels: 3, background: "#3377aa" },
     })
       .png()
       .toBuffer();
     await page
-      .getByLabel("Choose message images")
+      .getByLabel("Choose message attachments")
       .setInputFiles({ name: "owned.png", mimeType: "image/png", buffer });
     await expect(page.locator(".image-draft")).toHaveCount(1);
-    const input = page.getByRole("textbox", {
-      name: "Message Orc",
-      exact: true,
-    });
-    await input.fill("interrupted image preparation");
-    await input.press("Enter");
-    await expect.poll(() => intercepted).toBe(true);
-    const journal = await page.evaluate(() => {
-      const k = Object.keys(localStorage).find((k) =>
-        k.includes("/outgoing/"),
-      )!;
-      const v = JSON.parse(localStorage.getItem(k)!);
-      v.at = Date.now() - 61000;
-      localStorage.setItem(k, JSON.stringify(v));
-      return v;
-    });
-    await page.close();
-    release();
-    const next = await context.newPage();
-    await next.goto(origin);
-    await next
-      .getByRole("button", { name: "Open Streaming voice input Orc" })
-      .click();
-    await expect(
-      next
-        .locator(".agent-detail")
-        .getByRole("button", { name: "Retry", exact: true }),
-    ).toBeVisible({ timeout: 20000 });
-    const info = await (await request.get(origin + "/fixture/info")).json();
+    await composer.fill("Interrupted image preparation");
+    await composer.press("Enter");
+    await seen.promise;
+    await page.reload();
+    release.resolve();
+    await expect(composer).toHaveValue("Interrupted image preparation");
+    await expect(page.locator(".image-draft")).toHaveCount(0);
+    expect(sends).toEqual([]);
     expect(
-      info.inputs.filter((x: any) => x.clientId === journal.id),
-    ).toHaveLength(0);
-    const stored = await next.evaluate(
-      (id) =>
-        Object.keys(localStorage)
-          .filter((k) => k.includes("/outgoing/"))
-          .map((k) => JSON.parse(localStorage.getItem(k)!))
-          .find((x) => x.id === id),
-      journal.id,
-    );
-    expect(stored.images).toHaveLength(1);
-    expect(stored.status).toBe("failed");
+      (await (await request.get(origin + "/fixture/info")).json()).inputs,
+    ).toEqual([]);
   });
 }
-
 test("simultaneous retries of one rejected message do not send it twice", async ({
   page: first,
   context,

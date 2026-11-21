@@ -1,9 +1,10 @@
 import { readingCache } from "./api";
-import { saveImages, operationKey } from "./image-drafts";
+import type { AttachmentRefs } from "./attachments";
 import { z } from "zod";
 import type { Detail, Answer, Message } from "./contracts";
 import {
   imageSchema,
+  fileSchema,
   answerSchema,
   submissionEnvelopeSchema,
   lookupSchema,
@@ -73,6 +74,7 @@ const entry = z.object({
   status: z.enum(["sending", "sent", "failed", "uncertain"]),
   error: z.string().optional(),
   images: z.array(imageSchema).optional(),
+  files: z.array(fileSchema).max(6).optional(),
   localImageIds: z.array(z.string()).optional(),
   answers: z.array(answerSchema).optional(),
 });
@@ -123,7 +125,7 @@ export function observeRetryLink(
 ) {
   retryLinks[`${agentId}/${operationId}`] = successor;
 }
-function persist(o: Outgoing, required = false) {
+function persist(o: Outgoing) {
   // Each operation owns its record; an unrelated tab cannot erase its journal.
   if (receiptAlreadyAccepted(o.agentId, o.id)) {
     o.status = "accepted";
@@ -147,7 +149,7 @@ function persist(o: Outgoing, required = false) {
   } catch (error) {
     // A new submission must be durable before sending. An existing journal or
     // owner-confirmed receipt can still converge in memory when storage is full.
-    if (!raw || required) throw error;
+    if (!raw) throw error;
   }
 }
 export function addOutgoing(
@@ -155,8 +157,7 @@ export function addOutgoing(
   text: string,
   id: string,
   answers?: Answer[],
-  images?: import("./contracts").MessageImage[],
-  localImageIds?: string[],
+  refs: AttachmentRefs = {},
   retry?: { of: string; predecessor: z.infer<typeof submissionEnvelopeSchema> },
 ) {
   const previous = outgoing.entries.find(
@@ -166,9 +167,10 @@ export function addOutgoing(
     if (
       previous.text !== text ||
       JSON.stringify(previous.answers) !== JSON.stringify(answers) ||
-      JSON.stringify(previous.images ?? []) !== JSON.stringify(images ?? []) ||
-      JSON.stringify(previous.localImageIds ?? []) !==
-        JSON.stringify(localImageIds ?? []) ||
+      JSON.stringify(previous.images ?? []) !==
+        JSON.stringify(refs.images ?? []) ||
+      JSON.stringify(previous.files ?? []) !==
+        JSON.stringify(refs.files ?? []) ||
       previous.retryOf !== retry?.of ||
       JSON.stringify(previous.predecessor) !==
         JSON.stringify(retry?.predecessor)
@@ -191,8 +193,8 @@ export function addOutgoing(
     ...(retry
       ? { retryOf: retry.of, predecessor: structuredClone(retry.predecessor) }
       : {}),
-    images: images ? structuredClone(images) : undefined,
-    localImageIds: localImageIds ? [...localImageIds] : undefined,
+    images: refs.images ? structuredClone(refs.images) : undefined,
+    files: refs.files ? structuredClone(refs.files) : undefined,
     ...(answers ? { answers: structuredClone(answers) } : {}),
   };
   persist(o);
@@ -224,7 +226,14 @@ export function observeRetry(
     outgoing.entries.push({ ...saved, status: submissionResult(saved) });
     return;
   }
-  addOutgoing(agentId, text, id, answers, undefined, undefined, retry);
+  addOutgoing(
+    agentId,
+    text,
+    id,
+    answers,
+    retry.predecessor.source === "user" ? retry.predecessor : {},
+    retry,
+  );
 }
 export function receiptAlreadyAccepted(agentId: string, id: string) {
   const key = `flickgrove/${location.origin}/accepted/${encodeURIComponent(agentId)}/${encodeURIComponent(id)}`;
@@ -259,8 +268,6 @@ export function observeNativeMessages(agentId: string, messages: Message[]) {
       return true;
     rememberAccepted(o.agentId, o.id);
     localStorage.removeItem(key(o));
-    if (o.localImageIds?.length || o.images?.length)
-      void saveImages(operationKey(o.agentId, o.id), []).catch(() => {});
     return false;
   });
 }
@@ -371,6 +378,7 @@ export function withOutgoing(detail: Detail): Detail {
         provisional: true,
         text: o.text,
         images: o.images,
+        files: o.files,
         localImageIds: o.localImageIds,
         role: "user" as const,
         at: o.at,
@@ -383,6 +391,7 @@ export function withOutgoing(detail: Detail): Detail {
         bodyRef: d.recoveryRef ? d.id : undefined,
         delivery: d,
         images: d.images,
+        files: d.files,
         role: "user" as const,
         at: d.at,
       })),
@@ -411,6 +420,7 @@ export function withOutgoing(detail: Detail): Detail {
         attemptId: o.attemptId,
         text: o.text,
         images: o.images,
+        files: o.files,
         status: journalStatus(o.status),
         source: o.answers ? ("question" as const) : ("user" as const),
         questionIds: o.answers?.map((a) => a.questionId) ?? [],
@@ -458,26 +468,6 @@ window.addEventListener("storage", (event) => {
     } catch {}
   }
 });
-
-export function setOutgoingImages(
-  agentId: string,
-  id: string,
-  images: import("./contracts").MessageImage[],
-) {
-  const o = outgoing.entries.find((o) => o.agentId === agentId && o.id === id);
-  if (o) {
-    if (o.images && JSON.stringify(o.images) !== JSON.stringify(images))
-      throw new Error("Operation ID is bound to different images");
-    const previous = o.images;
-    o.images = structuredClone(images);
-    try {
-      persist(o, true);
-    } catch (error) {
-      o.images = previous;
-      throw error;
-    }
-  }
-}
 
 export function deleteRejectedOutgoing(agentId: string, id: string) {
   if (receiptAlreadyAccepted(agentId, id))

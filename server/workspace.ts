@@ -12,12 +12,13 @@ import {
   type HistoryReadBudget,
 } from "./conversation-reading";
 import { ImageStore } from "./images";
+import { AttachmentStore, attachmentManifestSchema } from "./attachments";
 import {
   DirectoryBranches,
   readDirectoryBranch,
   type BranchReader,
 } from "./directory-branches";
-import type { MessageImage } from "../src/contracts";
+import type { MessageImage, MessageFile } from "../src/contracts";
 import { WorkspaceStore } from "./workspace-store";
 import {
   encodeFence,
@@ -343,6 +344,7 @@ export class Workspace {
   }
   private readonly branches: DirectoryBranches;
   readonly images: ImageStore;
+  readonly attachments: AttachmentStore;
   readonly store: WorkspaceStore;
   private readonly messageNavigation = new MessageNavigation();
   private readonly state: State;
@@ -569,6 +571,36 @@ export class Workspace {
   private readonly failedChildCloses = new Set<string>();
   private disposed = false;
   private writeFailure: unknown;
+  private attachmentReferenced(stage: import("./attachments").AttachmentStage) {
+    if (!stage.files || !stage.images) return false;
+    const delivery = this.store.attachmentDelivery(
+      stage.agent,
+      stage.operation,
+    );
+    if (
+      delivery &&
+      delivery.status !== "cancelled" &&
+      submissionOwner(delivery.authorUserId ?? undefined) === stage.owner &&
+      JSON.stringify(delivery.files ?? []) === JSON.stringify(stage.files) &&
+      JSON.stringify(delivery.images ?? []) === JSON.stringify(stage.images)
+    )
+      return true;
+    if (stage.manifest.mode !== "direct") return false;
+    const raw = this.store.submissionFence(stage.agent, stage.operation);
+    if (!raw) return false;
+    const fence = parseFence(raw);
+    return (
+      fence.state !== "reserved" &&
+      fence.owner === stage.owner &&
+      fence.hash ===
+        envelopeHash({
+          source: "user",
+          text: stage.manifest.text,
+          images: stage.images,
+          files: stage.files,
+        })
+    );
+  }
   constructor(
     private readonly options: {
       directory: string;
@@ -592,10 +624,51 @@ export class Workspace {
   ) {
     mkdirSync(options.directory, { recursive: true, mode: 0o700 });
     chmodSync(options.directory, 0o700);
-    this.images = new ImageStore(join(options.directory, "media"));
     this.store = new WorkspaceStore(
       join(options.directory, "workspace.sqlite"),
     );
+    this.images = new ImageStore(
+      join(options.directory, "media"),
+      (upload) => {
+        if (upload.scoped) {
+          if (!this.attachments.has(upload.agent, upload.operation))
+            return false;
+          return this.attachmentReferenced(
+            this.attachments.get(upload.agent, upload.operation),
+          );
+        }
+        const delivery = this.store.attachmentDelivery(
+          upload.agent,
+          upload.operation,
+        );
+        if (!upload.images.length) return false;
+        if (
+          delivery &&
+          JSON.stringify(delivery.images ?? []) ===
+            JSON.stringify(upload.images)
+        )
+          return true;
+        const raw = this.store.submissionFence(upload.agent, upload.operation);
+        if (!raw) return false;
+        const fence = parseFence(raw);
+        return (
+          fence.state !== "reserved" &&
+          fence.hash ===
+            envelopeHash({
+              source: "user",
+              text: upload.text,
+              images: upload.images,
+            })
+        );
+      },
+      false,
+    );
+    this.attachments = new AttachmentStore(
+      join(options.directory, "attachments"),
+      this.images,
+      (stage) => this.attachmentReferenced(stage),
+    );
+    this.images.cleanup();
     this.state = {
       agents: this.store.openAgents().map((a) => this.store.track(a)),
       revision: 0,
@@ -1022,9 +1095,10 @@ export class Workspace {
           clientId: item.clientId,
           turnId: event.turnId,
           role: "user",
-          text: item.text ?? "",
+          text: d?.files?.length ? d.text : (item.text ?? ""),
           at: d?.at ?? Date.now(),
           ...(d?.images?.length ? { images: d.images } : {}),
+          ...(d?.files?.length ? { files: d.files } : {}),
         };
         if (matched >= 0) a.messages.splice(matched, 1, message);
         else {
@@ -1487,7 +1561,12 @@ export class Workspace {
           const envelope: SubmissionEnvelope =
             d.source === "question"
               ? { source: "question", answers: d.answers! }
-              : { source: "user", text: d.text, images: d.images };
+              : {
+                  source: "user",
+                  text: d.text,
+                  images: d.images,
+                  files: d.files,
+                };
           if (fence.hash === envelopeHash(envelope))
             result.set(d.id, fence.successor);
         } catch {
@@ -2656,6 +2735,7 @@ export class Workspace {
     authorUserId?: string,
     claim?: string,
     claimNew = false,
+    files?: MessageFile[],
   ) {
     if (this.writeFailure) {
       if (claimNew && !a.deliveries.some((d) => d.id === requestId))
@@ -2687,7 +2767,12 @@ export class Workspace {
       }
       return this.detail(a.id);
     }
-    if (!text.trim() && !images?.length)
+    if (
+      !text.trim() &&
+      !images?.length &&
+      !files?.length &&
+      !a.deliveries.find((d) => d.id === requestId)?.files?.length
+    )
       throw new Error("Write a message first");
     if (text.length > 100_000) throw new Error("Message is too long");
     let d = a.deliveries.find((d) => d.id === requestId);
@@ -2719,6 +2804,7 @@ export class Workspace {
         questionIds,
         ...(answers ? { answers: structuredClone(answers) } : {}),
         ...(images?.length ? { images: structuredClone(images) } : {}),
+        ...(files?.length ? { files: structuredClone(files) } : {}),
         at: Date.now(),
       };
       a.deliveries.push(d);
@@ -2749,10 +2835,37 @@ export class Workspace {
     let sendStarted = false;
     try {
       let paths: string[] = [];
+      let filePaths: string[] = [];
       try {
+        const fence = this.store.submissionFence(a.id, requestId);
+        const stage = this.preparedAttachments(
+          a,
+          requestId,
+          text,
+          d.images,
+          d.files,
+          d.authorUserId,
+          d.mode === "follow_up" ? "follow_up" : "direct",
+          !!(fence && parseFence(fence).retryOf),
+        );
+        if (stage) await this.attachments.verifyFiles(stage);
+        const imageOperation =
+          stage?.operation ??
+          (d.images?.length && fence && parseFence(fence).retryOf
+            ? this.legacyRetryImageOperation(
+                a,
+                requestId,
+                text,
+                d.images,
+                d.authorUserId,
+              )
+            : requestId);
         paths = d.images?.length
-          ? this.images.commit(a.id, requestId, text, d.images)
+          ? this.images.commit(a.id, imageOperation, text, d.images, !stage)
           : [];
+        filePaths =
+          d.files?.map((file) => this.attachments.filePath(stage!, file.id)) ??
+          [];
       } catch (error) {
         throw new DeliveryRejected((error as Error).message);
       }
@@ -2768,6 +2881,18 @@ export class Workspace {
       }
       if (this.shuttingDown && localCodex(a))
         throw new DeliveryRejected("Instance is shutting down");
+      if (
+        this.disposed ||
+        this.writeFailure ||
+        a.closed ||
+        a.closeRequest ||
+        (a.state as string) === "stopping"
+      )
+        throw new DeliveryRejected("Conversation changed before admission");
+      if (d.files?.length && environmentId(a.project) !== "local")
+        throw new DeliveryRejected(
+          "Files are available only for local sessions",
+        );
       if (
         startOnly &&
         (a.state !== "idle" ||
@@ -2794,6 +2919,7 @@ export class Workspace {
         questionIds: d.questionIds,
         answers: d.answers,
         images: d.images,
+        files: d.files,
         reportingWorkerId: d.reportingWorkerId,
         reportingReviewerId: d.reportingReviewerId,
         reportingResearcherId: d.reportingResearcherId,
@@ -2810,6 +2936,9 @@ export class Workspace {
         !Number.isNaN(new Date(d.at).getTime())
           ? `Human message metadata (data): ${JSON.stringify({ name: author.name, submittedAt: new Date(d.at).toISOString() }).replace(/[<>&\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`)}`
           : undefined;
+      const nativeText = filePaths.length
+        ? `${text}\n\nAttached files (local paths):\n${JSON.stringify(d.files!.map((file, index) => ({ name: file.name, path: filePaths[index] })))}`
+        : text;
       const send = (observed?: string) => {
         if (localCodex(a)) {
           // A steer can only enter its expected turn. Persist that bound before
@@ -2821,7 +2950,7 @@ export class Workspace {
         }
         return a.backend === "pi"
           ? handle.send(
-              text,
+              nativeText,
               observed,
               paths,
               requestId,
@@ -2830,7 +2959,7 @@ export class Workspace {
               humanContext,
             )
           : handle.send(
-              text,
+              nativeText,
               observed,
               paths,
               requestId,
@@ -2881,6 +3010,7 @@ export class Workspace {
           turnId,
           at: d.at,
           ...(d.images?.length ? { images: d.images } : {}),
+          ...(d.files?.length ? { files: d.files } : {}),
         });
       d.status = "sent";
       d.steerEvidence = undefined;
@@ -3118,7 +3248,12 @@ export class Workspace {
       const actual: SubmissionEnvelope =
         delivery.source === "question"
           ? { source: "question", answers: delivery.answers! }
-          : { source: "user", text: delivery.text, images: delivery.images };
+          : {
+              source: "user",
+              text: delivery.text,
+              images: delivery.images,
+              files: delivery.files,
+            };
       if (envelopeHash(actual) !== envelopeHash(envelope)) return null;
     }
     const successor = this.store.inspectRetryEdge(
@@ -3206,7 +3341,12 @@ export class Workspace {
         const original: SubmissionEnvelope =
           delivery.source === "question"
             ? { source: "question", answers: delivery.answers! }
-            : { source: "user", text: delivery.text, images: delivery.images };
+            : {
+                source: "user",
+                text: delivery.text,
+                images: delivery.images,
+                files: delivery.files,
+              };
         const actual = envelopeHash(original);
         if (hash && hash !== actual)
           throw new Error("Original submission envelope conflict");
@@ -3303,6 +3443,12 @@ export class Workspace {
         "Retry reservation does not match its original submission",
       );
     const delivery = a.deliveries.find((d) => d.id === fence.retryOf);
+    if (
+      delivery?.source === "user" &&
+      predecessor.source === "user" &&
+      delivery.text !== predecessor.text
+    )
+      throw new Error("Retry content differs from the original submission");
     if (!forFinalization && delivery && delivery.status !== "failed")
       throw new Error("Original submission outcome changed");
     if (predecessor.source !== current.source)
@@ -3312,24 +3458,17 @@ export class Workspace {
         throw new Error("Retry answers differ from the original submission");
     } else if (predecessor.source === "user" && current.source === "user") {
       if (
-        predecessor.text.trim() !== current.text.trim() ||
-        (predecessor.images?.length ?? 0) !== (current.images?.length ?? 0)
+        predecessor.text !== current.text ||
+        (predecessor.images?.length ?? 0) !== (current.images?.length ?? 0) ||
+        JSON.stringify(predecessor.files ?? []) !==
+          JSON.stringify(current.files ?? [])
       )
         throw new Error("Retry content differs from the original submission");
       if (
-        predecessor.images?.length &&
-        !(
-          forFinalization &&
-          JSON.stringify(predecessor.images) === JSON.stringify(current.images)
-        )
+        JSON.stringify(predecessor.images ?? []) !==
+        JSON.stringify(current.images ?? [])
       )
-        this.images.validateRetry(
-          a.id,
-          operationId,
-          current.text,
-          predecessor.images,
-          current.images!,
-        );
+        throw new Error("Retry content differs from the original submission");
     }
     if (forFinalization) return;
     await this.checkRetryAncestors(a, fence.retryOf, fence.owner);
@@ -3346,28 +3485,286 @@ export class Workspace {
       throw new Error("Original submission outcome changed");
   }
 
-  uploadSubmissionImages(
-    id: string,
+  private legacyRetryImageOperation(
+    a: RuntimeAgent,
     operationId: string,
     text: string,
-    files: File[],
+    images: MessageImage[],
     authorUserId?: string,
   ) {
+    const owner = submissionOwner(authorUserId);
+    const expected = envelopeHash({ source: "user", text, images });
+    const visited = new Set<string>();
+    let current = operationId;
+    while (!visited.has(current)) {
+      visited.add(current);
+      const raw = this.store.submissionFence(a.id, current);
+      const child = raw ? parseFence(raw) : undefined;
+      if (!child?.retryOf || child.owner !== owner) break;
+      const parentRaw = this.store.submissionFence(a.id, child.retryOf);
+      const parent = parentRaw ? parseFence(parentRaw) : undefined;
+      if (
+        !parent ||
+        parent.owner !== owner ||
+        parent.state !== "superseded" ||
+        parent.successor !== current ||
+        parent.hash !== expected
+      )
+        throw new Error("Invalid retry reservation chain");
+      const upload = this.images.uploadFor(a.id, images[0].id);
+      if (upload && upload.operation === child.retryOf && !upload.scoped) {
+        this.images.validate(a.id, child.retryOf, text, images);
+        for (const image of images)
+          if (!this.images.read(a.id, image.id, false))
+            throw new Error("Original image is unavailable");
+        return child.retryOf;
+      }
+      current = child.retryOf;
+    }
+    throw new Error("Original image evidence is unavailable for this retry");
+  }
+
+  private preparedAttachments(
+    a: RuntimeAgent,
+    operationId: string,
+    text: string,
+    images: MessageImage[] | undefined,
+    files: MessageFile[] | undefined,
+    authorUserId: string | undefined,
+    mode: "direct" | "follow_up",
+    retry = false,
+  ) {
+    if (files?.length && environmentId(a.project) !== "local")
+      throw new Error("Files are available only for local sessions");
+    if (
+      files?.length ||
+      this.attachments.has(a.id, operationId) ||
+      (retry && images?.length)
+    ) {
+      try {
+        return this.attachments.validate(
+          a.id,
+          operationId,
+          submissionOwner(authorUserId),
+          text,
+          mode,
+          images ?? [],
+          files ?? [],
+          retry,
+        );
+      } catch (error) {
+        if (!retry || files?.length || this.attachments.has(a.id, operationId))
+          throw error;
+        if (images?.length)
+          this.legacyRetryImageOperation(
+            a,
+            operationId,
+            text,
+            images,
+            authorUserId,
+          );
+        return undefined;
+      }
+    }
+    if (images?.length) this.images.validate(a.id, operationId, text, images);
+    return undefined;
+  }
+  checkAttachmentOperation(
+    id: string,
+    operationId: string,
+    manifest: import("./attachments").AttachmentManifest,
+    authorUserId?: string,
+  ) {
+    this.sessionAdmissionGuard(id);
+    if (this.writeFailure) throw this.writeFailure;
+    if (this.disposed || this.shuttingDown)
+      throw new Error("Workspace is stopped");
+    const a = this.agent(id);
+    if (a.role !== "orc" || a.closeRequest || a.state === "stopping")
+      throw new Error("Choose an open Orc conversation");
+    if (
+      manifest.attachments.some((item) => item.kind === "file") &&
+      environmentId(a.project) !== "local"
+    )
+      throw new Error("Files are available only for local sessions");
+    const raw = this.store.submissionFence(id, operationId);
+    if (manifest.mode === "direct") {
+      if (!raw) throw new Error("Submission reservation required");
+      const fence = parseFence(raw);
+      if (fence.owner !== submissionOwner(authorUserId))
+        throw new Error("Submission belongs to another user");
+      if (fence.state !== "reserved" || fence.retryOf)
+        throw new Error("Submission is no longer open for attachments");
+    } else if (raw || a.deliveries.some((d) => d.id === operationId)) {
+      throw new Error("Follow-up operation already exists");
+    }
+  }
+  beginAttachments(
+    id: string,
+    operationId: string,
+    input: unknown,
+    authorUserId?: string,
+  ) {
+    const manifest = attachmentManifestSchema.parse(input);
+    this.checkAttachmentOperation(id, operationId, manifest, authorUserId);
+    this.attachments.begin(
+      id,
+      operationId,
+      submissionOwner(authorUserId),
+      manifest,
+    );
+  }
+  discardAttachments(id: string, operationId: string, authorUserId?: string) {
     return this.serialize(id, async () => {
       if (this.writeFailure) throw this.writeFailure;
+      if (this.disposed || this.shuttingDown)
+        throw new Error("Workspace is stopped");
       const a = this.agent(id);
-      if (a.role !== "orc" || a.closed)
-        throw new Error("Choose an open Orc conversation");
+      const owner = submissionOwner(authorUserId);
       const raw = this.store.submissionFence(id, operationId);
+      const stage =
+        this.attachments.has(id, operationId) &&
+        !this.attachments.wasDiscarded(id, operationId)
+          ? this.attachments.authorize(id, operationId, owner)
+          : undefined;
+      const delivery =
+        a.deliveries.some((d) => d.id === operationId) ||
+        this.store.attachmentDelivery(id, operationId);
+      if (
+        delivery ||
+        a.messages.some(
+          (m) =>
+            m.role === "user" &&
+            (m.id === operationId || m.clientId === operationId),
+        )
+      )
+        throw new Error("Attachment operation is already admitted");
       if (raw) {
         const fence = parseFence(raw);
-        if (fence.owner !== submissionOwner(authorUserId))
+        if (fence.owner !== owner)
           throw new Error("Submission belongs to another user");
-        if (fence.state !== "reserved")
-          throw new Error("Submission is no longer open for images");
+        if (
+          fence.state !== "reserved" ||
+          fence.retryOf ||
+          (stage && stage.manifest.mode !== "direct")
+        )
+          throw new Error("Submission is no longer open for attachments");
+      } else if (
+        stage?.manifest.mode !== "follow_up" &&
+        !this.attachments.wasDiscarded(id, operationId, owner)
+      ) {
+        throw new Error("Attachment operation cannot be discarded");
       }
-      return this.images.upload(id, operationId, text, files);
+      this.attachments.discard(id, operationId, owner, !!raw);
     });
+  }
+  async putAttachment(
+    id: string,
+    operationId: string,
+    index: number,
+    body: ReadableStream<Uint8Array> | null,
+    authorUserId?: string,
+  ) {
+    const owner = submissionOwner(authorUserId);
+    const stage = this.attachments.authorize(id, operationId, owner);
+    this.checkAttachmentOperation(
+      id,
+      operationId,
+      stage.manifest,
+      authorUserId,
+    );
+    await this.attachments.put(id, operationId, owner, index, body);
+  }
+  async completeAttachments(
+    id: string,
+    operationId: string,
+    authorUserId?: string,
+  ) {
+    const owner = submissionOwner(authorUserId);
+    const stage = this.attachments.authorize(id, operationId, owner);
+    this.checkAttachmentOperation(
+      id,
+      operationId,
+      stage.manifest,
+      authorUserId,
+    );
+    const result = await this.attachments.complete(id, operationId, owner);
+    if (this.attachments.wasDiscarded(id, operationId))
+      throw new Error("Attachment preparation was discarded");
+    this.checkAttachmentOperation(
+      id,
+      operationId,
+      stage.manifest,
+      authorUserId,
+    );
+    return result;
+  }
+  async downloadAttachment(id: string, fileId: string) {
+    const a = this.readableAgent(
+      this.state.agents.find((agent) => agent.id === id) ?? this.store.byId(id),
+    );
+    if (!a || a.role !== "orc") throw new Error("Conversation not found");
+    const delivery = a.deliveries.find(
+      (d) =>
+        d.source === "user" &&
+        (d.status === "sent" ||
+          (d.mode === "follow_up" && d.status === "waiting")) &&
+        d.files?.some((file) => file.id === fileId),
+    );
+    if (!delivery) throw new Error("Attachment unavailable");
+    const file = delivery.files!.find((item) => item.id === fileId)!;
+    const stage = this.attachments.validate(
+      a.id,
+      delivery.id,
+      submissionOwner(delivery.authorUserId),
+      delivery.text,
+      delivery.mode === "follow_up" ? "follow_up" : "direct",
+      delivery.images ?? [],
+      delivery.files!,
+      true,
+    );
+    await this.attachments.verifyFiles(stage, fileId);
+    const current = this.readableAgent(
+      this.state.agents.find((agent) => agent.id === id) ?? this.store.byId(id),
+    );
+    if (
+      !current?.deliveries.some(
+        (d) =>
+          d.id === delivery.id &&
+          d.source === "user" &&
+          (d.status === "sent" ||
+            (d.mode === "follow_up" && d.status === "waiting")) &&
+          submissionOwner(d.authorUserId) === stage.owner &&
+          JSON.stringify(d.files ?? []) === JSON.stringify(stage.files),
+      )
+    )
+      throw new Error("Attachment unavailable");
+    return { file, path: this.attachments.filePath(stage, fileId) };
+  }
+  media(id: string, imageId: string, preview: boolean) {
+    const a = this.agent(id);
+    const upload = this.images.uploadFor(id, imageId);
+    if (upload?.scoped) {
+      const delivery = a.deliveries.find(
+        (d) =>
+          d.source === "user" &&
+          (d.status === "sent" ||
+            (d.mode === "follow_up" && d.status === "waiting")) &&
+          JSON.stringify(d.images ?? []) === JSON.stringify(upload.images),
+      );
+      if (!delivery) throw new Error("Image unavailable");
+      this.attachments.validate(
+        id,
+        delivery.id,
+        submissionOwner(delivery.authorUserId),
+        delivery.text,
+        delivery.mode === "follow_up" ? "follow_up" : "direct",
+        delivery.images ?? [],
+        delivery.files ?? [],
+        true,
+      );
+    }
+    return this.images.read(id, imageId, preview);
   }
 
   finalizeSubmission(
@@ -3394,7 +3791,11 @@ export class Workspace {
           )
         )
           throw new Error("Every submitted question must belong to this Orc");
-      } else if (!envelope.text.trim() && !envelope.images?.length) {
+      } else if (
+        !envelope.text.trim() &&
+        !envelope.images?.length &&
+        !envelope.files?.length
+      ) {
         throw new Error("Write a message first");
       }
       const fence = this.submissionFence(
@@ -3456,14 +3857,33 @@ export class Workspace {
       );
       if (
         envelope.source === "user" &&
-        envelope.images?.length &&
-        !(
-          fence.retryOf &&
-          predecessor?.source === "user" &&
-          JSON.stringify(predecessor.images) === JSON.stringify(envelope.images)
+        (envelope.images?.length ||
+          envelope.files?.length ||
+          this.attachments.has(id, operationId))
+      ) {
+        const stage = this.preparedAttachments(
+          a,
+          operationId,
+          envelope.text,
+          envelope.images,
+          envelope.files,
+          authorUserId,
+          "direct",
+          !!fence.retryOf,
+        );
+        if (stage) await this.attachments.verifyFiles(stage);
+        if (this.disposed || this.writeFailure || this.agent(id) !== a)
+          throw new Error("Conversation changed before finalization");
+        if (
+          a.deliveries.some((d) => d.id === operationId) ||
+          a.messages.some(
+            (m) =>
+              m.role === "user" &&
+              (m.id === operationId || m.clientId === operationId),
+          )
         )
-      )
-        this.images.validate(id, operationId, envelope.text, envelope.images);
+          return this.lookup(id, operationId);
+      }
       try {
         const updated = this.store.closeSubmissionReservation(
           id,
@@ -3635,6 +4055,7 @@ export class Workspace {
         source: "user",
         text: d.text,
         images: d.images,
+        files: d.files,
       });
       if (
         (fence?.hash && fence.hash !== hash) ||
@@ -3672,6 +4093,7 @@ export class Workspace {
     images?: MessageImage[],
     authorUserId?: string,
     singleCall = false,
+    files?: MessageFile[],
   ) {
     this.automaticFollowUps.delete(id);
     return this.serialize(id, async () => {
@@ -3686,11 +4108,13 @@ export class Workspace {
       }
       this.automaticFollowUps.delete(id);
       const a = this.agent(id, true);
+      if (this.attachments.wasDiscarded(id, requestId))
+        throw new Error("Attachment preparation was discarded");
       if (this.store.submissionFence(id, requestId))
         throw new Error("Operation belongs to a direct submission");
       if (a.role !== "orc" || a.closed || a.closeRequest)
         throw new Error("Choose an open Orc conversation");
-      if (!text.trim() && !images?.length)
+      if (!text.trim() && !images?.length && !files?.length)
         throw new Error("Write a message first");
       if (text.length > 100_000) throw new Error("Message is too long");
       const previous = a.deliveries.find((d) => d.id === requestId);
@@ -3700,7 +4124,9 @@ export class Workspace {
         if (
           previous.mode !== "follow_up" ||
           previous.text !== text ||
-          JSON.stringify(previous.images ?? []) !== JSON.stringify(images ?? [])
+          JSON.stringify(previous.images ?? []) !==
+            JSON.stringify(images ?? []) ||
+          JSON.stringify(previous.files ?? []) !== JSON.stringify(files ?? [])
         )
           throw new Error("Operation ID is bound to different content");
         if (previous.status === "cancelled" && previous.error) {
@@ -3712,6 +4138,30 @@ export class Workspace {
           throw new FollowUpRejected(rejection);
         }
         return this.detail(id);
+      }
+      const prepared =
+        images?.length || files?.length || this.attachments.has(a.id, requestId)
+          ? this.preparedAttachments(
+              a,
+              requestId,
+              text,
+              images,
+              files,
+              authorUserId,
+              "follow_up",
+            )
+          : undefined;
+      if (prepared) {
+        await this.attachments.verifyFiles(prepared);
+        this.sessionAdmissionGuard(id);
+        if (
+          this.disposed ||
+          this.writeFailure ||
+          this.agent(id) !== a ||
+          a.closeRequest ||
+          a.closed
+        )
+          throw new Error("Conversation changed before follow-up admission");
       }
       const rejection: FollowUpRejection | undefined =
         a.state === "stopping"
@@ -3743,6 +4193,7 @@ export class Workspace {
           status: "cancelled",
           text,
           images: images?.length ? structuredClone(images) : undefined,
+          files: files?.length ? structuredClone(files) : undefined,
           at: Date.now(),
           questionIds: [],
           error: rejection,
@@ -3759,7 +4210,28 @@ export class Workspace {
           throw new Error("Submission outcome changed");
         throw new FollowUpRejected(followUpRejections[rejection]);
       }
-      if (images?.length) this.images.commit(a.id, requestId, text, images);
+      if (
+        images?.length ||
+        files?.length ||
+        this.attachments.has(a.id, requestId)
+      )
+        this.preparedAttachments(
+          a,
+          requestId,
+          text,
+          images,
+          files,
+          authorUserId,
+          "follow_up",
+        );
+      if (images?.length)
+        this.images.commit(
+          a.id,
+          prepared?.operation ?? requestId,
+          text,
+          images,
+          !prepared,
+        );
       if (
         !a.deliveries.some(pendingFollowUp) &&
         !followUpInspectionCandidate(a)
@@ -3774,6 +4246,7 @@ export class Workspace {
         status: "waiting",
         text,
         images: images?.length ? structuredClone(images) : undefined,
+        files: files?.length ? structuredClone(files) : undefined,
         at: Date.now(),
         questionIds: [],
       });
@@ -3884,6 +4357,7 @@ export class Workspace {
           turnId: native.turnId,
           at: d.at,
           ...(d.images?.length ? { images: d.images } : {}),
+          ...(d.files?.length ? { files: d.files } : {}),
         });
       if (!native.settled || !native.turnId) {
         this.save();
@@ -4150,17 +4624,20 @@ export class Workspace {
     predecessor?: SubmissionEnvelope,
     claimToken?: string,
     singleCall = false,
+    files?: MessageFile[],
   ): Promise<import("../src/chord-contract").SendResult> {
     this.automaticFollowUps.delete(id);
     return this.serialize(id, async () => {
       try {
         this.automaticFollowUps.delete(id);
         const a = this.agent(id, true);
+        if (this.attachments.wasDiscarded(id, requestId))
+          throw new Error("Attachment preparation was discarded");
         if (a.role !== "orc") throw new Error("Send instructions through Orc");
         const fence = this.submissionFence(
           id,
           requestId,
-          { source: "user", text, images },
+          { source: "user", text, images, files },
           authorUserId,
         );
         if (requireReservation && !fence)
@@ -4184,7 +4661,8 @@ export class Workspace {
             previous.text !== text ||
             previous.source !== "user" ||
             JSON.stringify(previous.images ?? []) !==
-              JSON.stringify(images ?? [])
+              JSON.stringify(images ?? []) ||
+            JSON.stringify(previous.files ?? []) !== JSON.stringify(files ?? [])
           )
             throw new Error("Operation ID is bound to different content");
           return this.detail(id);
@@ -4194,11 +4672,25 @@ export class Workspace {
           requestId,
           fence,
           predecessor,
-          { source: "user", text, images },
+          { source: "user", text, images, files },
           authorUserId,
           claimToken,
         );
-        if (images?.length) this.images.validate(a.id, requestId, text, images);
+        if (
+          images?.length ||
+          files?.length ||
+          this.attachments.has(a.id, requestId)
+        )
+          this.preparedAttachments(
+            a,
+            requestId,
+            text,
+            images,
+            files,
+            authorUserId,
+            "direct",
+            !!fence?.retryOf,
+          );
         if (a.state === "stopping") {
           a.deliveries.push({
             id: requestId,
@@ -4209,6 +4701,7 @@ export class Workspace {
             status: "failed",
             questionIds: [],
             images,
+            files,
             at: Date.now(),
             error: "Wait for the observed turn outcome before sending",
           });
@@ -4220,7 +4713,8 @@ export class Workspace {
                 state: "claimed",
                 owner: fence?.owner ?? submissionOwner(authorUserId),
                 hash:
-                  fence?.hash ?? envelopeHash({ source: "user", text, images }),
+                  fence?.hash ??
+                  envelopeHash({ source: "user", text, images, files }),
                 retryOf: fence?.retryOf,
                 tokenHash: fence?.tokenHash,
               }),
@@ -4253,10 +4747,11 @@ export class Workspace {
               ? encodeFence({
                   state: "claimed",
                   owner: submissionOwner(authorUserId),
-                  hash: envelopeHash({ source: "user", text, images }),
+                  hash: envelopeHash({ source: "user", text, images, files }),
                 })
               : undefined,
           singleCall,
+          files,
         );
       } catch (error) {
         if (singleCall) throw new RequestRefused("Message was not admitted");

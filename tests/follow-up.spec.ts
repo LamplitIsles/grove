@@ -164,7 +164,7 @@ test("a rejected queue request clears its pending state after switching back", a
     page.locator(".session-open").filter({ hasText: title }).first();
   await session("Streaming voice input").click();
   const input = page.getByRole("textbox", { name: "Message Orc", exact: true });
-  await page.getByLabel("Choose message images").setInputFiles({
+  await page.getByLabel("Choose message attachments").setInputFiles({
     name: "draft.png",
     mimeType: "image/png",
     buffer: await sharp({
@@ -206,7 +206,7 @@ test("a rejected queue request clears its pending state after switching back", a
   ).toBeEnabled();
   await page.reload();
   await expect(input).toHaveValue("Retain rejected draft");
-  await expect(page.locator(".image-draft")).toHaveCount(1);
+  await expect(page.locator(".image-draft")).toHaveCount(0);
   const failed = page
     .getByRole("region", { name: "Queued messages" })
     .locator(".follow-up-item")
@@ -230,9 +230,9 @@ test("switching sessions before queue acknowledgement preserves original identit
     .click();
   const input = page.getByRole("textbox", { name: "Message Orc", exact: true });
   await expect(
-    page.getByRole("button", { name: "Add images", exact: true }),
+    page.getByRole("button", { name: "Add attachments", exact: true }),
   ).toBeEnabled();
-  await page.getByLabel("Choose message images").setInputFiles({
+  await page.getByLabel("Choose message attachments").setInputFiles({
     name: "draft.png",
     mimeType: "image/png",
     buffer: await sharp({
@@ -310,7 +310,7 @@ test("image follow-up is recovered after switching sessions", async ({
   const session = (name: string) =>
     page.locator(".session-open").filter({ hasText: name }).first();
   await session("Streaming voice input").click();
-  await page.getByLabel("Choose message images").setInputFiles({
+  await page.getByLabel("Choose message attachments").setInputFiles({
     name: "draft.png",
     mimeType: "image/png",
     buffer: await sharp({
@@ -336,151 +336,6 @@ test("image follow-up is recovered after switching sessions", async ({
   await expect(input).toHaveValue("");
   await expect(page.locator(".image-draft")).toHaveCount(0);
 });
-
-for (const interruption of ["edit", "switch", "reload"] as const) {
-  test(`image draft survives ${interruption} while queue cleanup is pending`, async ({
-    page,
-    request,
-  }) => {
-    await request.post("/fixture/reset", { data: { mode: "working" } });
-    const gate = await holdQueueResponse(page);
-    await gate.pauseLookups();
-    await page.goto("/");
-    const session = (name: string) =>
-      page.locator(".session-open").filter({ hasText: name }).first();
-    await session("Streaming voice input").click();
-    await expect(
-      page.getByRole("button", { name: "Add images" }),
-    ).toBeEnabled();
-    await page.getByLabel("Choose message images").setInputFiles({
-      name: "draft.png",
-      mimeType: "image/png",
-      buffer: await sharp({
-        create: { width: 10, height: 10, channels: 3, background: "#6488a5" },
-      })
-        .png()
-        .toBuffer(),
-    });
-    await expect(page.locator(".image-draft")).toHaveCount(1);
-    const input = page.getByRole("textbox", {
-      name: "Message Orc",
-      exact: true,
-    });
-    await input.fill("Pending with attachment");
-    await input.press("Tab");
-    await expect.poll(gate.held).toBe(true);
-    await session("Reader performance").click();
-    await gate.release();
-    await session("Streaming voice input").click();
-    await expect(
-      page.getByRole("region", { name: "Queued messages" }),
-    ).toContainText("Pending with attachment");
-    await page.evaluate(() => {
-      const state = window as typeof window & {
-        holdCompletion?: boolean;
-        heldCompletion?: () => void;
-      };
-      const descriptor = Object.getOwnPropertyDescriptor(
-        IDBTransaction.prototype,
-        "oncomplete",
-      )!;
-      Object.defineProperty(IDBTransaction.prototype, "oncomplete", {
-        configurable: true,
-        get: descriptor.get,
-        set(this: IDBTransaction, callback: (event: Event) => void) {
-          descriptor.set!.call(this, (event: Event) => {
-            if (state.holdCompletion) {
-              state.holdCompletion = false;
-              state.heldCompletion = () => callback.call(this, event);
-            } else callback.call(this, event);
-          });
-        },
-      });
-      state.holdCompletion = true;
-    });
-    await gate.releaseLookups();
-    await expect
-      .poll(() =>
-        page.evaluate(
-          () =>
-            !!(window as typeof window & { heldCompletion?: () => void })
-              .heldCompletion,
-        ),
-      )
-      .toBe(true);
-    if (interruption === "reload") {
-      await gate.pauseLookups();
-      await page.reload();
-      await expect(page.locator(".image-draft")).toHaveCount(1);
-      await expect(input).toHaveValue("Pending with attachment");
-      await expect(
-        page.getByRole("region", { name: "Queued messages" }),
-      ).toContainText("Pending with attachment");
-      await page.getByRole("button", { name: "Remove image 1" }).click();
-      await expect(page.locator(".image-draft")).toHaveCount(0);
-      await page.reload();
-      await expect(
-        page.getByRole("button", { name: "Add images" }),
-      ).toBeEnabled();
-      await expect(page.locator(".image-draft")).toHaveCount(0);
-      await expect(input).toHaveValue("Pending with attachment");
-      await expect(
-        page.getByRole("region", { name: "Queued messages" }),
-      ).toContainText("Pending with attachment");
-      return;
-    }
-    if (interruption === "edit") await input.fill("Edited with attachment");
-    else await session("Reader performance").click();
-    await page.evaluate(() =>
-      (
-        window as typeof window & { heldCompletion: () => void }
-      ).heldCompletion(),
-    );
-    const info = await (await request.get("/fixture/info")).json();
-    await expect
-      .poll(() =>
-        page.evaluate(async () => {
-          const opened = indexedDB.open(
-            `flickgrove/${location.origin}/images`,
-            1,
-          );
-          const db = await new Promise<IDBDatabase>((resolve, reject) => {
-            opened.onsuccess = () => resolve(opened.result);
-            opened.onerror = () => reject(opened.error);
-          });
-          const request = db
-            .transaction("drafts")
-            .objectStore("drafts")
-            .getAll();
-          const records = await new Promise<
-            { key: string; images: unknown[] }[]
-          >((resolve, reject) => {
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error);
-          });
-          db.close();
-          return records
-            .filter((record) => record.key.startsWith("draft/"))
-            .map((record) => [record.key, record.images.length]);
-        }),
-      )
-      .toEqual([[`draft/${info.hub}:orc`, 1]]);
-    if (interruption === "switch")
-      await session("Streaming voice input").click();
-    await expect(page.locator(".image-draft")).toHaveCount(1);
-    await page.reload();
-    await expect(page.locator(".image-draft")).toHaveCount(1);
-    await expect(input).toHaveValue(
-      interruption === "edit"
-        ? "Edited with attachment"
-        : "Pending with attachment",
-    );
-    if (interruption === "switch")
-      await expect(
-        page.getByRole("region", { name: "Queued messages" }),
-      ).toContainText("Pending with attachment");
-  });
-}
 
 for (const width of [1440, 390]) {
   test(`queue waits for the current turn and can be cancelled at ${width}`, async ({
@@ -643,7 +498,7 @@ test("queue preserves an image attachment and its text", async ({
     .first()
     .click();
   await expect(
-    page.getByRole("button", { name: "Add images", exact: true }),
+    page.getByRole("button", { name: "Add attachments", exact: true }),
   ).toBeEnabled();
   await page.locator('input[type="file"]').setInputFiles({
     name: "pixel.png",
@@ -704,35 +559,6 @@ test("Tab while composing does not queue a partial message", async ({
   await expect(
     page.getByRole("region", { name: "Queued messages" }),
   ).toContainText("中文草稿");
-});
-
-test("text follow-up still works when image storage is unavailable", async ({
-  page,
-  request,
-}) => {
-  await request.post("/fixture/reset", { data: { mode: "working" } });
-  await page.addInitScript(() => {
-    Object.defineProperty(window, "indexedDB", {
-      value: {
-        open() {
-          throw new Error("blocked");
-        },
-      },
-    });
-  });
-  await page.goto("/");
-  await page
-    .locator(".session-open")
-    .filter({ hasText: "Streaming voice input" })
-    .first()
-    .click();
-  const input = page.getByRole("textbox", { name: "Message Orc", exact: true });
-  await input.fill("Text without image storage");
-  await input.press("Tab");
-  await expect(
-    page.getByRole("region", { name: "Queued messages" }),
-  ).toContainText("Text without image storage");
-  await expect(input).toHaveValue("");
 });
 
 test("local queue waits for confirmed completion and explicit Continue", async ({

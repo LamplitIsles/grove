@@ -1200,3 +1200,67 @@ test("hot Pi historical unknown can close when native inspection finds no live w
       await f.close();
     }
   }));
+
+test("Pi receives decoded HEVC attachment through its real image processor", () =>
+  isolated("Pi receives decoded HEVC", async () => {
+    const f = await fixture({});
+    try {
+      const root = await f.create();
+      const operation = await f.app.reserveSubmission(root.id);
+      const bytes = await readFile(
+        new URL("./fixtures/attachment-orientation-6.heic", import.meta.url),
+      );
+      f.app.beginAttachments(root.id, operation.operationId, {
+        text: "hello",
+        mode: "direct",
+        attachments: [
+          { kind: "image", name: "photo.heic", bytes: bytes.length },
+        ],
+      });
+      await f.app.putAttachment(
+        root.id,
+        operation.operationId,
+        0,
+        new ReadableStream({
+          start(c) {
+            c.enqueue(bytes);
+            c.close();
+          },
+        }),
+      );
+      const refs = await f.app.completeAttachments(
+        root.id,
+        operation.operationId,
+      );
+      await f.app.send(
+        root.id,
+        "hello",
+        operation.operationId,
+        refs.images,
+        undefined,
+        true,
+        undefined,
+        undefined,
+        false,
+        refs.files,
+      );
+      await f.idle(root.id);
+      const parts = f.bodies.flatMap((body) =>
+        body.messages.flatMap((message) =>
+          Array.isArray(message.content) ? message.content : [],
+        ),
+      ) as { type: string; image_url?: { url: string } }[];
+      const image = parts.find((part) => part.type === "image_url");
+      expect(image).toBeDefined();
+      const decoded = Buffer.from(
+        image!.image_url!.url.split(",")[1],
+        "base64",
+      );
+      const meta = await sharp(decoded).metadata();
+      expect(meta.width).toBeGreaterThan(0);
+      expect(meta.height).toBeGreaterThan(0);
+      expect(["jpeg", "png", "webp", "gif"]).toContain(meta.format);
+    } finally {
+      await f.close();
+    }
+  }));

@@ -131,7 +131,7 @@ test("manually opening a question preserves text and image drafts", async ({
 }) => {
   await start(page, request, 1440);
   await input(page).fill("draft with image");
-  await page.getByLabel("Choose message images").setInputFiles({
+  await page.getByLabel("Choose message attachments").setInputFiles({
     name: "fixture.png",
     mimeType: "image/png",
     buffer: await sharp({

@@ -50,7 +50,9 @@ for (const width of [1440, 390])
     await expect(input).toHaveValue(draft);
     await input.dispatchEvent("compositionend");
     const chooser = page.waitForEvent("filechooser");
-    await page.getByRole("button", { name: "Add images", exact: true }).click();
+    await page
+      .getByRole("button", { name: "Add attachments", exact: true })
+      .click();
     await (
       await chooser
     ).setFiles({

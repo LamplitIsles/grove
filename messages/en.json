@@ -327,6 +327,7 @@
   "abandon_close_recovery": "Finish session close",
   "message_outline": "Message outline",
   "outline_empty": "No user messages yet.",
+  "outline_files": "File attachment",
   "outline_images": "Image input",
   "outline_offline": "Reconnect to locate this message.",
   "outline_unavailable": "This input is not available in native history.",
