@@ -13,8 +13,19 @@ _Avoid_：手动工作分组、平台组织身份、Project
 _Avoid_：账号权限、用户专属设置、已完成审查
 
 **项目（Project）**：
-在一个项目执行环境中登记、为 Agent 会话提供工作目录的项目。同一别名在不同环境中可以对应不同 checkout；项目与会话组织组分别表达。
-_Avoid_：会话组织组、会话树
+在一个项目执行环境中登记的仓库身份，具有一个别名和一个登记 checkout。同一别名在不同执行环境中可以指向不同项目。
+_Avoid_：会话工作目录、会话组织组、会话树
+
+**登记 checkout（Registered checkout）**：
+项目登记指向的 Git checkout。
+
+**关联 worktree（Linked worktree）**：
+与登记 checkout 属于同一个本地 Git 仓库的另一份 checkout，有自己的工作文件、暂存区和 HEAD，与登记 checkout 共用项目身份。
+_Avoid_：单独登记的项目、独立 clone
+
+**会话工作目录（Session working directory）**：
+Agent 会话执行工作的目录。同一项目的会话可以在不同 checkout 中工作。
+_Avoid_：项目登记、分支名
 
 **会话执行后端**：
 一个 Agent 会话创建时选定、恢复时继续使用的执行引擎，例如 Codex 或 Pi。同一会话树的成员可以使用不同后端；后端不改变成员的角色与所属关系。

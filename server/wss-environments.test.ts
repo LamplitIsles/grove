@@ -63,3 +63,105 @@ test("WSS configuration binds the destination without binding the bearer", async
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("WSS worktree lookup dispatches the fixed operation to the captured target", async () => {
+  const root = await mkdtemp(join(tmpdir(), "grove-wss-worktree-"));
+  const original = globalThis.WebSocket;
+  try {
+    const codex = join(root, "codex"),
+      config = join(root, "grove.toml");
+    await mkdir(codex);
+    await writeFile(
+      config,
+      '[[project_environments]]\nid="owned"\nname="Owned"\ntransport="wss"\nog="/owned/og"\n',
+    );
+    await writeFile(
+      join(codex, "environments.toml"),
+      '[[environments]]\nid="owned"\nurl="wss://owned.invalid/exec"\nauth_bearer_token="owned-token"\n',
+      { mode: 0o600 },
+    );
+    const requests: unknown[] = [];
+    class Socket {
+      static OPEN = 1;
+      readyState = 1;
+      onopen?: () => void;
+      onmessage?: (event: { data: string }) => void;
+      onerror?: () => void;
+      onclose?: () => void;
+      constructor(url: string, options: { headers: Record<string, string> }) {
+        expect(url).toBe("wss://owned.invalid/exec");
+        expect(options.headers.Authorization).toBe("Bearer owned-token");
+        queueMicrotask(() => this.onopen?.());
+      }
+      send(data: string) {
+        const message = JSON.parse(data);
+        const send = (value: unknown) =>
+          queueMicrotask(() =>
+            this.onmessage?.({ data: JSON.stringify(value) }),
+          );
+        if (message.method === "initialize")
+          send({ id: 1, result: { sessionId: "owned" } });
+        if (message.method === "process/start") {
+          const payload = JSON.parse(
+            Buffer.from(message.params.argv[3], "base64").toString(),
+          );
+          requests.push(payload);
+          send({ id: 2, result: { processId: "read" } });
+          const output =
+            payload.path === "/linked"
+              ? { project: "test", worktree: "/linked" }
+              : { error: "Invalid project read" };
+          send({
+            method: "process/output",
+            params: {
+              processId: "read",
+              seq: 1,
+              stream: "stdout",
+              chunk: Buffer.from(JSON.stringify(output)).toString("base64"),
+            },
+          });
+          send({
+            method: "process/exited",
+            params: { processId: "read", seq: 2, exitCode: 0 },
+          });
+          send({
+            method: "process/closed",
+            params: { processId: "read", seq: 3 },
+          });
+        }
+      }
+      close() {
+        this.readyState = 3;
+      }
+    }
+    globalThis.WebSocket = Socket as unknown as typeof WebSocket;
+    const environments = new ProjectEnvironments(config, codex);
+    const binding = await environments.binding("owned");
+    expect(
+      await environments.resolveWorktree(binding, "/linked", true),
+    ).toEqual({ project: "test", worktree: "/linked" });
+    expect(requests).toEqual([
+      {
+        operation: "resolve-worktree",
+        path: "/linked",
+        exact: true,
+        og: "/owned/og",
+        execGroup: true,
+      },
+    ]);
+    await expect(
+      environments.resolveWorktree(binding, "/missing", true),
+    ).rejects.toThrow("Cannot verify worktree");
+    await writeFile(
+      config,
+      '[[project_environments]]\nid="owned"\nname="Owned"\ntransport="wss"\nog="/different/og"\n',
+    );
+    await expect(
+      environments.resolveWorktree(binding, "/linked", true),
+    ).rejects.toThrow("Cannot verify worktree");
+    expect(requests).toHaveLength(2);
+  } finally {
+    globalThis.WebSocket = original;
+    await rm(root, { recursive: true, force: true });
+  }
+});

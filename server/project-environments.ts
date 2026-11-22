@@ -1,6 +1,6 @@
-import { open, readFile } from "node:fs/promises";
+import { open, readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
@@ -11,6 +11,9 @@ import { environmentId } from "../src/project-identity";
 import { execProjectRead } from "./exec-project-read";
 
 const exec = promisify(execFile);
+const worktreeResult = z
+  .object({ project: z.string().min(1), worktree: z.string().min(1) })
+  .strict();
 const remoteFields = {
   id: z
     .string()
@@ -370,6 +373,58 @@ export class ProjectEnvironments {
   }
   async isWss(binding: ProjectEnvironment) {
     return "transport" in (await this.boundEntry(binding));
+  }
+  async resolveWorktree(
+    binding: ProjectEnvironment | undefined,
+    path: string,
+    exact = false,
+  ) {
+    const error =
+      "Cannot verify worktree on the original project device. Check the absolute linked root, project registration and og support, then retry.";
+    try {
+      if (!isAbsolute(path) || path.includes("\0")) throw new Error();
+      if (binding && binding.id !== "local") {
+        const value = worktreeResult.parse(
+          await this.operation(binding, {
+            operation: "resolve-worktree",
+            path,
+            exact,
+          }),
+        );
+        if (!isAbsolute(value.worktree)) throw new Error();
+        return value;
+      }
+      const input = await realpath(path);
+      if (!(await stat(input)).isDirectory()) throw new Error();
+      const { stdout } = await this.command(
+        "og",
+        ["project", "resolve-worktree", path],
+        {
+          timeout: 8000,
+          maxBuffer: 512 * 1024,
+          killSignal: "SIGKILL",
+        },
+      );
+      const value = worktreeResult.parse(JSON.parse(stdout));
+      if (
+        !isAbsolute(value.worktree) ||
+        resolve(value.worktree) !== value.worktree ||
+        (await realpath(value.worktree)) !== value.worktree ||
+        !(
+          input === value.worktree ||
+          input.startsWith(
+            value.worktree.endsWith(sep)
+              ? value.worktree
+              : value.worktree + sep,
+          )
+        ) ||
+        (exact && input !== value.worktree)
+      )
+        throw new Error();
+      return value;
+    } catch {
+      throw new Error(error);
+    }
   }
   async projects(id = "local"): Promise<Project[]> {
     const environment = await this.binding(id);

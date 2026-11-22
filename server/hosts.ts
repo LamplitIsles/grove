@@ -178,6 +178,9 @@ export class HostService {
   previewProject(id: string) {
     return this.workspace.previewProject(this.raw(id));
   }
+  resolveWorktree(project: import("../src/contracts").Project, path: string) {
+    return this.workspace.resolveWorktree(project, path);
+  }
   remoteProjectRead(
     project: import("../src/contracts").Project,
     request: Record<string, unknown>,

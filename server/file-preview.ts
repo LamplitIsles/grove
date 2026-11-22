@@ -345,6 +345,12 @@ export function filePreview(
           break;
         }
       }
+      if (!allowed) {
+        const linked = await service
+          .resolveWorktree(project, dirname(target))
+          .catch(() => undefined);
+        allowed = !!linked && within(linked.worktree, target);
+      }
       if (!allowed)
         return fail(
           "File is outside the session and registered project directories",

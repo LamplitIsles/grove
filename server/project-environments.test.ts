@@ -8,6 +8,7 @@ import {
   symlink,
   readlink,
   truncate,
+  realpath,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -39,7 +40,9 @@ afterEach(async () => {
   for (const close of cleanup.splice(0).reverse()) await close();
 }, 20000);
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "grove-project-environments-"));
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "grove-project-environments-")),
+  );
   cleanup.push(() => rm(root, { recursive: true, force: true }));
   const codex = join(root, "codex"),
     local = join(root, "local"),
@@ -550,124 +553,170 @@ test("remote preview HTML/Markdown/resources bind canonical device roots, limits
   expect((await preview(new Request(source), [origin]))!.status).toBe(410);
 }, 20000);
 
-test("strict runtime wire binds creation, original resume, new turns, og and central skill queries without changing steer", async () => {
-  const f = await fixture();
-  const options = {
-    cwd: f.root,
-    origin: () => "http://127.0.0.1:12345",
-    codexPath: fileURLToPath(
-      new URL("../tests/fake-codex.mjs", import.meta.url),
-    ),
-    environments: f.environments,
-    env: {
-      ...Object.fromEntries(
-        Object.keys(process.env).map((k) => [k, undefined]),
-      ),
-      PATH: process.env.PATH,
+test.each(["orc", "worker", "reviewer"] as const)(
+  "strict %s runtime wire keeps the saved cwd for creation, resume and turns",
+  async (role) => {
+    const f = await fixture();
+    const worktree = join(f.root, "wire-worktree");
+    const gitEnv = {
       HOME: f.root,
-      CODEX_HOME: f.codex,
-      FAKE_SERVER_ROOT: f.root,
-    },
-  };
-  let runtime = new CodexRuntime(options);
-  cleanup.push(() => runtime.close());
-  const agent: RuntimeAgent = {
-    id: "remote-agent",
-    token: "owned-token",
-    role: "orc",
-    project: {
-      alias: "same",
-      name: "Remote",
-      path: f.local,
-      environment: f.binding,
-    },
-    title: "Owned",
-    model: "fixture-model",
-    effort: "medium",
-    serviceTier: "default",
-    state: "idle",
-    closed: false,
-    messages: [],
-    questions: [],
-    deliveries: [],
-  };
-  await writeFile(
-    join(f.root, ".fake-app-server-control.json"),
-    JSON.stringify({ hold: true }),
-  );
-  const handle = await runtime.open(agent, () => {});
-  const turn = await handle.send("initial");
-  await handle.send("steer", turn);
-  await runtime.skills(f.local, "codex", f.binding);
-  await runtime.close();
-  runtime = new CodexRuntime(options);
-  const resumed = await runtime.open(
-    { ...agent, threadId: handle.threadId },
-    () => {},
-  );
-  await resumed.send("after restart");
-  const requests = (
-    await readFile(join(f.root, ".fake-app-server-requests.jsonl"), "utf8")
-  )
-    .trim()
-    .split("\n")
-    .map((s) => JSON.parse(s));
-  const start = requests.find(
-    (r) => r.method === "thread/start" && !r.params.ephemeral,
-  );
-  expect(start.params.environments).toEqual([
-    { environmentId: "mac", cwd: f.local },
-  ]);
-  expect(start.params.config["mcp_servers.flickgrove"]).toMatchObject({
-    environment_id: "local",
-    env: { FLICKGROVE_AGENT_TOKEN: "owned-token" },
-  });
-  expect(start.params.config["mcp_servers.og"]).toMatchObject({
-    environment_id: "mac",
-    cwd: f.local,
-    args: ["mcp"],
-  });
-  expect(JSON.stringify(start.params.config["mcp_servers.og"])).not.toContain(
-    "owned-token",
-  );
-  const turns = requests.filter((r) => r.method === "turn/start");
-  expect(turns).toHaveLength(2);
-  expect(
-    turns.every(
-      (r) =>
-        r.params.threadId === handle.threadId &&
-        r.params.environments?.[0].environmentId === "mac",
-    ),
-  ).toBe(true);
-  const steer = requests.find((r) => r.method === "turn/steer");
-  expect(steer.params.expectedTurnId).toBe(turn);
-  expect(steer.params.environments).toBeUndefined();
-  const skill = requests.find((r) => r.method === "skills/list");
-  expect(skill.params.cwds).toEqual([f.codex]);
-  await writeFile(
-    join(f.root, ".fake-app-server-control.json"),
-    JSON.stringify({ hold: true, missingEnvironment: "mac" }),
-  );
-  await expect(resumed.send("missing executor")).rejects.toBeInstanceOf(
-    DeliveryRejected,
-  );
-  await writeFile(
-    join(f.root, ".fake-app-server-control.json"),
-    JSON.stringify({ hold: true }),
-  );
-  f.retarget();
-  await expect(resumed.send("no fallback")).rejects.toBeInstanceOf(
-    DeliveryRejected,
-  );
-  expect(
-    (await readFile(join(f.root, ".fake-app-server-requests.jsonl"), "utf8"))
+      PATH: process.env.PATH,
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+    };
+    await exec("git", ["-C", f.local, "init", "-q"], { env: gitEnv });
+    await exec(
+      "git",
+      [
+        "-C",
+        f.local,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-qm",
+        "initial",
+      ],
+      { env: gitEnv },
+    );
+    await exec(
+      "git",
+      ["-C", f.local, "worktree", "add", "-qb", "wire-feature", worktree],
+      { env: gitEnv },
+    );
+    const options = {
+      cwd: f.root,
+      origin: () => "http://127.0.0.1:12345",
+      codexPath: fileURLToPath(
+        new URL("../tests/fake-codex.mjs", import.meta.url),
+      ),
+      environments: f.environments,
+      env: {
+        ...Object.fromEntries(
+          Object.keys(process.env).map((k) => [k, undefined]),
+        ),
+        PATH: process.env.PATH,
+        HOME: f.root,
+        CODEX_HOME: f.codex,
+        FAKE_SERVER_ROOT: f.root,
+      },
+    };
+    let runtime = new CodexRuntime(options);
+    cleanup.push(() => runtime.close());
+    const agent: RuntimeAgent = {
+      id: "remote-agent",
+      token: "owned-token",
+      role,
+      ...(role === "orc" ? {} : { ownerId: "owner" }),
+      project: {
+        alias: "same",
+        name: "Remote",
+        path: worktree,
+        environment: f.binding,
+      },
+      title: "Owned",
+      model: "fixture-model",
+      effort: "medium",
+      serviceTier: "default",
+      state: "idle",
+      closed: false,
+      messages: [],
+      questions: [],
+      deliveries: [],
+    };
+    await writeFile(
+      join(f.root, ".fake-app-server-control.json"),
+      JSON.stringify({ hold: true }),
+    );
+    const handle = await runtime.open(agent, () => {});
+    const turn = await handle.send("initial");
+    await handle.send("steer", turn);
+    await runtime.skills(worktree, "codex", f.binding);
+    await runtime.close();
+    runtime = new CodexRuntime(options);
+    let resumed = await runtime.open(
+      { ...agent, threadId: handle.threadId },
+      () => {},
+    );
+    await resumed.send("after restart");
+    await rm(worktree, { recursive: true });
+    await runtime.close();
+    runtime = new CodexRuntime(options);
+    resumed = await runtime.open(
+      { ...agent, threadId: handle.threadId },
+      () => {},
+    );
+    await resumed.send("after resume with removed directory");
+    const requests = (
+      await readFile(join(f.root, ".fake-app-server-requests.jsonl"), "utf8")
+    )
       .trim()
       .split("\n")
-      .map((s) => JSON.parse(s))
-      .filter((r) => r.method === "turn/start"),
-  ).toHaveLength(2);
-}, 20000);
-
+      .map((s) => JSON.parse(s));
+    const start = requests.find(
+      (r) => r.method === "thread/start" && !r.params.ephemeral,
+    );
+    expect(start.params.cwd).toBe(worktree);
+    expect(start.params.environments).toEqual([
+      { environmentId: "mac", cwd: worktree },
+    ]);
+    expect(start.params.config["mcp_servers.flickgrove"]).toMatchObject({
+      environment_id: "local",
+      env: { FLICKGROVE_AGENT_TOKEN: "owned-token" },
+    });
+    expect(start.params.config["mcp_servers.og"]).toMatchObject({
+      environment_id: "mac",
+      cwd: worktree,
+      args: ["mcp"],
+    });
+    expect(JSON.stringify(start.params.config["mcp_servers.og"])).not.toContain(
+      "owned-token",
+    );
+    const turns = requests.filter((r) => r.method === "turn/start");
+    expect(turns).toHaveLength(3);
+    expect(
+      turns.every(
+        (r) =>
+          r.params.threadId === handle.threadId &&
+          r.params.environments?.[0].environmentId === "mac" &&
+          r.params.environments?.[0].cwd === worktree,
+      ),
+    ).toBe(true);
+    const resumes = requests.filter((r) => r.method === "thread/resume");
+    expect(resumes).toHaveLength(2);
+    expect(resumes.every((r) => r.params.cwd === worktree)).toBe(true);
+    const steer = requests.find((r) => r.method === "turn/steer");
+    expect(steer.params.expectedTurnId).toBe(turn);
+    expect(steer.params.environments).toBeUndefined();
+    const skill = requests.find((r) => r.method === "skills/list");
+    expect(skill.params.cwds).toEqual([f.codex]);
+    await writeFile(
+      join(f.root, ".fake-app-server-control.json"),
+      JSON.stringify({ hold: true, missingEnvironment: "mac" }),
+    );
+    await expect(resumed.send("missing executor")).rejects.toBeInstanceOf(
+      DeliveryRejected,
+    );
+    await writeFile(
+      join(f.root, ".fake-app-server-control.json"),
+      JSON.stringify({ hold: true }),
+    );
+    f.retarget();
+    await expect(resumed.send("no fallback")).rejects.toBeInstanceOf(
+      DeliveryRejected,
+    );
+    expect(
+      (await readFile(join(f.root, ".fake-app-server-requests.jsonl"), "utf8"))
+        .trim()
+        .split("\n")
+        .map((s) => JSON.parse(s))
+        .filter((r) => r.method === "turn/start"),
+    ).toHaveLength(3);
+  },
+  20000,
+);
 test("WSS disconnect notifications preserve native errors and ordinary MCP results", async () => {
   const f = await fixture();
   await writeFile(
@@ -1397,3 +1446,104 @@ for (const fault of ["offline", "removed", "retarget"] as const) {
     expect(f.runtime.inputs.length).toBe(before.sends);
   }, 20000);
 }
+
+test("remote worktree dispatch and preview use the saved device and bounded resolver", async () => {
+  const f = await fixture();
+  const linked = join(f.root, "remote-linked"),
+    reports = join(linked, "reports");
+  await mkdir(reports, { recursive: true });
+  const alias = join(f.root, "remote-linked-alias");
+  await symlink(linked, alias);
+  await writeFile(join(reports, "page.md"), "# Remote worktree");
+  await writeFile(join(reports, "source.ts"), "remote linked source\n");
+  await writeFile(join(f.mac, "reports", "existing.md"), "# Existing");
+  const og = join(f.root, "fixture-og");
+  const log = join(f.root, "resolver-calls");
+  const catalogue = JSON.stringify({
+    projects: [
+      { alias: "same", name: "Remote same", path: f.local },
+      { alias: "other", name: "Other", path: f.other },
+    ],
+  });
+  const result = JSON.stringify({ project: "same", worktree: linked });
+  await writeFile(
+    og,
+    `#!/bin/sh\nif [ "$2" = list ]; then printf '%s' '${catalogue}'; exit; fi\nprintf '%s\\n' "$3" >> '${log}'\ncase "$3" in '${linked}'|'${alias}'|'${reports}') printf '%s' '${result}' ;; *) exit 1 ;; esac\n`,
+    { mode: 0o700 },
+  );
+  const orc = await f.app.createOrc("mac:same", f.settings);
+  const origin = "http://fixture.invalid",
+    preview = filePreview(f.service);
+  const grant = async (id: string, href: string) =>
+    (await preview(
+      new Request(origin + "/api/file-preview", {
+        method: "POST",
+        headers: {
+          Origin: origin,
+          "X-Grove-Peer": f.service.identity.id,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ agent: `${f.service.identity.id}:${id}`, href }),
+      }),
+      [origin],
+    ))!;
+  const source = await grant(orc.id, join(reports, "source.ts"));
+  expect(source.status).toBe(200);
+  const { url } = await source.json();
+  expect((await preview(new Request(url), [origin]))!.status).toBe(200);
+  expect(
+    (await preview(new Request(new URL("page.md", url)), [origin]))!.status,
+  ).toBe(403);
+  const token = f.runtime.agents.get(orc.id)!.token;
+  const start = {
+    project: "same",
+    title: "Remote worker",
+    spec: "#6190",
+    message: "Work",
+  };
+  const worker = (await f.app.tool(token, "worker_start", {
+    ...start,
+    worktree: alias,
+  })) as { id: string };
+  expect(f.runtime.agents.get(worker.id)!.project).toMatchObject({
+    alias: "same",
+    path: linked,
+    environment: f.binding,
+  });
+  const reviewer = (await f.app.tool(token, "reviewer_start", {
+    ...start,
+    worktree: linked,
+    profile: "standards",
+    fixedPoint: "base",
+    reviewedHead: "head",
+  })) as { id: string };
+  expect(f.runtime.agents.get(reviewer.id)!.project).toMatchObject({
+    alias: "same",
+    path: linked,
+    environment: f.binding,
+  });
+  const beforeRejected = f.runtime.agents.size;
+  await expect(
+    f.app.tool(token, "worker_start", { ...start, worktree: reports }),
+  ).rejects.toThrow("worktree");
+  await expect(
+    f.app.tool(token, "worker_start", {
+      ...start,
+      project: "other",
+      worktree: linked,
+    }),
+  ).rejects.toThrow("does not belong");
+  expect(f.runtime.agents.size).toBe(beforeRejected);
+  const before = await readFile(log, "utf8");
+  expect((await grant(orc.id, "reports/existing.md")).status).toBe(200);
+  expect(await readFile(log, "utf8")).toBe(before);
+  expect((await grant(worker.id, "reports/page.md")).status).toBe(200);
+  const outside = join(f.root, "outside.md");
+  await writeFile(outside, "outside");
+  expect((await grant(orc.id, outside)).ok).toBe(false);
+  f.retarget();
+  await expect(
+    f.app.tool(token, "worker_start", { ...start, worktree: linked }),
+  ).rejects.toThrow(/target changed/);
+  expect((await preview(new Request(url), [origin]))!.ok).toBe(false);
+});

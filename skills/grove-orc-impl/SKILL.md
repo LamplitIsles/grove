@@ -12,12 +12,12 @@ Use the execution host's `flickgrove` MCP tools for Worker lifecycle. Discover t
 ## 1. Prepare
 
 1. Read the named FlickNote spec by ID through MCP `note_get`, follow its ticket index, and read every ticket's stored `content`. A spec with no tickets is a valid direct assignment; do not invent tickets unless requested. If an identified note is unreadable, report the blocker. Read repository and host-local instructions.
-2. Resolve the repository's registered Organon alias on this execution host. `worker_start` selects a registered project, not an arbitrary cwd or a remote host. Confirm its checkout matches the spec. A different execution host requires an Orc there; do not assume a Hub-visible project is available locally.
+2. Resolve the registered Organon alias in the Orc's execution environment. Confirm the checkout selected for this run matches the spec. To use an existing linked worktree, verify its root and project with `og project resolve-worktree <absolute-root>` on that device.
 3. Inspect tracked and untracked changes. Record pre-existing dirty paths and their initial diff; preserve them. Documentation-only changes, including `CONTEXT.md`, do not block the checkout. Assess other changes for implementation overlap.
 4. Build ticket order from numbers, statuses and `Blocked by:` fields, or use the spec's acceptance criteria directly when it has no tickets. Record the starting branch and `HEAD` as the fixed review point.
 5. For changed rendered UI, establish the applicable visual and interaction requirements and gather Orc-owned verification evidence.
 
-Use the registered checkout by default; the first owner creates the feature branch there. Coordinate serial ownership: while one owner edits, the other keeps repository files unchanged; integrate both categories on the same branch. For overlapping dirty changes, resolve the overlap without discarding user work; request a decision only if it cannot be resolved within scope. FlickGrove has no pane, tab or worktree lifecycle API. If isolation is necessary and authorized, prepare an isolated checkout through the repository's supported tooling and register it on the execution host before dispatch. Record ownership and cleanup responsibility for any checkout created for this run.
+Use the registered checkout by default. If isolation is necessary and authorized, prepare a linked worktree through the repository's Git tooling and record its ownership and cleanup responsibility. It uses the existing project registration. Work in the selected checkout, with one branch and serial ownership. Preserve pre-existing edits and ask about overlap only when it cannot be resolved within scope.
 
 FlickNote workflow `Status:` lines are stored Markdown, separate from note lifecycle. Update them with exact `note_modify` before/after edits or `note_write`, then read back. Content edits preserve lifecycle; do not use `note_submit` to mark implementation progress.
 
@@ -25,14 +25,14 @@ FlickNote workflow `Status:` lines are stored Markdown, separate from note lifec
 
 Orc implements and verifies its own categories. For one-off ops with no PR, self-review the work and evidence, then report the outcome without entering the PR workflow. If the assignment has no Worker-owned work but produces a PR, proceed directly to review. Otherwise choose a serial order and dispatch the Worker for its bounded category. If Orc work must follow Worker work, require a progress report and a pause in repository edits at the handoff; Orc integrates its work, then directs the same Worker to finish its assignment.
 
-Call `worker_start` once with the canonical `project` alias, a useful `title`, the spec reference in `spec`, and the complete bootstrap in `message`. Startup includes dispatch; no separate prompt is needed. Retain the returned Worker ID and confirmed delivery/state. Inspect `worker_list` and `worker_read` after an error or unknown result before creating or sending anything again; an uncertain response may already have created a Worker or delivered a task. Recover the same Worker when possible.
+Call `worker_start` once with the canonical `project` alias, a useful `title`, the spec reference in `spec`, and the complete bootstrap in `message`. If the selected checkout is linked, pass its absolute root in `worktree`. Startup includes dispatch; no separate prompt is needed. Retain the returned Worker ID and confirmed delivery/state. Inspect `worker_list` and `worker_read` after an error or unknown result before creating or sending anything again; an uncertain response may already have created a Worker or delivered a task. Recover the same Worker when possible.
 
 The bootstrap names the spec and all ticket note IDs and states:
 
 - this is the sole Implementation Worker; it owns the assigned Worker category in dependency order, including its documentation, tests and deterministic review fixes; identify Orc-owned work and the serial handoff;
 - it is not alone in the codebase, must preserve others' edits and adapt to concurrent changes;
 - the pre-existing dirty paths and which are in scope for commits;
-- the registered checkout, branch, fixed starting commit and one-PR boundary;
+- the selected checkout path, branch, fixed starting commit and one-PR boundary;
 - live services, deployments, credentials, paid providers and external messages remain untouched unless explicitly in scope;
 - it follows repository implementation instructions, keeps `.scratch` untracked, updates ticket workflow statuses through FlickNote MCP, verifies observable behavior, commits scoped Conventional Commits and writes `.scratch/<feature>/implementation-report.md`; Orc owns PR creation and updates;
 - the relevant acceptance criteria, known technical uncertainties and bounded evidence tasks;
@@ -59,6 +59,8 @@ Retain reviewer IDs and conclusions until review is settled; each category owner
 ## 4. PR, merge, and cleanup
 
 A completed run includes one PR and approval-gated merge unless the user limited scope.
+
+For a linked checkout, use its absolute root with `og push --worktree` and as the `worktree` selector for typed PR calls. Run the approved merge from outside the feature directory. Orga can remove that directory and its ignored files after merge, so preserve needed evidence elsewhere before submitting.
 
 1. Push the self-reviewed commit with `og` before creating or updating the PR; use typed Organon `og` tools to find or create it. Verify the PR head is the self-reviewed commit and its title and description state final behavior and verification; update them when the scope or evidence changes.
 2. Submit merge through the current typed `og` operation and follow its returned policy, `next_action` and `completion`. Continue already authorized actions without requesting the same approval again. Pending required approval ends the turn; rejection or terminal failure follows the current policy. Merging does not deploy: run and verify a documented deploy step only when deployment is in the authorized scope.

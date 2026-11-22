@@ -1378,6 +1378,17 @@ export class Workspace {
       throw new Error("Project device reader is unavailable");
     return this.options.environments.operation(project.environment, request);
   }
+  async resolveWorktree(project: Project, path: string, exact = false) {
+    if (!this.options.environments)
+      throw new Error(
+        "Worktree verification is unavailable; check og on the project device",
+      );
+    return this.options.environments.resolveWorktree(
+      project.environment,
+      path,
+      exact,
+    );
+  }
   projectForThread(threadId: string) {
     return this.readableAgent(
       this.state.agents.find((a) => a.threadId === threadId) ??
@@ -5275,10 +5286,31 @@ export class Workspace {
             throw new Error(
               "Delegation cannot change the tree execution environment",
             );
-          const project = (await this.projects(environmentId(a.project))).find(
+          let project = (await this.projects(environmentId(a.project))).find(
             (p) => p.alias === requested.alias,
           );
           if (!project) throw new Error("Registered project not found");
+          if (
+            environmentId(a.project) !== "local" &&
+            project.environment?.target !== a.project.environment?.target
+          )
+            throw new Error("Original project execution target is unavailable");
+          if ("worktree" in input && input.worktree !== undefined) {
+            const resolved = await this.resolveWorktree(
+              a.project,
+              input.worktree,
+              true,
+            );
+            if (resolved.project !== project.alias)
+              throw new Error(
+                "Worktree does not belong to the selected registered project",
+              );
+            project = {
+              ...project,
+              path: resolved.worktree,
+              environment: a.project.environment,
+            };
+          }
           // Members always resolve the instance's current preset, never the Orc's creation defaults.
           const preset = await resolveMemberPreset(
             this.options.memberPresets?.directory,

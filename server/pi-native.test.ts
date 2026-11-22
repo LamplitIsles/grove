@@ -1,5 +1,13 @@
 import { test, expect } from "bun:test";
-import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  readFile,
+  rm,
+  realpath,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { openPiSession } from "./pi-session";
@@ -17,7 +25,9 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { RuntimeAgent, RuntimeEvent } from "./runtime";
 test("official codemode executes official MCP direct/deferred/codemode tools and Grove identity bridge", async () => {
   if (!process.env.GROVE_PI_NATIVE_CHILD) {
-    const home = await mkdtemp(join(tmpdir(), "grove-pi-native-home-"));
+    const home = await realpath(
+      await mkdtemp(join(tmpdir(), "grove-pi-native-home-")),
+    );
     try {
       const child = Bun.spawn([process.execPath, "test", import.meta.path], {
         env: {
@@ -610,11 +620,14 @@ test("official codemode executes official MCP direct/deferred/codemode tools and
 
   // A low-level agent_end preceding SDK automatic retry is not completion.
   let retryRequests = 0;
+  let cwdProbeNext = false,
+    cwdProbeResult = false;
+  const cwdProbeOutputs: string[] = [];
   const retryUpstream = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(req) {
-      await req.json();
+      const body = (await req.json()) as { messages: unknown[] };
       retryRequests++;
       if (retryRequests === 1)
         return Response.json(
@@ -628,6 +641,38 @@ test("official codemode executes official MCP direct/deferred/codemode tools and
         );
       const chunk = (delta: object, finish_reason: string | null) =>
         `data: ${JSON.stringify({ id: "retry-fixture", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason }] })}\n\n`;
+      if (cwdProbeNext) {
+        cwdProbeNext = false;
+        cwdProbeResult = true;
+        return new Response(
+          chunk(
+            {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: `cwd-${retryRequests}`,
+                  type: "function",
+                  function: {
+                    name: "codemode",
+                    arguments: JSON.stringify({
+                      code: 'text(await tools.bash({command:"pwd"}));',
+                    }),
+                  },
+                },
+              ],
+            },
+            null,
+          ) +
+            chunk({}, "tool_calls") +
+            "data: [DONE]\n\n",
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      }
+      if (cwdProbeResult) {
+        cwdProbeResult = false;
+        cwdProbeOutputs.push(JSON.stringify(body.messages.at(-1)));
+      }
       return new Response(
         chunk({ role: "assistant", content: "Retry fixture recovered" }, null) +
           chunk({}, "stop") +
@@ -663,25 +708,132 @@ test("official codemode executes official MCP direct/deferred/codemode tools and
     },
   );
   try {
-    await retryHandle.send("Retry safely", undefined, [], "retry-operation");
-    await retryDone;
-    expect(retryRequests).toBe(2);
-    expect(
-      retryEvents.some(
-        (e) => e.type === "error" && e.willRetry && e.errorKind === "capacity",
-      ),
-    ).toBe(true);
-    expect(retryEvents.filter((e) => e.type === "completed")).toEqual([
-      expect.objectContaining({ status: "completed" }),
-    ]);
-    expect(
-      retryEvents.filter(
-        (e) => e.type === "item" && e.item.type === "userMessage",
-      ),
-    ).toHaveLength(1);
-    expect(JSON.stringify(retryEvents)).not.toContain("owned-fixture-only");
+    try {
+      await retryHandle.send("Retry safely", undefined, [], "retry-operation");
+      await retryDone;
+      expect(retryRequests).toBe(2);
+      expect(
+        retryEvents.some(
+          (e) =>
+            e.type === "error" && e.willRetry && e.errorKind === "capacity",
+        ),
+      ).toBe(true);
+      expect(retryEvents.filter((e) => e.type === "completed")).toEqual([
+        expect.objectContaining({ status: "completed" }),
+      ]);
+      expect(
+        retryEvents.filter(
+          (e) => e.type === "item" && e.item.type === "userMessage",
+        ),
+      ).toHaveLength(1);
+      expect(JSON.stringify(retryEvents)).not.toContain("owned-fixture-only");
+    } finally {
+      await retryHandle.close();
+    }
+    const registered = join(home, "registered"),
+      linked = join(home, "linked");
+    await mkdir(registered);
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        env: {
+          HOME: home,
+          PATH: process.env.PATH,
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_NOSYSTEM: "1",
+        },
+        stdio: "pipe",
+      });
+    git("-C", registered, "init", "-q");
+    git(
+      "-C",
+      registered,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-qm",
+      "initial",
+    );
+    for (const role of ["worker", "reviewer"] as const) {
+      const worktree = `${linked}-${role}`;
+      git("-C", registered, "worktree", "add", "-qb", role, worktree);
+      const member = {
+        ...agent,
+        id: `cwd-${role}`,
+        role,
+        project: { ...agent.project, path: worktree },
+      };
+      const memberEvents: RuntimeEvent[] = [];
+      const memberOptions = {
+        agentDir,
+        sessionDir: join(agentDir, "grove-durable"),
+        selection: { provider: "fixture", model: "fake", effort: "off" },
+        tool: async () => ({}),
+      };
+      let memberHandle = await openPiSession(
+        member,
+        (event) => memberEvents.push(event),
+        memberOptions,
+      );
+      const probe = async (label: string) => {
+        const outputs = cwdProbeOutputs.length;
+        const count = memberEvents.filter(
+          (event) => event.type === "completed",
+        ).length;
+        cwdProbeNext = true;
+        await memberHandle.send(label, undefined, [], label);
+        for (
+          let i = 0;
+          i < 1000 &&
+          memberEvents.filter((event) => event.type === "completed").length ===
+            count;
+          i++
+        )
+          await Bun.sleep(5);
+        expect(
+          memberEvents.filter((event) => event.type === "completed").length,
+        ).toBeGreaterThan(count);
+        expect(cwdProbeOutputs).toHaveLength(outputs + 1);
+        return cwdProbeOutputs.at(-1)!;
+      };
+      try {
+        for (const label of [`${role}-initial`, `${role}-follow-up`]) {
+          const output = await probe(label);
+          expect(output).toContain(worktree);
+          expect(output).not.toMatch(/enoent|no such file/i);
+        }
+        const threadId = memberHandle.threadId;
+        await memberHandle.close();
+        memberHandle = await openPiSession(
+          { ...member, threadId },
+          (event) => memberEvents.push(event),
+          memberOptions,
+        );
+        const resumedOutput = await probe(`${role}-resumed`);
+        expect(resumedOutput).toContain(worktree);
+        expect(resumedOutput).not.toMatch(/enoent|no such file/i);
+        await rm(worktree, { recursive: true });
+        const missing = await probe(`${role}-removed`);
+        expect(missing).toMatch(/error|enoent|no such file/i);
+        expect(missing).not.toContain(registered);
+        expect(missing).not.toContain(process.cwd());
+        await memberHandle.close();
+        memberHandle = await openPiSession(
+          { ...member, threadId },
+          (event) => memberEvents.push(event),
+          memberOptions,
+        );
+        const missingResume = await probe(`${role}-removed-resume`);
+        expect(missingResume).toMatch(/error|enoent|no such file/i);
+        expect(missingResume).not.toContain(registered);
+        expect(missingResume).not.toContain(process.cwd());
+      } finally {
+        await memberHandle.close();
+      }
+    }
   } finally {
-    await retryHandle.close();
     retryUpstream.stop(true);
   }
 }, 20000);

@@ -103,9 +103,10 @@ export const toolDefinitions = {
   },
   reviewer_start: {
     description:
-      "Start an independent read-only Reviewer in a registered project. Captures profile configuration and prompt. Includes initial dispatch; inspect reviewer_list/read after uncertain admission, never replay blindly.",
+      "Start an independent read-only Reviewer in a registered project. Optional worktree selects an existing absolute linked root of that project on the tree's device. Captures profile configuration and prompt. Includes initial dispatch; inspect reviewer_list/read after uncertain admission, never replay blindly.",
     shape: {
       project: z.string().min(1),
+      worktree: z.string().min(1).optional(),
       profile,
       title: sessionTitle,
       ...target,
@@ -148,9 +149,10 @@ export const toolDefinitions = {
   },
   worker_start: {
     description:
-      "Start one implementation Worker for one registered project and one spec. Uses the instance's current member model preset. Return the Worker ID for subsequent operations.",
+      "Start one implementation Worker for one registered project and one spec. Optional worktree selects an existing absolute linked root of that project on the tree's device. Uses the instance's current member model preset. Return the Worker ID for subsequent operations.",
     shape: {
       project: z.string().min(1),
+      worktree: z.string().min(1).optional(),
       title: sessionTitle,
       spec: z.string().trim().min(1).max(500),
       message,

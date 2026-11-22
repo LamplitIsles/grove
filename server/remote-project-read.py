@@ -77,6 +77,27 @@ def canonical(path):
     return result
 
 
+def worktree(path, exact=False):
+    if not isinstance(path, str) or not os.path.isabs(path) or '\0' in path:
+        raise ValueError('Cannot verify worktree')
+    input_path = canonical(path)
+    if not os.path.isdir(input_path):
+        raise ValueError('Cannot verify worktree')
+    result = tool([request['og'], 'project', 'resolve-worktree', path])
+    result.check_returncode()
+    value = json.loads(result.stdout)
+    if (not isinstance(value, dict) or set(value) != {'project', 'worktree'} or
+        not isinstance(value['project'], str) or not value['project'] or
+        not isinstance(value['worktree'], str) or not os.path.isabs(value['worktree'])):
+        raise ValueError('Cannot verify worktree')
+    root = value['worktree']
+    if (os.path.normpath(root) != root or canonical(root) != root or
+        not (input_path == root or within(root, input_path)) or
+        (exact and input_path != root)):
+        raise ValueError('Cannot verify worktree')
+    return value
+
+
 def read(root, target, extensions, max_bytes=MAX_BYTES, expected=None):
     if os.path.realpath(root) != root:
         raise ValueError('Preview directory changed')
@@ -111,6 +132,8 @@ def read(root, target, extensions, max_bytes=MAX_BYTES, expected=None):
 
 def run(request):
     operation = request['operation']
+    if operation == 'resolve-worktree':
+        return worktree(request['path'], request.get('exact', False))
     if operation == 'projects':
         try:
             result = tool([request['og'], 'project', 'list', '--json'])
@@ -154,6 +177,13 @@ def run(request):
                                 roots.append(canonical(path))
                             except OSError:
                                 pass
+        if not any(within(root, target) for root in roots):
+            try:
+                linked = worktree(os.path.dirname(target))
+                if within(linked['worktree'], target):
+                    roots.append(linked['worktree'])
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
         if not any(within(root, target) for root in roots):
             raise ValueError('File is outside the session and registered project directories')
         root = os.path.dirname(target)
