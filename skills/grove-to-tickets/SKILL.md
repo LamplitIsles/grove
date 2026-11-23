@@ -1,21 +1,19 @@
 ---
 name: grove-to-tickets
-description: Break a plan, spec, or conversation into FlickNote implementation tickets with explicit blocking edges.
+description: Break a spec or agreed plan into implementation tickets in the configured issue tracker.
 ---
 
 # To Tickets
 
 When the user requests tickets, break a plan, spec, or conversation into **tickets** — tracer-bullet vertical outcomes, each declaring the tickets that **block** it. When the source is a spec, every ticket belongs to that spec's single PR; tickets are execution units on one feature branch, not PR boundaries.
 
-Create one FlickNote note per new ticket through MCP `note_add`, numbered from `01` in dependency order. The leading H1 becomes the note title; the stored `content` is the ticket body. Each note names its repository and feature, and records dependencies as `Blocked by:` using ticket note IDs. Use `Status: ready-for-agent` for newly published tickets. Omit the `project` argument unless the user requests a destination. Do not create remote tracker issues.
-
-If FlickNote MCP cannot create or read the tickets, report the blocker.
+Follow the [issue tracker instructions](../grove-to-spec/ISSUE-TRACKER.md) when reading or publishing tickets.
 
 ## Process
 
 ### 1. Gather context
 
-Work from whatever is already in the conversation context. A numeric spec ID or `#ID` refers to a FlickNote note: read its `content` with MCP `note_get`. For other external references, ask for relevant content when no authorized reader is available.
+Read the full spec issue body if the conversation or user identifies one. For a plan or conversation without a spec issue, use the agreed context.
 
 ### 2. Explore the codebase (optional)
 
@@ -47,23 +45,23 @@ Choose the granularity and blocking edges yourself from the vertical-slice rules
 
 ### 5. Publish the tickets
 
-For a spec, create one note per ticket in dependency order. Add the returned IDs to a `## Tickets` section in the spec note after all notes exist. Each ticket references the spec ID, and its `Blocked by:` lists the prerequisite ticket IDs and titles. For tickets drafted directly from a conversation or plan, omit the spec reference and do not invent one. Read back the notes to verify their content and links. Keep all tickets for one spec on the same feature branch for one PR.
+Add same-PR slices that one owner can work through in sequence as checkboxes under `## Tickets` in the spec issue. Use a separate issue when a slice needs independent assignment, discussion, progress tracking or a linkable dependency. Create standalone tickets in dependency order and add their issue links under `## Tickets`. If there is no spec issue, publish the requested tickets as standalone issues with no `Spec:` line. Keep all tickets for one spec on the same feature branch for one PR.
 
 Orc coordinates the **frontier**: any ticket whose blockers are all done. For mixed tickets, sequence the category owners and their handoffs without turning those handoffs into artificial ticket dependencies. For a purely linear chain that means top to bottom.
 
 <ticket-template>
 
-# <NN> — <Ticket title>
+Issue title: <Ticket title>
 
 Repository: <repository identifier>
 Feature: <slug>
-Spec: #<note ID, only when sourced from a spec>
+Spec: #<parent issue number, or full URL for another repository>
 
 **What to build:** the end-to-end behaviour this ticket makes work, from the user's perspective — not a layer-by-layer implementation list.
 
 **Ownership and handoffs:** applicable Orc and Worker categories and their serial handoffs; each owner verifies and fixes its work.
 
-**Blocked by:** the IDs/titles of the tickets that gate this one, or "None — can start immediately".
+Blocked by: #<prerequisite issue number, or full URL for another repository>. Omit when there are no blockers.
 
 Status: ready-for-agent
 

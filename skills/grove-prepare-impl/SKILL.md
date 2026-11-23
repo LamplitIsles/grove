@@ -5,7 +5,7 @@ description: Turn an agreed discussion into an implementation-ready spec, then h
 
 Run only after product decisions are settled; do not restart discovery.
 
-1. Read and follow `grove-to-spec` completely to create an implementation-ready FlickNote spec, including documentation and agent guidance acceptance.
+1. Read and follow `grove-to-spec` completely to publish an implementation-ready issue, including documentation and agent guidance acceptance.
 2. Read existing tickets when present. Create tickets through `grove-to-tickets` only when the user explicitly requests them. A spec without tickets is a complete assignment.
 3. Read `grove-orc-impl` completely. Follow the captured task division and the user’s explicit assignments; one Worker handles its assigned implementation. Each owner handles its tests and fixes. Use one branch and one PR per repository, serially coordinating mixed work.
 

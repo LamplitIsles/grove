@@ -1,13 +1,11 @@
 # ADR Format
 
-ADRs are FlickNote notes. Use an H1 title beginning `ADR:`, identify the repository or context in the content, and return the note ID.
+Save an ADR as Markdown in `docs/adr/` in the applicable repository or context. Follow existing numbering and naming. For a new directory start with `0001-short-title.md`. Return the file path and link it from any related spec issue.
 
 ## Template
 
 ```md
-# ADR: {Short title of the decision}
-
-Repository or context: {identifier}
+# ADR {NNNN}: {Short title of the decision}
 
 {1-3 sentences: what's the context, what did we decide, and why.}
 ```

@@ -12,7 +12,7 @@ Review the diff between `HEAD` and the repository's default branch, unless the u
 
 Before every PR's initial independent review, Orc substantively reviews the whole final diff, spec, evidence and complexity and resolves deterministic issues through their category owner. On the initial review, Standards and Spec run as **independent Grove Reviewers** so they don't pollute each other's context. Later rounds resume only reviewers whose conclusions became stale.
 
-Implementation specs live in FlickNote. Use MCP for note lookup and full content; a forge issue or note summary is not the spec.
+The body of the spec issue is the authority for the Spec axis.
 
 ## Process
 
@@ -37,13 +37,13 @@ Before going further, confirm the fixed point resolves (`git rev-parse <fixed-po
 
 ### 2. Identify the spec source
 
-Look for the originating spec, in this order:
+Follow the [issue tracker instructions](../grove-to-spec/ISSUE-TRACKER.md). Look for the originating spec in this order.
 
-1. A FlickNote note ID the user passed. Read its full stored `content` with MCP `note_get`.
-2. A spec note ID in the PR description, branch context, or conversation. Read the full content with `note_get`.
-3. Search FlickNote with `note_find` using the repository and feature, then read the matching candidate with `note_get`. If multiple candidates remain, ask for the ID. If no spec exists for a PR, establish the agreed requirements before review; report missing requirements as a blocker rather than skipping the Spec axis. For a non-PR review with no spec, the **Spec** Reviewer may skip and report "no spec available".
+1. A spec issue the user identified.
+2. A spec issue linked in the PR description, branch context or conversation.
+3. A matching spec issue found by searching the configured tracker by repository and feature. If multiple candidates remain, ask for the issue URL.
 
-Pass the fetched FlickNote spec content to the Spec reviewer; a note ID alone may not be readable in its context. If MCP cannot read an identified note, report the blocker rather than silently skipping the Spec axis.
+Fetch the full body and pass it with the canonical URL to the Spec Reviewer. If an identified spec is unreadable, report the blocker. If a PR has no spec issue, establish the agreed requirements before review and report missing requirements as a blocker. For a non-PR review with no spec, the Spec axis may be skipped.
 
 ### 3. Identify the standards sources
 
@@ -77,7 +77,7 @@ Route normal changes to profiles `standards` and `spec`; high-risk changes to `s
 
 Start fresh contexts per initial axis, in parallel when possible, passing registered project, title, profile, spec reference, fixedPoint, reviewedHead and the complete axis-specific task/evidence below. If the diff is in a linked checkout, pass its absolute root in `worktree` to each `reviewer_start` and use that checkout for Orc self-review. Keep axes independent. Each task includes the exact fixed diff command, commit list and current HEAD. Reviewer reports carry their actual Reviewer ID and complete review target; an old PASS never covers a newer HEAD.
 
-Reviewers are read-only: they read actual code, diff, full FlickNote spec, standards and existing logs/screenshots; they do not run tests, builds, browsers or other verification. The appropriate implementation owner supplies head-bound evidence; Orc gathers its own category's missing evidence and sends Worker-owned evidence requests to the same Worker before acceptance. Prompt behavior is not a permission guarantee.
+Reviewers are read-only. They read actual code, diff, spec, standards and existing logs or screenshots. The appropriate implementation owner runs verification and supplies head-bound evidence. Orc gathers its category's missing evidence and sends Worker-owned evidence requests to the same Worker before acceptance. Prompt behavior is not a permission guarantee.
 
 For changed UI, give the Spec Reviewer the applicable visual and interaction requirements and Orc's actual screenshots and interaction evidence at relevant viewports and states. Use isolated test data. Missing evidence leaves the affected requirements unverified.
 
@@ -101,7 +101,7 @@ Give every reviewer this **evidence and proportionality discipline**:
 **Spec Reviewer task** — include:
 
 - The diff command and commit list.
-- The full fetched contents and ID of the FlickNote spec.
+- The full spec issue body and canonical URL, or the agreed requirements when there is no spec issue.
 - The brief: "Apply the evidence and proportionality discipline above. Report: (a) requirements the spec asked for that are missing or partial; (b) behaviour in the diff that wasn't asked for (scope creep); (c) requirements that look implemented but where the implementation looks wrong. Quote the spec line for each finding. For every retained finding include the smallest fix and estimated changed LOC. Under 500 words."
 
 For a non-PR review only, if the spec is missing, skip the Spec Reviewer and note this in the final report.

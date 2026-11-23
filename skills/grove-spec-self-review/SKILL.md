@@ -9,9 +9,9 @@ Review an existing spec against the product decision, repository reality, and th
 
 ### 1. Pin the review target
 
-Use the FlickNote note ID the user supplied. A numeric ID or `#ID` identifies a spec note; read its full `content` with MCP `note_get`. Otherwise use the spec already identified in the conversation, then search FlickNote with `note_find` by repository and feature. Ask for the ID only when more than one candidate remains plausible. If the spec is unreadable, report the blocker rather than using a summary.
+Follow the [issue tracker instructions](../grove-to-spec/ISSUE-TRACKER.md). Use the spec issue identified by the user or conversation, then search the configured tracker by repository and feature. Ask for the URL if the target remains ambiguous. Report an unreadable spec as a blocker.
 
-Read the entire spec. If tickets already exist for it, read them only to detect drift; the spec remains the authority. Revise its stored content through MCP `note_write` or precise edits, then read it back.
+Read the full issue body. Read existing inline or linked tickets to detect drift. Revise the spec issue and read it back.
 
 **Done when:** one exact spec and its stated delivery boundary are pinned.
 
@@ -124,4 +124,4 @@ Report concisely:
 4. **Remaining assumptions/deferred work** — only concrete items.
 5. **Readiness** — `ready-for-agent` or what prevents it.
 
-Show the spec note ID. Do not begin implementation or ticket publication.
+Show the spec issue URL. End this self-review before the calling workflow implements or publishes tickets.

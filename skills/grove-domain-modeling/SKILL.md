@@ -29,7 +29,7 @@ If a `CONTEXT-MAP.md` exists at the root, the repo has multiple contexts. The ma
 │       └── CONTEXT.md
 ```
 
-Create local glossary files lazily — only when you have something to write. If no `CONTEXT.md` exists, create one when the first term is resolved. ADRs are FlickNote notes: find relevant ones by repository or context with MCP `note_find`, then read their full content with `note_get`.
+Create glossary files when you resolve a term. Read the relevant ADRs from the repository's `docs/adr/` or the applicable context's `docs/adr/` in a multi-context repository.
 
 ## During the session
 
@@ -63,4 +63,4 @@ Only create an ADR when all three are true:
 2. **Surprising without context** — a future reader will wonder "why did they do it this way?"
 3. **The result of a real trade-off** — there were genuine alternatives and you picked one for specific reasons
 
-If any of the three is missing, skip the ADR. Use the format in [ADR-FORMAT.md](./ADR-FORMAT.md). Save ADRs with MCP `note_add`, omitting `project` unless the user requests a destination; read back the stored content. If FlickNote MCP is unavailable, report the archival blocker.
+When all three apply, save the ADR in the appropriate `docs/adr/` using [ADR-FORMAT.md](ADR-FORMAT.md). Record decisions that only constrain the current PR in its spec issue.

@@ -14,9 +14,9 @@ Identify:
 - the last reviewed HEAD;
 - the current HEAD and exact delta since that review;
 - the original Standards and Spec reviewer targets and relevant visual evidence;
-- the findings or conclusions affected by the delta.
+- the findings or conclusions affected by the delta or by changes to the spec requirements.
 
-Use a recorded commit or reliable turn history for the reviewed HEAD. Follow the Orc's captured review policy and the user's task-specific direction. If no completed review exists, route to an initial `$grove-code-review`. If the prior reviewer targets are unavailable, retain the reviewed HEAD and replace only the missing reviewer when review work is actually needed.
+Use a recorded commit or reliable turn history for the reviewed HEAD. When the review has a spec issue, read its current body using the [issue tracker instructions](../grove-to-spec/ISSUE-TRACKER.md). Compare its requirements with the content sent for the previous review. Reopen the Spec axis for changed requirements even when the issue URL and code HEAD match. Status or checklist completion alone leaves the requirements intact. Follow the Orc's captured review policy and the user's task-specific direction. If no completed review exists, route to an initial `$grove-code-review`. If the prior reviewer targets are unavailable, retain the reviewed HEAD and replace only the missing reviewer when review work is actually needed.
 
 This step is complete when the post-review delta and every prior conclusion it could affect are named.
 
@@ -24,7 +24,7 @@ This step is complete when the post-review delta and every prior conclusion it c
 
 Use the smallest surface that can disprove the affected conclusion:
 
-- **Stop** when no code, agent/machine-consumed contract, or applicable design evidence/user-approved deviation changed.
+- **Stop** when no code, spec requirement, agent/machine-consumed contract, or applicable design evidence/user-approved deviation changed.
 - **Focused review** when changed hunks, their directly affected callers/contracts, and the originating findings bound the stale reasoning. A local user-facing wording or contract correction can remain focused when authorization, control flow, and downstream assumptions are unchanged.
 - **Full re-review** only when the delta cannot be bounded without reconsidering the integrated branch: for example, it replaces the approach, crosses several coupled modules, changes a security or transaction boundary, or makes the recorded baseline unreliable.
 
@@ -34,7 +34,7 @@ This step is complete when every stale conclusion has a proportionate review sur
 
 ## Run the selected review
 
-- For focused review, send with reviewer_send to only the affected original Reviewer with the reviewed-HEAD-to-current-HEAD delta, the originating finding or requirement, and relevant verification evidence. Ask it to confirm or reject only that bounded change.
+- For focused review, send with reviewer_send to only the affected original Reviewer with the reviewed-HEAD-to-current-HEAD delta, the originating finding or requirement, and relevant verification evidence. Include the current spec body when its requirements changed. Ask the Reviewer to confirm or reject the bounded change.
 - For full re-review, send with reviewer_send to the original Standards and Spec Reviewers with the current complete diff and updated sources. Their retained axis context is useful evidence; a new reviewer is a fallback only when the original cannot be resumed.
 - Obtain the smallest relevant checks from the category owner: Orc runs its own checks and assigns Worker-owned checks to the original Worker. Read their current-head evidence. Reviewers do not run tests, builds or browsers.
 

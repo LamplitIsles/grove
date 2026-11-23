@@ -1,13 +1,11 @@
 ---
 name: grove-to-spec
-description: Turn the current conversation into a FlickNote implementation spec, then run spec self-review to determine readiness.
+description: Publish the current conversation as an implementation spec in the configured issue tracker, then run spec self-review.
 ---
 
 Turn the current conversation and codebase context into one implementation-ready spec. Do not restart discovery as an interview. Draft from the known context, then use the shared spec review workflow to revise it and determine readiness.
 
-Create each new spec as one FlickNote note through MCP `note_add`. Its stored `content` is the authority; use `note_get` and `note_write` or precise edits to revise it. The leading H1 becomes the note title and is absent from stored `content`. Give the body a repository identifier and concise feature slug. Omit the `project` argument unless the user requests a destination. One spec is the delivery boundary for exactly one PR. Tickets are work units within that PR.
-
-If FlickNote MCP cannot create or read the spec, report the blocker.
+Follow the [issue tracker instructions](ISSUE-TRACKER.md) to publish one issue per new spec. Use the issue body as the authority for exactly one PR. Give the body a repository identifier and concise feature slug. Tickets are optional work units within that PR.
 
 ## Process
 
@@ -15,13 +13,13 @@ If FlickNote MCP cannot create or read the spec, report the blocker.
 
 2. Choose the highest existing seam that can verify the observable feature. Add a seam only when no existing one can test the promised behaviour. Make technical testing decisions yourself.
 
-3. Draft and save the spec note with `Status: draft`, using the template below. Keep its returned note ID for subsequent edits and tickets.
+3. Publish the spec issue with `Status: draft`, using the template below. Keep its canonical issue URL for subsequent edits, tickets and the PR.
 
-4. After saving the draft, discover and read `grove-spec-self-review` by its exact frontmatter name, then follow it against the new note ID in the same turn. Do not mark the spec `ready-for-agent` independently; that skill owns revision, clarification, and the readiness decision. Return the note ID and final status.
+4. After publishing the draft, discover and read `grove-spec-self-review` by its exact frontmatter name, then follow it against the issue URL in the same turn. That skill owns revision, clarification and the readiness decision. Return the issue URL and final status.
 
 <spec-template>
 
-# Spec: <feature>
+Issue title: Spec: <feature>
 
 Repository: <repository identifier>
 Feature: <slug>
@@ -66,5 +64,9 @@ Name nearby capabilities intentionally excluded from this PR.
 ## Further Notes
 
 Only context needed to implement or review the spec.
+
+## Tickets
+
+Include this section when there are tickets. Use checkboxes for work tracked in this issue and links for work tracked in separate issues.
 
 </spec-template>
