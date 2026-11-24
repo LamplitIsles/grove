@@ -1,6 +1,6 @@
 ---
 name: grove-to-tickets
-description: Break a spec or agreed plan into implementation tickets in the configured issue tracker.
+description: Break a spec or agreed plan into implementation tickets in the registered project's issue tracker.
 ---
 
 # To Tickets
@@ -55,13 +55,13 @@ Issue title: <Ticket title>
 
 Repository: <repository identifier>
 Feature: <slug>
-Spec: #<parent issue number, or full URL for another repository>
+Spec: #<parent issue number>
 
 **What to build:** the end-to-end behaviour this ticket makes work, from the user's perspective — not a layer-by-layer implementation list.
 
 **Ownership and handoffs:** applicable Orc and Worker categories and their serial handoffs; each owner verifies and fixes its work.
 
-Blocked by: #<prerequisite issue number, or full URL for another repository>. Omit when there are no blockers.
+Blocked by: #<prerequisite issue number>. Omit when there are no blockers.
 
 Status: ready-for-agent
 

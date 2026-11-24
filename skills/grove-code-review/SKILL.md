@@ -41,7 +41,7 @@ Follow the [issue tracker instructions](../grove-to-spec/ISSUE-TRACKER.md). Look
 
 1. A spec issue the user identified.
 2. A spec issue linked in the PR description, branch context or conversation.
-3. A matching spec issue found by searching the configured tracker by repository and feature. If multiple candidates remain, ask for the issue URL.
+3. A matching spec issue found by searching the project's issues by feature. If multiple candidates remain, ask for the issue URL.
 
 Fetch the full body and pass it with the canonical URL to the Spec Reviewer. If an identified spec is unreadable, report the blocker. If a PR has no spec issue, establish the agreed requirements before review and report missing requirements as a blocker. For a non-PR review with no spec, the Spec axis may be skipped.
 

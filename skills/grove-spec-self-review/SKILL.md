@@ -9,7 +9,7 @@ Review an existing spec against the product decision, repository reality, and th
 
 ### 1. Pin the review target
 
-Follow the [issue tracker instructions](../grove-to-spec/ISSUE-TRACKER.md). Use the spec issue identified by the user or conversation, then search the configured tracker by repository and feature. Ask for the URL if the target remains ambiguous. Report an unreadable spec as a blocker.
+Follow the [issue tracker instructions](../grove-to-spec/ISSUE-TRACKER.md). Use the spec issue identified by the user or conversation, then search the project's issues by feature. Ask for the URL if the target remains ambiguous. Report an unreadable spec as a blocker.
 
 Read the full issue body. Read existing inline or linked tickets to detect drift. Revise the spec issue and read it back.
 

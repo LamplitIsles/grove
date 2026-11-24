@@ -15,7 +15,7 @@ You need a checkout of this repository and:
 - For Codex sessions, a compatible [Codex CLI](https://github.com/openai/codex) on `PATH`, signed in on the machine running Grove, and access to the chosen models. Grove launches its own app-server. Alternatively, Pi uses the SDK installed with the repository and an existing Pi provider configuration and credentials; see [Codex and Pi sessions](docs/operations.md#codex-and-pi-sessions).
 - A browser and authenticator capable of WebAuthn with user verification. Local loopback works for first use; remote access requires a secure HTTPS origin and appropriate hosting. Use the same origin for sign-in and server configuration.
 
-Configure an [issue tracker](#issue-tracker) before using spec and ticket workflows. Research uses a separately configured FlickNote MCP server. PR operations use Organon's forge access. Model availability and provider access depend on your account.
+Spec, ticket and PR workflows use Organon's forge tools for the registered project. Research uses a separately configured FlickNote MCP server. Model availability and provider access depend on your account.
 
 ## Start locally
 
@@ -68,18 +68,6 @@ The task division is editable in the instance's `prompts/role-division.md`; chan
 ### Workflow skills
 
 The Orc composer offers **Discuss**, **Implement**, **Review**, **Re-review**, **Research** and **Diagnose** shortcuts. They insert a skill invocation into the draft; you still choose when to send it. Other shipped [`grove-` skills](skills/) cover domain modeling, grilling, creating and self-reviewing specs, breaking work into tickets, and implementation from a ready spec. Skill search provides access to available skills and their descriptions.
-
-### Issue tracker
-
-In the instance's global `AGENTS.md`, name the issue tracker, how to select the target repository for each project, and which tools agents may use to find, read, create and edit issues. Put the policy where each enabled backend loads it, such as `$CODEX_HOME/AGENTS.md` (normally `~/.codex/AGENTS.md`) for Codex and `AGENTS.md` in the configured Pi agent directory. For example, an instance with Organon issue tools can use:
-
-```md
-## Issue tracker
-
-Use the registered project's forge issue tracker. Use Organon's issue tools
-to find, read, create and edit issues for that project. Verify the destination
-before writing, including when a checkout is a fork or mirror.
-```
 
 An issue body holds the spec for one PR. Track implementation slices in its checklist or in linked issues when they need independent tracking. Keep durable architecture decisions in `docs/adr/` and archive research in FlickNote.
 

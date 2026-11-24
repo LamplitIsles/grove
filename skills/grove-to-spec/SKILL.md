@@ -1,6 +1,6 @@
 ---
 name: grove-to-spec
-description: Publish the current conversation as an implementation spec in the configured issue tracker, then run spec self-review.
+description: Publish the current conversation as a project issue, then self-review the implementation spec.
 ---
 
 Turn the current conversation and codebase context into one implementation-ready spec. Do not restart discovery as an interview. Draft from the known context, then use the shared spec review workflow to revise it and determine readiness.
